@@ -108,6 +108,9 @@ jobs:
       - name: --device gpu without a GPU fails cleanly
         run: bash scripts/check_no_gpu.sh
 
+      - name: --visual-interval errors before model loading
+        run: bash scripts/check_visual.sh
+
   docs:
     runs-on: ubuntu-24.04
     steps:

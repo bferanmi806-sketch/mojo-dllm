@@ -3,7 +3,7 @@
     mojo-dllm run      --model M --prompt TEXT [--max-tokens N] [--steps N] [--block-length N]
                        [--seed N] [--temperature T] [--threads N] [--device cpu|gpu]
                        [--remasking low_confidence|random] [--threshold P] [--dual-cache]
-                       [--no-chat] [--full-logits] [--no-early-stop] [--visual] [--verbose]
+                       [--no-chat] [--full-logits] [--no-early-stop] [--visual] [--visual-interval N] [--verbose]
                        [--dump-step-stats] [--json]
     mojo-dllm tokenize --model M --prompt TEXT [--no-chat]
     mojo-dllm inspect  MODEL.gguf
@@ -12,14 +12,15 @@
 
 from std.ffi import ErrNo, external_call, c_int
 from std.math import isfinite
+from std.os import getenv
 from std.sys import argv, exit, num_logical_cores
 from std.time import perf_counter_ns
 
 from cli.args import Args, parse_csv_ints, unknown_flag_error
+from cli.visual import CanvasPrinter
 from mojo_dllm.formats.gguf import GGUFFile, GGUF_TYPE_ARRAY
 from mojo_dllm.diffusion.sampler import (
     GenConfig,
-    StepObserver,
     generate_observed,
 )
 from mojo_dllm.gpu.model import GpuDiffusionLM
@@ -74,6 +75,7 @@ def command_spec(command: String) raises -> CommandSpec:
                 "seed",
                 "threads",
                 "device",
+                "visual-interval",
             ],
             boolean_flags(),
             ["model", "prompt"],
@@ -104,7 +106,8 @@ def command_usage(command: String) raises -> String:
             + "                [--remasking low_confidence|random] [--threshold"
             " P] [--dual-cache]\n"
             + "                [--no-chat] [--full-logits] [--no-early-stop]"
-            " [--visual] [--verbose] [--dump-step-stats] [--json]"
+            " [--visual] [--visual-interval N] [--verbose]"
+            " [--dump-step-stats] [--json]"
         )
     if command == "tokenize":
         return "  mojo-dllm tokenize --model M --prompt TEXT [--no-chat]"
@@ -360,64 +363,6 @@ def encode_prompt(
     return tok.encode(chat_prompt(arch, text))
 
 
-struct CanvasPrinter(StepObserver):
-    """Redraws the canvas after every step when --visual is on.
-
-    Masked positions are teal blocks, tokens committed in this step are bold
-    ember, earlier tokens plain. It owns the tokenizer so it can decode as it
-    draws; `cmd_run` decodes the final text through it too.
-    """
-
-    var tok: Tokenizer
-    var start: Int
-    var mask_id: Int
-    var enabled: Bool
-
-    def __init__(
-        out self, var tok: Tokenizer, start: Int, mask_id: Int, enabled: Bool
-    ):
-        self.tok = tok^
-        self.start = start
-        self.mask_id = mask_id
-        self.enabled = enabled
-
-    def on_step(
-        mut self, tokens: List[Int], committed: List[Int], step: Int, total: Int
-    ) raises:
-        if not self.enabled:
-            return
-        var esc = chr(27)
-        var out = esc + "[2J" + esc + "[H"
-        out += (
-            esc
-            + "[38;5;80mmojo-dllm"
-            + esc
-            + "[0m  denoising step "
-            + String(step)
-            + " / "
-            + String(total)
-            + "\n\n"
-        )
-        for p in range(self.start, len(tokens)):
-            var t = tokens[p]
-            if t == self.mask_id:
-                out += esc + "[38;5;30m\u2591" + esc + "[0m"
-                continue
-            if t == self.tok.eos_id or t == self.tok.eot_id:
-                out += esc + "[38;5;240m\u00b7" + esc + "[0m"
-                continue
-            var piece = self.tok.decode([t])
-            var fresh = False
-            for c in committed:
-                if c == p:
-                    fresh = True
-            if fresh:
-                out += esc + "[1;38;5;208m" + piece + esc + "[0m"
-            else:
-                out += piece
-        print(out + "\n", flush=True)
-
-
 def cmd_tokenize(a: Args) raises:
     var g = GGUFFile(a.get("model"))
     var tok = Tokenizer(g)
@@ -429,6 +374,15 @@ def cmd_tokenize(a: Args) raises:
 
 
 def cmd_run(a: Args) raises:
+    var interval: Int
+    try:
+        interval = a.int_or("visual-interval", 1)
+    except:
+        raise Error("--visual-interval needs an integer")
+    if interval < 1:
+        raise Error("--visual-interval must be at least 1")
+    if a.has("visual-interval") and not a.has("visual"):
+        raise Error("--visual-interval needs --visual")
     var threads = a.int_or("threads", num_logical_cores())
     var cfg = GenConfig()
     cfg.gen_length = a.int_or("max-tokens", 128)
@@ -537,9 +491,16 @@ def _run[
         if s >= 0:
             cfg.stop_ids.append(s)
     var printer = CanvasPrinter(
-        tok^, len(prompt), model.config().mask_id, a.has("visual")
+        tok^,
+        len(prompt),
+        model.config().mask_id,
+        a.has("visual"),
+        a.int_or("visual-interval", 1),
+        external_call["isatty", c_int](c_int(1)) != 0,
+        getenv("NO_COLOR"),
     )
     var res = generate_observed(model, prompt, cfg, printer)
+    printer.finish(res.tokens)
     var gen = List[Int]()
     for i in range(len(prompt), len(res.tokens)):
         var t = res.tokens[i]

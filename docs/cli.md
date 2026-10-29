@@ -33,7 +33,8 @@ stops the run (see [Errors](#errors)).
 | `--no-chat` | off | skip the chat template |
 | `--full-logits` | off | compute logits for every position, as a generic runtime would (for benchmarking) |
 | `--no-early-stop` | off | run every step even after the answer is final (the benchmark and parity harnesses use it) |
-| `--visual` | off | redraw the canvas after every step: masked positions as teal blocks, tokens committed in that step in bold orange |
+| `--visual` | off | show the canvas: masked positions as teal blocks, tokens committed in that step in bold orange when colour is enabled |
+| `--visual-interval N` | 1 | redraw every N steps and at the final step; requires `--visual` and N at least 1 |
 | `--verbose` | off | timings and memory after the text |
 | `--dump-step-stats` | off | one line per denoising step |
 | `--json` | off | one JSON object with timings, tokens and text |
@@ -44,6 +45,26 @@ position after the prompt that is still masked or holds such a token holds
 such a token, no later step can change the printed text, because steps only
 fill masked positions. The result is the same text with fewer steps, and
 `--json` reports `"stopped_early": true`. `--no-early-stop` runs every step.
+
+### Visual output
+
+The final canvas always appears, including when generation stops early between
+redraws. Its step number is the last observed step; any remaining masks stay
+visible. A final frame that was already drawn is not repeated.
+
+| stdout | `NO_COLOR` | colour codes | clear + home (`ESC[2J ESC[H`) |
+|---|---|---|---|
+| terminal | unset or empty | yes | yes |
+| terminal | non-empty | no | yes |
+| not a terminal | any | no | no; frames separated by one blank line |
+
+Without colour, newly committed tokens have no highlight. Redirected frames
+contain no ANSI escapes. With `--visual --json`, frames still go to stdout
+before the JSON line; consumers should select the line starting with `{`.
+
+Invalid `--visual-interval` values and use without `--visual` exit with status
+1 before model loading. The messages name `--visual-interval`: `must be at
+least 1`, `needs --visual`, or `needs an integer`.
 
 ## `tokenize`
 
