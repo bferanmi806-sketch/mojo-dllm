@@ -79,6 +79,12 @@ def test_sampler_flags_pass_through() -> None:
     ]
 
 
+def test_mask_suppression_opt_out_does_not_consume_the_prompt() -> None:
+    a = parse_run_args(["--no-suppress-mask", "Hi"])
+    assert a.prompt == "Hi"
+    assert a.passthrough == ["--no-suppress-mask"]
+
+
 def test_boolean_flags_match_the_binary() -> None:
     src = (ROOT / "src/main.mojo").read_text()
     body = src.split("def boolean_flags()", 1)[1].split("return [", 1)[1].split("]", 1)[0]

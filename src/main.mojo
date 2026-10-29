@@ -2,8 +2,8 @@
 
     mojo-dllm run      --model M --prompt TEXT [--max-tokens N] [--steps N] [--block-length N]
                        [--seed N] [--temperature T] [--threads N] [--device cpu|gpu]
-                       [--remasking low_confidence|random] [--threshold P] [--dual-cache]
-                       [--no-chat] [--full-logits] [--no-early-stop] [--visual] [--verbose]
+                       [--remasking S] [--threshold P] [--dual-cache]
+                       [--no-chat] [--full-logits] [--no-early-stop] [--no-suppress-mask] [--visual] [--verbose]
                        [--dump-step-stats] [--json]
     mojo-dllm tokenize --model M --prompt TEXT [--no-chat]
     mojo-dllm inspect  MODEL.gguf
@@ -101,10 +101,10 @@ def command_usage(command: String) raises -> String:
             " [--steps 128] [--block-length 32]\n"
             + "                [--seed 42] [--temperature 0] [--threads N]"
             " [--device cpu|gpu]\n"
-            + "                [--remasking low_confidence|random] [--threshold"
-            " P] [--dual-cache]\n"
+            + "                [--remasking S] [--threshold P] [--dual-cache]\n"
             + "                [--no-chat] [--full-logits] [--no-early-stop]"
-            " [--visual] [--verbose] [--dump-step-stats] [--json]"
+            " [--no-suppress-mask] [--visual] [--verbose] [--dump-step-stats]"
+            " [--json]"
         )
     if command == "tokenize":
         return "  mojo-dllm tokenize --model M --prompt TEXT [--no-chat]"
@@ -440,6 +440,7 @@ def cmd_run(a: Args) raises:
     cfg.threshold = a.float_or("threshold", 0.0)
     cfg.full_logits = a.has("full-logits")
     cfg.dual_cache = a.has("dual-cache")
+    cfg.suppress_mask = not a.has("no-suppress-mask")
     cfg.threads = threads
     var t0 = perf_counter_ns()
     var g = GGUFFile(a.get("model"))
@@ -720,6 +721,7 @@ def boolean_flags() -> List[String]:
         "json",
         "visual",
         "no-early-stop",
+        "no-suppress-mask",
         "dual-cache",
     ]
 

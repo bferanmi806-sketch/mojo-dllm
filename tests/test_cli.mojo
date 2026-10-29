@@ -45,7 +45,7 @@ def test_documented_booleans_are_parsed_without_values() raises:
         assert_true(a.has(flag))
         assert_equal(len(a.unknown), 0)
         count += 1
-    assert_equal(count, 8)
+    assert_equal(count, 9)
     assert_equal(len(flags), count)
 
 
@@ -79,6 +79,16 @@ def test_usage_lists_all_commands() raises:
         assert_true(text.__contains__("mojo-dllm " + command + " "))
 
 
+def test_no_suppress_mask_is_a_run_boolean() raises:
+    var spec = command_spec("run")
+    var args = Args(
+        ["mojo-dllm", "run", "--no-suppress-mask"], spec.values, spec.booleans
+    )
+    assert_true(args.has("no-suppress-mask"))
+    assert_equal(len(args.unknown), 0)
+    assert_true(usage_for("run").__contains__("--no-suppress-mask"))
+
+
 def _parse(command: String, rest: List[String]) raises -> Args:
     var spec = command_spec(command)
     var argv = List[String](["mojo-dllm", command])
@@ -94,7 +104,7 @@ def _check(command: String, rest: List[String]) raises -> String:
 def test_every_command_declares_its_flags() raises:
     var run = command_spec("run")
     assert_equal(len(run.values), 11)
-    assert_equal(len(run.booleans), 8)
+    assert_equal(len(run.booleans), 9)
     var tokenize = command_spec("tokenize")
     assert_equal(len(tokenize.values), 2)
     assert_equal(len(tokenize.booleans), 1)

@@ -20,7 +20,7 @@ from launcher.verified import default_store
 # boolean_flags() in src/main.mojo.
 BOOLEAN_FLAGS = (
     "--verbose", "--full-logits", "--no-chat", "--dump-step-stats",
-    "--json", "--visual", "--no-early-stop", "--dual-cache",
+    "--json", "--visual", "--no-early-stop", "--no-suppress-mask", "--dual-cache",
 )
 EXAMPLE = './mojo-dllm run "Explain speculative decoding in two sentences."'
 

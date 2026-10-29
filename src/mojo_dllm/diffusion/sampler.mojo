@@ -37,6 +37,10 @@ from mojo_dllm.sys.parallel import parallel_for
 
 
 struct GenConfig(Copyable, Movable):
+    """Sampling options. Mask suppression is on by default. Dream keeps the
+    entropy default; origin uses independent transfers, random ranks uniforms.
+    """
+
     var gen_length: Int
     var block_length: Int
     var steps: Int
@@ -44,6 +48,8 @@ struct GenConfig(Copyable, Movable):
     var remasking: String
     var seed: Int
     var mask_id: Int
+    var suppress_mask: Bool
+    """Exclude mask_id from token selection and softmax; disable for parity."""
     var full_logits: Bool
     var eps: Float64
     """Dream's final timestep: timesteps run linspace(1, eps, steps + 1)."""
@@ -71,6 +77,7 @@ struct GenConfig(Copyable, Movable):
         self.remasking = "low_confidence"
         self.seed = 42
         self.mask_id = 126336
+        self.suppress_mask = True
         self.full_logits = False
         self.eps = 1e-3
         self.threads = 1
@@ -186,11 +193,15 @@ def select_top(conf: List[Float64], k: Int) -> List[Int]:
     return out^
 
 
-def argmax_and_prob(row: F32Ptr, vocab: Int) -> Tuple[Int, Float64]:
-    """First argmax and its softmax probability, accumulated in f64."""
-    var best = 0
-    var mx = row.unsafe_load(0)
+def argmax_and_prob(
+    row: F32Ptr, vocab: Int, mask_id: Int = -1
+) -> Tuple[Int, Float64]:
+    """First argmax and its softmax probability, excluding mask_id, in f64."""
+    var best = 1 if mask_id == 0 else 0
+    var mx = row.unsafe_load(best)
     for v in range(1, vocab):
+        if v == mask_id:
+            continue
         var x = row.unsafe_load(v)
         if x > mx:
             mx = x
@@ -198,22 +209,31 @@ def argmax_and_prob(row: F32Ptr, vocab: Int) -> Tuple[Int, Float64]:
     var z = Float64(0)
     var m64 = Float64(mx)
     for v in range(vocab):
+        if v == mask_id:
+            continue
         z += exp(Float64(row.unsafe_load(v)) - m64)
     return (best, 1.0 / z)
 
 
 def _gumbel_argmax(
-    row: F32Ptr, vocab: Int, temperature: Float64, mut rng: Rng
+    row: F32Ptr,
+    vocab: Int,
+    temperature: Float64,
+    mut rng: Rng,
+    mask_id: Int = -1,
 ) -> Int:
     """argmax of exp(logits) / (-log U)^temperature, the reference's noise, in f64.
 
     Compared in log space, which ranks identically and does not overflow:
-    logit - temperature * log(-log U).
+    logit - temperature * log(-log U). mask_id consumes a draw but cannot win.
     """
-    var best = 0
+    var best = 1 if mask_id == 0 else 0
     var best_v = Float64(-1e300)
     for v in range(vocab):
         var u = rng.uniform()
+        # Keep one draw per vocabulary entry, even for the excluded mask.
+        if v == mask_id:
+            continue
         var score = Float64(row.unsafe_load(v)) - temperature * log(-log(u))
         if score > best_v:
             best_v = score
@@ -227,6 +247,7 @@ def _greedy_rows(
     vocab: Int,
     algorithm: String,
     threads: Int,
+    mask_id: Int = -1,
 ) raises -> Tuple[List[Int], List[Float64]]:
     """Greedy token and confidence for each requested logits row, rows in parallel.
 
@@ -243,11 +264,11 @@ def _greedy_rows(
     def work(j: Int) {imm}:
         var row = logits.unsafe_offset(row_of[j] * vocab)
         if algorithm == "llada":
-            var r = argmax_and_prob(row, vocab)
+            var r = argmax_and_prob(row, vocab, mask_id)
             tp[unsafe_offset=j] = Int64(r[0])
             cp[unsafe_offset=j] = r[1]
         else:
-            var r = _confidence(row, vocab, algorithm)
+            var r = _confidence(row, vocab, algorithm, mask_id)
             tp[unsafe_offset=j] = Int64(r[0])
             cp[unsafe_offset=j] = r[1]
 
@@ -344,19 +365,21 @@ def _generate_llada[
     var P = len(prompt)
     var L = P + cfg.gen_length
     var vocab = model.config().vocab
+    var mask_id = cfg.mask_id if cfg.suppress_mask else -1
     var res = GenResult()
     for t in prompt:
         res.tokens.append(t)
     for _ in range(cfg.gen_length):
         res.tokens.append(cfg.mask_id)
     var rng = Rng(cfg.seed)
-    # Greedy decoding scores each row from four numbers the device reduces, so
-    # the logits never leave it. Gumbel noise needs the rows on the host, and
-    # `full_logits` exists to measure that copy.
+    # Device reductions include every vocabulary entry. Suppression needs the
+    # full row on the host, as does Gumbel noise. With both off, only the token
+    # and four statistics per row leave the device (`full_logits` disables it).
     var use_stats = (
         cfg.temperature <= 0
         and not cfg.full_logits
         and not cfg.dual_cache
+        and not cfg.suppress_mask
         and model.device_row_stats()
     )
     var logits = Floats(
@@ -409,12 +432,14 @@ def _generate_llada[
                 # path stays sequential.
                 for j in range(len(cand)):
                     var row = logits.ptr().unsafe_offset(row_of[j] * vocab)
-                    var tok = _gumbel_argmax(row, vocab, cfg.temperature, rng)
+                    var tok = _gumbel_argmax(
+                        row, vocab, cfg.temperature, rng, mask_id
+                    )
                     x0.append(tok)
                     if cfg.remasking == "random":
                         conf.append(rng.uniform())
                     else:
-                        conf.append(_prob_of(row, vocab, tok))
+                        conf.append(_prob_of(row, vocab, tok, mask_id))
             elif use_stats:
                 x0 = stats.tok.copy()
                 for j in range(len(cand)):
@@ -424,7 +449,7 @@ def _generate_llada[
                         conf.append(_confidence_from_stats(stats, j, "llada"))
             else:
                 var greedy = _greedy_rows(
-                    logits.ptr(), row_of, vocab, "llada", cfg.threads
+                    logits.ptr(), row_of, vocab, "llada", cfg.threads, mask_id
                 )
                 x0 = greedy[0].copy()
                 if cfg.remasking == "random":
@@ -456,28 +481,40 @@ def _generate_llada[
     return res^
 
 
-def _prob_of(row: F32Ptr, vocab: Int, tok: Int) -> Float64:
-    var mx = row.unsafe_load(0)
+def _prob_of(row: F32Ptr, vocab: Int, tok: Int, mask_id: Int = -1) -> Float64:
+    """Softmax probability of tok, with mask_id excluded from the distribution.
+    """
+    if tok == mask_id:
+        return 0.0
+    var first = 1 if mask_id == 0 else 0
+    var mx = row.unsafe_load(first)
     for v in range(1, vocab):
+        if v == mask_id:
+            continue
         mx = max(mx, row.unsafe_load(v))
     var z = Float64(0)
     for v in range(vocab):
+        if v == mask_id:
+            continue
         z += exp(Float64(row.unsafe_load(v)) - Float64(mx))
     return exp(Float64(row.unsafe_load(tok)) - Float64(mx)) / z
 
 
 def _confidence(
-    row: F32Ptr, vocab: Int, algorithm: String
+    row: F32Ptr, vocab: Int, algorithm: String, mask_id: Int = -1
 ) -> Tuple[Int, Float64]:
     """Greedy token and Dream's confidence for it, in f64.
 
     entropy:      sum_v p_v log p_v (negative entropy; larger is surer)
     maskgit_plus: p(x0)
     topk_margin:  p(top1) - p(top2)
+    mask_id is excluded from the argmax and every probability sum.
     """
-    var best = 0
-    var mx = row.unsafe_load(0)
+    var best = 1 if mask_id == 0 else 0
+    var mx = row.unsafe_load(best)
     for v in range(1, vocab):
+        if v == mask_id:
+            continue
         var x = row.unsafe_load(v)
         if x > mx:
             mx = x
@@ -486,6 +523,8 @@ def _confidence(
     var z = Float64(0)
     var second = Float64(-1e300)
     for v in range(vocab):
+        if v == mask_id:
+            continue
         var x = Float64(row.unsafe_load(v))
         z += exp(x - m64)
         if v != best and x > second:
@@ -498,6 +537,8 @@ def _confidence(
     var logz = log(z)
     var neg_h = Float64(0)
     for v in range(vocab):
+        if v == mask_id:
+            continue
         var lp = Float64(row.unsafe_load(v)) - m64 - logz
         neg_h += exp(lp) * lp
     return (best, neg_h)
@@ -526,8 +567,10 @@ def _generate_dream[
 
     The whole generation region is one canvas. At step i of S, with
     t = 1 - i(1-eps)/S and s = 1 - (i+1)(1-eps)/S, Dream commits
-    int(n_masked * (1 - s/t)) of the masked positions with the highest
-    confidence, and every remaining one at the last step. Logits are shifted:
+    int(n_masked * (1 - s/t)) positions by confidence, or uniform random
+    confidence for llama.cpp's random rule. Dream's origin rule instead makes
+    independent transfers with probability 1 - s/t, without flooring a count.
+    Every remaining position commits at the last step. Logits are shifted:
     the row before a position scores it.
     """
     if cfg.gen_length <= 0 or cfg.steps <= 0:
@@ -539,11 +582,13 @@ def _generate_dream[
         algorithm != "entropy"
         and algorithm != "maskgit_plus"
         and algorithm != "topk_margin"
+        and algorithm != "origin"
+        and algorithm != "random"
     ):
         raise Error(
             "unknown Dream algorithm: "
             + cfg.remasking
-            + " (entropy, maskgit_plus, topk_margin)"
+            + " (entropy, maskgit_plus, topk_margin, origin, random)"
         )
     if cfg.temperature > 0:
         raise Error(
@@ -560,12 +605,19 @@ def _generate_dream[
             "Dream needs at least one prompt token (logits are shifted)"
         )
     var vocab = model.config().vocab
+    var mask_id = cfg.mask_id if cfg.suppress_mask else -1
     var res = GenResult()
     for t in prompt:
         res.tokens.append(t)
     for _ in range(cfg.gen_length):
         res.tokens.append(cfg.mask_id)
-    var use_stats = model.device_row_stats()
+    var rng = Rng(cfg.seed)
+    # origin and random choose positions themselves, not by entropy.
+    var scoring = (
+        "maskgit_plus" if algorithm == "origin"
+        or algorithm == "random" else algorithm
+    )
+    var use_stats = not cfg.suppress_mask and model.device_row_stats()
     var logits = Floats(1 if use_stats else cfg.gen_length * vocab)
     var stats = RowStats()
     var t_start = perf_counter_ns()
@@ -587,7 +639,7 @@ def _generate_dream[
             res.forward_passes += 1
             x0 = stats.tok.copy()
             for j in range(len(cand)):
-                conf.append(_confidence_from_stats(stats, j, algorithm))
+                conf.append(_confidence_from_stats(stats, j, scoring))
         else:
             model.forward(res.tokens, rows, logits.ptr())
             res.forward_passes += 1
@@ -595,20 +647,30 @@ def _generate_dream[
             for j in range(len(cand)):
                 row_of.append(j)
             var greedy = _greedy_rows(
-                logits.ptr(), row_of, vocab, algorithm, cfg.threads
+                logits.ptr(), row_of, vocab, scoring, cfg.threads, mask_id
             )
             x0 = greedy[0].copy()
             conf = greedy[1].copy()
-        var n_transfer = len(cand)
+        var p_transfer = Float64(1.0)
         if i < cfg.steps - 1:
             var t = 1.0 - Float64(i) * (1.0 - cfg.eps) / Float64(cfg.steps)
             var s = 1.0 - Float64(i + 1) * (1.0 - cfg.eps) / Float64(cfg.steps)
-            n_transfer = Int(Float64(len(cand)) * (1.0 - s / t))
+            p_transfer = 1.0 - s / t
         var committed = List[Int]()
-        if n_transfer > 0:
-            for j in select_top(conf, n_transfer):
-                res.tokens[cand[j]] = x0[j]
-                committed.append(cand[j])
+        if algorithm == "origin":
+            for j in range(len(cand)):
+                if rng.uniform() < p_transfer:
+                    res.tokens[cand[j]] = x0[j]
+                    committed.append(cand[j])
+        else:
+            if algorithm == "random":
+                for j in range(len(cand)):
+                    conf[j] = rng.uniform()
+            var n_transfer = Int(Float64(len(cand)) * p_transfer)
+            if n_transfer > 0:
+                for j in select_top(conf, n_transfer):
+                    res.tokens[cand[j]] = x0[j]
+                    committed.append(cand[j])
         res.step_ms.append(Float64(perf_counter_ns() - t_step) / 1e6)
         obs.on_step(res.tokens, committed, res.forward_passes, cfg.steps)
         if cfg.early_stop and answer_is_fixed(
