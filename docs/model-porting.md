@@ -1,7 +1,10 @@
 # Porting a model
 
-mojo-dllm supports LLaDA and Dream. This checklist is the path Dream took,
-which is the path the next model will take.
+mojo-dllm supports the LLaDA and Dream architectures. Tested Q4_K_M checkpoints
+are LLaDA-8B-Instruct, LLaDA-1.5, Dream-v0-Instruct-7B,
+Dream-Coder-v0-Instruct-7B and DiffuCoder-7B-cpGRPO. The added checkpoints have
+CPU smoke and [parity evidence](correctness.md); GPU evidence remains limited
+to LLaDA-8B and Dream-v0. This checklist follows the path Dream took.
 
 ## 1. Read the metadata
 
@@ -63,12 +66,13 @@ inspect the metadata and tensor types before running the model.
 
 ## 2. Load the weights
 
-Add a config struct and a weight loader beside `models/llada.mojo`. Reuse
+Extend `ModelConfig` and `Layer` in `models/transformer.mojo` (the architecture
+check at the top of `ModelConfig.__init__` lists the supported names). Reuse
 `PackedMatrix` for every projection. A tensor type it does not support stops
 the load with `unsupported GGUF tensor type: <type> (tensor <name>)` when no
 decoder exists. A decodable type without a matrix kernel reports
 `tensor <name> is <type>: matrix kernels exist for Q4_K and Q6_K`.
-Reference decoders accept F32, F16, BF16, Q8_0, Q4_K, Q5_K and Q6_K for
+Reference decoders accept F32, F16, BF16, Q5_0, Q8_0, Q4_K, Q5_K and Q6_K for
 embedding rows and vectors; matrix kernels still require Q4_K or Q6_K.
 Add the decoder and packed kernel with fixtures from `scripts/gen_fixtures.py`
 before advertising a new matrix type as supported end to end.
@@ -99,8 +103,7 @@ input. Shape agreement does not establish matching weights or logits.
 1. Extend `scripts/gen_fixtures.py` with a tiny model of the new layout and
    its numpy reference logits. Write the test first and watch it fail.
 2. On the real model, compare logits with llama.cpp through
-   `tools/ref/llada_ref.cpp` (`logits` mode) and
-   `scripts/compare_logits.py`.
+   `tools/ref/llada_ref.cpp` (`logits` mode) and `bench/parity.py`.
 
 ## 4. Tokenizer
 

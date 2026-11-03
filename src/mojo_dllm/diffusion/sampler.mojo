@@ -17,9 +17,10 @@ LLaDA (ML-GSAI/LLaDA `generate.py`):
                       or U(0,1)                       # "random" remasking
             commit the k most confident masked positions of the block
 
-Only the masked positions of the current block are candidates, so only their
-logits are requested from the model (`full_logits` turns that off, to measure
-what the saving is worth). Probabilities are computed in f64, as the reference
+For LLaDA only the masked positions of the current block are candidates, so
+only their logits are requested from the model (`full_logits` turns that off,
+to measure what the saving is worth). Dream requests every masked position of
+the canvas. Probabilities are computed in f64, as the reference
 does.
 
 Seeds drive this module's own PRNG (splitmix64 + xoshiro256**); a seed here

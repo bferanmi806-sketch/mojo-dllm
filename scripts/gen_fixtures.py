@@ -9,13 +9,17 @@ from a plain numpy forward pass over those dequantized weights, so the Mojo
 code is checked against the reference implementation and not against itself.
 
 Outputs (deterministic, seed 1234 unless noted):
-  tests/fixtures/dequant-types.gguf Q8_0 / Q5_K / BF16 references, separate seed 340034
+  tests/fixtures/dequant-types.gguf Q8_0 / Q5_K / BF16 / Q5_0 references, separate seed 340034
   tests/fixtures/unsupported-embedding.gguf minimal IQ2_XXS embedding, no RNG
   tests/fixtures/kquants.gguf      Q4_K / Q6_K / F16 tensors + their f32 dequantization
   tests/fixtures/bad-magic.gguf    a file whose magic is wrong
   tests/fixtures/tiny-llada.gguf   2-layer LLaDA-shaped model, hidden 256, vocab 512
   tests/fixtures/tiny-llada.expected.f32
                                    numpy reference logits for TINY_TOKENS, row-major [L, vocab]
+  tests/fixtures/tiny-dream.gguf   2-layer Dream-shaped model (GQA, QKV bias) and its numpy logits
+  tests/fixtures/tiny-dream.expected.f32
+  tests/fixtures/malformed/        one-byte-damaged GGUF headers and metadata
+  tests/fixtures/metadata/         valid and invalid ModelConfig metadata
 """
 
 from __future__ import annotations
@@ -415,8 +419,10 @@ def dequant_types() -> None:
     q5[:, :2] = f16_bytes(rng.uniform(0.002, 0.01, 8)).reshape(8, 2)
     q5[:, 2:4] = f16_bytes(rng.uniform(0.002, 0.01, 8)).reshape(8, 2)
     q5 = q5.reshape(4, 352)
+    # Drawn last so the tensors above keep the bytes they had before Q5_0 joined.
+    q50 = quantize(rng.standard_normal((4, 96)).astype(np.float32), Q.Q5_0)
     for name, data, kind in (("q8_0", q8, Q.Q8_0), ("bf16", bf16, Q.BF16),
-                             ("q5k", q5, Q.Q5_K)):
+                             ("q5k", q5, Q.Q5_K), ("q5_0", q50, Q.Q5_0)):
         w.add_tensor(name, data, raw_shape=data.shape, raw_dtype=kind)
         w.add_tensor(name + ".expected", dequantize(data, kind).astype(np.float32))
     w.write_header_to_file()

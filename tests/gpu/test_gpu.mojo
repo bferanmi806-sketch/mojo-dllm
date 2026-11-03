@@ -35,6 +35,8 @@ from mojo_dllm.gpu.kernels import (
     RS_FIELDS,
     mma_tile_gpu,
     _pick_bn,
+    _pick_q4_bn,
+    _launch,
 )
 from mojo_dllm.gpu.model import GpuDiffusionLM
 from mojo_dllm.kernels.ops import (
@@ -422,7 +424,9 @@ def test_fused_silu_mul_quantize_matches_chain() raises:
         assert_equal(left[i], g[i], "g untouched " + String(i))
 
 
-def _check_gemm(name: String, n_tokens: Int, rows: Int = 0) raises:
+def _check_gemm(
+    name: String, n_tokens: Int, rows: Int = 0, widest: Bool = False
+) raises:
     """GPU int8 GEMM against an f32 GEMM over the reference dequantization."""
     var ctx = DeviceContext()
     var g = GGUFFile(FIX + "tiny-llada.gguf")
@@ -442,7 +446,14 @@ def _check_gemm(name: String, n_tokens: Int, rows: Int = 0) raises:
     var qa = GpuQActs(ctx, n_tokens, K)
     quantize_gpu(ctx, dev_f32(dx), n_tokens, K, qa)
     var dout = ctx.enqueue_create_buffer[DType.float32](n_tokens * N)
-    gemm_gpu(ctx, t.ggml_type, dev_u8(dw), N, K, qa, n_tokens, dev_f32(dout), N)
+    if widest:
+        _launch[80](
+            ctx, t.ggml_type, dev_u8(dw), N, K, qa, n_tokens, dev_f32(dout), N
+        )
+    else:
+        gemm_gpu(
+            ctx, t.ggml_type, dev_u8(dw), N, K, qa, n_tokens, dev_f32(dout), N
+        )
     var got = _down(ctx, dout, n_tokens * N)
     var want = Floats(n_tokens * N)
     var w = Floats(K)
@@ -484,10 +495,9 @@ def test_gemm_q6k_two_superblocks() raises:
 
 
 def test_gemm_q4k_widest_tile() raises:
-    # 150 tokens take two 80-wide tiles (three at 64), so this runs the
-    # widest kernel, the one real canvases use.
+    # Force the widest kernel even when device-aware dispatch prefers 32/64.
     assert_equal(_pick_bn(150), 80)
-    _check_gemm("blk.0.ffn_gate.weight", 150)
+    _check_gemm("blk.0.ffn_gate.weight", 150, widest=True)
 
 
 def test_gemm_q6k_widest_tile() raises:
@@ -501,6 +511,51 @@ def test_tile_width_rule() raises:
     assert_equal(_pick_bn(37), 64)
     assert_equal(_pick_bn(148), 80)
     assert_equal(_pick_bn(380), 80)
+
+
+def test_q4_tile_width_uses_sm_waves() raises:
+    # A 156-SM device can run 96 Q4_K blocks in one wave, but not 160.
+    assert_equal(_pick_q4_bn(148, 4096, 156), 64)
+    assert_equal(_pick_q4_bn(148, 12288, 156), 64)
+    assert_equal(_pick_q4_bn(148, 1024, 156), 32)
+    # Do not reduce tile width when it would add a wave.
+    assert_equal(_pick_q4_bn(276, 4096, 156), 80)
+    assert_equal(_pick_q4_bn(532, 4096, 156), 64)
+    assert_equal(_pick_q4_bn(32, 126464, 156), 32)
+    # Zero disables the new rule on devices outside its measured family.
+    assert_equal(_pick_q4_bn(148, 4096, 0), 80)
+    # Round up both the token and weight-row tile counts.
+    assert_equal(_pick_q4_bn(148, 4097, 96), 80)
+
+
+def test_q4_tile_widths_preserve_outputs() raises:
+    var ctx = DeviceContext()
+    var g = GGUFFile(FIX + "tiny-llada.gguf")
+    var t = g.tensor("blk.0.ffn_gate.weight")
+    var K = t.ne0
+    var N = 200
+    var staged = Bytes(staged_matrix_bytes(t.ggml_type, N, K))
+    stage_matrix(g.data_addr(t), t.ggml_type, N, K, staged.u8())
+    var dw = ctx.enqueue_create_buffer[DType.uint8](staged.size)
+    ctx.enqueue_copy(dw, staged.u8())
+    for rows in [7, 37, 148, 276]:
+        var x = Floats(rows * K)
+        _fill(x, 11)
+        var dx = _up(ctx, x)
+        var qa = GpuQActs(ctx, rows, K)
+        quantize_gpu(ctx, dev_f32(dx), rows, K, qa)
+        var a = ctx.enqueue_create_buffer[DType.float32](rows * N)
+        var b = ctx.enqueue_create_buffer[DType.float32](rows * N)
+        var c = ctx.enqueue_create_buffer[DType.float32](rows * N)
+        _launch[32](ctx, t.ggml_type, dev_u8(dw), N, K, qa, rows, dev_f32(a), N)
+        _launch[64](ctx, t.ggml_type, dev_u8(dw), N, K, qa, rows, dev_f32(b), N)
+        _launch[80](ctx, t.ggml_type, dev_u8(dw), N, K, qa, rows, dev_f32(c), N)
+        var x32 = _down(ctx, a, rows * N)
+        var x64 = _down(ctx, b, rows * N)
+        var x80 = _down(ctx, c, rows * N)
+        for i in range(rows * N):
+            assert_equal(x32[i], x64[i], "32 vs 64: " + String(i))
+            assert_equal(x32[i], x80[i], "32 vs 80: " + String(i))
 
 
 def _check_forward(path: String, vocab: Int, bound: Float64) raises:

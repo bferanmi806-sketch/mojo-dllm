@@ -13,10 +13,13 @@ scripts/ci-local.sh --install-hooks   # gates on commit and push
 
 ## Before you open a pull request
 
-Run `scripts/ci-local.sh`. It runs the same steps as CI: hygiene scan,
-`mojo format`, a `-Werror` build, the tests with their pinned count, lint, the
-benchmark-table check and the docs build. [Development](docs/development.md)
-explains each one.
+Run `scripts/ci-local.sh`. It runs the CI gates: hygiene scan, `mojo format`,
+a `-Werror` build, the tests with their pinned count, the no-GPU and
+visual-option checks, the launcher tests, lint, the benchmark-table check with
+the eval and weight-checker self-tests, the docs build and the action-pin
+check. It runs the GPU tests when `nvidia-smi` lists a GPU and skips them
+otherwise, where CI only builds them.
+[Development](docs/development.md) explains each one.
 
 ## How changes here are made
 
@@ -24,8 +27,9 @@ explains each one.
   Fixtures come from scripts in `scripts/`, never from hand-edited bytes.
 - **Prove that a check bites.** For a new kernel or guard, break the code on
   purpose and confirm the test fails, then restore it.
-- **No hand-typed benchmark numbers.** Tables come from `bench/results/` and
-  `bench/parity/` through `scripts/bench_table.py`. A change that moves
+- **No hand-typed benchmark numbers.** Tables come from `bench/results/`,
+  `bench/parity/`, `bench/quality/` and `bench/eval/` through
+  `scripts/bench_table.py`. A change that moves
   performance should come with a new result file from `bench/run_bench.py`.
 - **Errors name the thing.** User-facing failures say which key, tensor or
   type is wrong; no assertion-only paths.

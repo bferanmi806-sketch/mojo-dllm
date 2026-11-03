@@ -5,11 +5,15 @@
 
 # Introduction
 
-mojo-dllm runs **LLaDA-8B** and **Dream-7B**, two diffusion language models,
-from quantized GGUF files on your own CPU or on an NVIDIA GPU. The whole
+mojo-dllm runs two families of diffusion language models, LLaDA and Dream, from
+quantized GGUF files on your own CPU or on an NVIDIA GPU. LLaDA-8B and Dream-7B
+are measured; LLaDA-1.5, Dream-Coder and DiffuCoder are tested on the CPU (see
+[Quick start](quickstart.md#3-other-models)). The whole
 inference path is Mojo: the GGUF reader, the tokenizer, the quantized matrix
-multiply, the GPU kernels, the transformer and the denoising loop. You need
-no Python at runtime, and the GPU is optional.
+multiply, the GPU kernels, the transformer and the denoising loop. The
+`build/mojo-dllm` binary needs no Python at runtime, and the GPU is optional.
+The `./mojo-dllm` launcher that builds and starts it is a Python script run
+by uv.
 
 A diffusion language model writes differently from the models you know. An
 autoregressive model appends one token at a time. LLaDA starts from a canvas
@@ -28,16 +32,20 @@ minutes](diffusion.md) walks through it with a picture.
 - Logits match llama.cpp's implementation of both models; the measured
   agreement is in [Correctness](correctness.md).
 - [Benchmarks](benchmarks.md) against llama.cpp and diffuse-cpp on the same
-  machine, with every number generated from a result file in the repository.
+  machine, with every measurement table generated from a result file in the
+  repository.
 
 ## What does not work yet
 
-- The GPU path is slower than llama.cpp's CUDA build; [Benchmarks](benchmarks.md)
-  has the numbers. It supports NVIDIA only.
+- The GPU path is measured on one laptop part, an RTX 3050 held to 30 W,
+  against llama.cpp's CUDA build; [Benchmarks](benchmarks.md) has the numbers.
+  It supports NVIDIA only.
 - Two architectures: LLaDA and Dream. Others stop with
   `unsupported model architecture: <name> (supported: llada, dream)`.
-- One quantization mix: the F32, Q4_K and Q6_K tensors a Q4_K_M file
-  contains. Any other tensor type stops the load with an error that names it.
+- One quantization mix: Q4_K and Q6_K projection matrices, as in a Q4_K_M
+  file, with an embedding table and norm vectors that the reference decoders
+  read (F32, F16, BF16, Q8_0, Q4_K, Q5_K, Q6_K). A matrix of any other type
+  stops the load with an error that names it.
 
 ## Where to go next
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build the tokenizer fixtures from a real LLaDA GGUF and llama.cpp.
 
-usage: uv run --with gguf==0.17.1 --with numpy==2.3.3 scripts/gen_tokenizer_fixture.py \\
+usage: uv run --only-group fixtures python scripts/gen_tokenizer_fixture.py \\
            MODEL.gguf PATH/TO/llama-tokenize [PREFIX]
 
 PREFIX names the output files (default "llada"; Dream uses "dream").

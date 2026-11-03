@@ -19,7 +19,7 @@ afterwards, open a new terminal or run `source ~/.local/bin/env`.
 
 `setup` runs four steps and prints each one:
 
-1. **Toolchain.** It checks the platform, glibc, AVX2 and free memory, stops
+1. **Toolchain.** It checks the platform, glibc and AVX2, stops
    on anything that cannot work, and runs `uv sync --frozen`.
 2. **Build.** It compiles `build/mojo-dllm`, or reports that the binary is
    newer than the sources.
@@ -34,9 +34,10 @@ Without a terminal to ask on (a script, CI), `setup` does not download
 anything unless you pass `--yes`. It then exits 3 and prints the command that
 finishes the job.
 
-`./mojo-dllm doctor` runs the same checks without changing anything, and adds
-the GPU, the binary's age and the model cache. Every line that is not `ok`
-names the command that fixes it.
+`./mojo-dllm doctor` runs those checks without changing anything, and adds free
+memory, the Mojo version, the binary's age, the GPU and the model cache. Every
+line that is not `ok` says how to fix it, with the command where one exists; for a
+missing GPU it says that the CPU will be used.
 
 ## 2. Generate
 
@@ -82,18 +83,27 @@ anyway.
 |---|---|---|
 | a file | `-m ~/models/llada.gguf` | used as is |
 | the alias | `-m llada-8b` | `mradermacher/LLaDA-8B-Instruct-GGUF`, Q4_K_M (the default) |
-| a repo | `-m owner/Some-Model-GGUF:Q8_0` | the file matching that quant, downloaded once |
+| a repo | `-m owner/Some-Model-GGUF:Q4_K_M` | the file matching that quant, downloaded once |
 
 Without `:QUANT`, a repo resolves to its Q4_K_M file, then Q8_0, then the
 first `.gguf` it lists, the order llama.cpp uses. A quant that matches nothing
-lists the files the repo has. Split (sharded) GGUF files are not supported.
+lists the files the repo has. Split (sharded) GGUF files are not supported. A Q8_0
+file downloads but does not load: the matrix kernels need Q4_K or Q6_K.
 
-mojo-dllm runs LLaDA and Dream GGUF files made by llama.cpp's converter.
-Another architecture downloads and then stops with an error naming the
-architecture.
+Tested Q4_K_M checkpoints are LLaDA-8B-Instruct, LLaDA-1.5,
+Dream-v0-Instruct-7B, Dream-Coder-v0-Instruct-7B and DiffuCoder-7B-cpGRPO.
+The added checkpoints were checked on CPU; pass `--device cpu` to reproduce
+those runs. See the smoke and [parity evidence](correctness.md) for the exact
+files and generation agreement.
+Other quantizations still need compatible tensor types. An unsupported
+architecture stops with an error naming it.
+
+For DiffuCoder, obtain the file separately under its `apple-amlr` license and
+pass its local path with `--model`; it is not bundled with the project.
 
 `./mojo-dllm pull MODEL` downloads without generating. Models live in the
-Hugging Face cache (`~/.cache/huggingface/hub`, or `$HF_HUB_CACHE`), shared
+Hugging Face cache (`$HF_HUB_CACHE`, else `$HF_HOME/hub`, else
+`$XDG_CACHE_HOME/huggingface/hub`, else `~/.cache/huggingface/hub`), shared
 with every other tool that uses it. A gated or private repo needs `HF_TOKEN`.
 
 The sha256 check runs on download. A file already in the cache is checked
@@ -123,7 +133,7 @@ so an unchecked file is used after a warning.
 You get the metadata, a count of tensor types, and every tensor with its
 shape. The binary's own commands (`inspect`, `tokenize`, `logits`) go to
 `build/mojo-dllm` unchanged, after the same rebuild check. Any other word stops
-with the closest command name.
+with an error, and names the closest command when one is near.
 
 ## Without the launcher
 

@@ -21,6 +21,7 @@ from mojo_dllm.formats.gguf import (
     GGML_F32,
     GGML_F16,
     GGML_BF16,
+    GGML_Q5_0,
     GGML_Q8_0,
     GGML_Q4_K,
     GGML_Q5_K,
@@ -108,6 +109,7 @@ def has_decoder(t: Int) -> Bool:
         t == GGML_F32
         or t == GGML_F16
         or t == GGML_BF16
+        or t == GGML_Q5_0
         or t == GGML_Q8_0
         or t == GGML_Q4_K
         or t == GGML_Q5_K
@@ -149,6 +151,27 @@ def check_matrix_type(t: TensorInfo) raises:
             + t.type_name()
             + ": matrix kernels exist for Q4_K and Q6_K"
         )
+
+
+def dequant_q5_0_block(blk: U8Ptr, dst: F32Ptr):
+    """One 22-byte block: f16 scale, 32 high bits, 16 bytes of low nibbles.
+
+    Weight j of the first half takes high bit j and weight j of the second half
+    takes high bit j + 16. Each 5-bit value is offset by 16 before the scale.
+    """
+    var d = load_f16(blk, 0)
+    var qh = (
+        UInt32(blk.unsafe_load(2))
+        | (UInt32(blk.unsafe_load(3)) << 8)
+        | (UInt32(blk.unsafe_load(4)) << 16)
+        | (UInt32(blk.unsafe_load(5)) << 24)
+    )
+    for j in range(16):
+        var byte = Int(blk.unsafe_load(6 + j))
+        var lo = (byte & 15) | (Int((qh >> UInt32(j)) & 1) << 4)
+        var hi = (byte >> 4) | (Int((qh >> UInt32(j + 16)) & 1) << 4)
+        dst.unsafe_store(j, Float32(lo - 16) * d)
+        dst.unsafe_store(j + 16, Float32(hi - 16) * d)
 
 
 def dequant_q8_0_block(blk: U8Ptr, dst: F32Ptr):
@@ -199,6 +222,14 @@ def dequant_row(ggml_type: Int, src_addr: Int, dst: F32Ptr, n: Int) raises:
             var lo = UInt32(src.unsafe_load(2 * i))
             var hi = UInt32(src.unsafe_load(2 * i + 1))
             dst.unsafe_store(i, bitcast[DType.float32]((lo | (hi << 8)) << 16))
+        return
+    if ggml_type == GGML_Q5_0:
+        if n % 32 != 0:
+            raise Error("row length " + String(n) + " is not a multiple of 32")
+        for b in range(n // 32):
+            dequant_q5_0_block(
+                src.unsafe_offset(b * 22), dst.unsafe_offset(b * 32)
+            )
         return
     if ggml_type == GGML_Q8_0:
         if n % 32 != 0:

@@ -11,7 +11,10 @@ usage:
 run --json` and appends one line per problem to bench/eval/runs/ARM.jsonl; a
 stopped run resumes where it left off. The default is the clean baseline: one
 token per denoising step (steps = generation length), greedy, LLaDA blocks of
-32. While bench/eval/runs/PAUSE exists, `run` waits between problems.
+32. While bench/eval/runs/PAUSE exists, `run` waits between problems. On
+battery it waits for the charger, and a problem the charger left midway is
+answered again, so `generate_s` is a mains-power time (--allow-battery skips
+both and records `on_battery`).
 Scoring takes the number after "The answer is", else the last number in
 the output, and compares it with the gold answer.
 
@@ -40,6 +43,9 @@ import time
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 DATA = ROOT / "bench" / "eval" / "gsm8k-200.jsonl"
 RUNS = ROOT / "bench" / "eval" / "runs"
+sys.path.insert(0, str(ROOT / "bench"))
+import power  # noqa: E402  (bench/power.py)
+
 # While this file exists, `run` waits before starting the next problem, so a
 # timing measurement can have the GPU to itself without stopping the arm.
 PAUSE = RUNS / "PAUSE"
@@ -122,7 +128,8 @@ def cmd_run(args: argparse.Namespace, extra: list[str]) -> int:
                 time.sleep(10)
         cmd = [str(ROOT / "build/mojo-dllm"), "run", "--model", args.model,
                "--prompt", PROMPT.format(question=p["question"])] + flags
-        r = subprocess.run(cmd, capture_output=True, text=True)
+        r, pinfo = power.run_on_mains(lambda: subprocess.run(cmd, capture_output=True, text=True),
+                                      allow_battery=args.allow_battery, log=lambda m: print(m, flush=True))
         line = next((l for l in r.stdout.splitlines() if l.startswith("{")), None)
         if r.returncode != 0 or line is None:
             raise SystemExit(f"problem {p['index']}: mojo-dllm failed (rc={r.returncode}): {r.stderr[-400:]}")
@@ -131,7 +138,8 @@ def cmd_run(args: argparse.Namespace, extra: list[str]) -> int:
         rec = dict(index=p["index"], gold=p["answer"], pred=pred, correct=pred == canon(p["answer"]),
                    forward_passes=j["forward_passes"], generate_s=j["generate_s"],
                    stopped_early=j.get("stopped_early"), text=j["text"], flags=flags, version=version,
-                   model=model)
+                   model=model, power_retries=pinfo["power_retries"], on_battery=pinfo["on_battery"],
+                   power_source=pinfo["power_source"])
         with out.open("a") as f:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
         print(f"[{k + 1}/{len(problems)}] #{p['index']} {'ok ' if rec['correct'] else 'BAD'} "
@@ -242,6 +250,7 @@ def main() -> int:
     r.add_argument("--block-length", type=int, default=32)
     r.add_argument("--steps", type=int, default=0)
     r.add_argument("--limit", type=int, default=0)
+    r.add_argument("--allow-battery", action="store_true", help="answer on battery instead of pausing")
     c = sub.add_parser("compare")
     c.add_argument("a")
     c.add_argument("b")

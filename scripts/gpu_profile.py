@@ -33,6 +33,8 @@ import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "bench"))
+import power  # noqa: E402  (bench/power.py)
 IMPORTERS = [
     "/usr/lib/nsight-systems/host-linux-x64/QdstrmImporter",
     "/opt/nvidia/nsight-systems/host-linux-x64/QdstrmImporter",
@@ -94,6 +96,7 @@ def main() -> int:
     ap.add_argument("--runtime", choices=["mojo-dllm", "llama.cpp"], default="mojo-dllm")
     ap.add_argument("--seq-len", type=int, default=0, help="llama.cpp canvas length (prompt + generated)")
     ap.add_argument("--llama-cpp", default=os.path.expanduser("~/src/llama.cpp"))
+    ap.add_argument("--allow-battery", action="store_true", help="profile on battery instead of pausing")
     args = ap.parse_args()
     importer = next((p for p in IMPORTERS if os.path.exists(p)), None)
     if importer is None:
@@ -116,8 +119,11 @@ def main() -> int:
                "--max-tokens", str(args.max_tokens), "--steps", str(args.steps), "--block-length",
                str(args.block_length), "--device", "gpu", "--json", "--no-early-stop"]
         graph = []
-    p = run(["nsys", "profile", "-o", str(base), "--force-overwrite", "true", "--trace=cuda",
-             "--sample=none", "--cpuctxsw=none"] + graph + cmd)
+    # On battery the trace waits for the charger; a trace the charger left midway is taken again.
+    p, pinfo = power.run_on_mains(
+        lambda: run(["nsys", "profile", "-o", str(base), "--force-overwrite", "true", "--trace=cuda",
+                     "--sample=none", "--cpuctxsw=none"] + graph + cmd),
+        allow_battery=args.allow_battery, log=lambda m: print(m, flush=True))
     if llama:
         text = p.stdout + p.stderr
         devices = re.findall(r"layer\s+\d+ assigned to device (\w+)", text)
@@ -204,8 +210,9 @@ def main() -> int:
     gpu = run(["nvidia-smi", "--query-gpu=name,driver_version", "--format=csv,noheader"]).stdout.strip()
     doc = dict(
         date=dt.datetime.now().isoformat(timespec="seconds"), label=args.label,
-        runtime=args.runtime, versions=versions, gpu=gpu,
-        model=pathlib.Path(args.model).name,
+        runtime=args.runtime, versions=versions, gpu=gpu, on_battery=pinfo["on_battery"],
+        power_source=pinfo["power_source"],
+        power_retries=pinfo["power_retries"], model=pathlib.Path(args.model).name,
         seq_len=args.seq_len if llama else j["prompt_tokens"] + j["gen_length"],
         steps=args.steps, forward_passes=forwards,
         forward_ms_measured=j["forward_ms"], ms_per_step_measured=j["ms_per_step"],

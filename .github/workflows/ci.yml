@@ -1,7 +1,8 @@
 ---
 name: CI
 
-# The same gates scripts/ci-local.sh runs, split into three parallel jobs.
+# The gates scripts/ci-local.sh runs (the GPU suite is only built here), split
+# into three parallel jobs.
 # Run them locally first (`scripts/ci-local.sh`, or the pre-push hook), so a
 # push reaches CI already green.
 
@@ -107,6 +108,9 @@ jobs:
 
       - name: --device gpu without a GPU fails cleanly
         run: bash scripts/check_no_gpu.sh
+
+      - name: --visual-interval errors before model loading
+        run: bash scripts/check_visual.sh
 
   docs:
     runs-on: ubuntu-24.04

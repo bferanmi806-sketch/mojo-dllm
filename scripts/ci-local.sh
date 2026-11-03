@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# ci-local.sh: run the same gates as .github/workflows/ci.yml on your machine.
+# ci-local.sh: run the gates of .github/workflows/ci.yml on your machine (the GPU
+# suite runs here when a GPU is present; CI only builds it).
 #
 #   scripts/ci-local.sh                 everything
 #   scripts/ci-local.sh --fast          hygiene + format + build (the pre-commit set)
@@ -119,6 +120,7 @@ step "build -Werror" build
 if [ "$mode" = full ]; then
     step "tests (count pinned)" bash scripts/run-tests.sh
     step "--device gpu without a GPU fails cleanly" bash scripts/check_no_gpu.sh
+    step "--visual-interval errors before model loading" bash scripts/check_visual.sh
     gpus="$(nvidia-smi -L 2>/dev/null)"
     if grep -q '^GPU ' <<<"$gpus"; then
         step "GPU tests (count pinned)" bash scripts/run-gpu-tests.sh

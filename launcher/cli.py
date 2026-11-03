@@ -53,7 +53,7 @@ def help_text(style: Style) -> str:
         b("Examples"),
         '  ./mojo-dllm run "Write a haiku about rain." --max-tokens 64 --steps 32',
         '  ./mojo-dllm run "Hello" -m ~/models/llada.gguf --device cpu',
-        "  ./mojo-dllm pull someone/Some-Model-GGUF:Q8_0",
+        "  ./mojo-dllm pull someone/Some-Model-GGUF:Q4_K_M",
         "  ./mojo-dllm inspect ~/models/llada.gguf",
         "",
         b("Environment"),

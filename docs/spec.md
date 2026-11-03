@@ -1,6 +1,6 @@
 # mojo-dllm — Technical Specification
 
-**Status:** Draft v0.1  
+**Status:** Original specification, draft v0.1, written on 2026-10-03 before the code. It is not kept up to date. The [development plan](plan.md) lists the corrections that research made, [Architecture](architecture.md) maps the source as built, and [Command line](cli.md) lists the current flags.  
 **Project type:** Open-source ML inference systems project  
 **Primary language:** Mojo  
 **Initial model:** LLaDA-8B, quantized GGUF  
@@ -230,6 +230,8 @@ Adding Dream forces the runtime to generalize beyond a single LLaDA-specific mod
 
 Suggested initial structure:
 
+This is the layout the draft proposed. The code differs: modules live under `src/mojo_dllm/`, tests are in `tests/`, benchmarks in `bench/`, and `pyproject.toml` pins the Mojo toolchain. [Architecture](architecture.md#source-map) maps the files as built.
+
 ```text
 mojo-dllm/
 ├── README.md
@@ -290,6 +292,8 @@ mojo-dllm/
 ---
 
 ## 8. Core Data Structures
+
+The structs, traits and signatures in sections 8, 10.2, 13, 17.1 and 24 are sketches written before the code. The code has `ModelConfig` and the `DenoisingModel` trait in `src/mojo_dllm/models/transformer.mojo`, `TensorInfo` in `src/mojo_dllm/formats/gguf.mojo`, and `GenConfig` with `generate` in `src/mojo_dllm/diffusion/sampler.mojo`. It has no `DiffusionState`, `DiffusionScheduler`, `Device` or `DiffusionModel`, and it uses `def` where the sketches use `fn`.
 
 ### 8.1 Model configuration
 
@@ -861,6 +865,8 @@ Example:
 | mojo-dllm | CPU | Q4_K_M | 128 | 128 | 128 |
 | mojo-dllm | NVIDIA | Q4_K_M | 128 | 128 | 128 |
 
+The published benchmarks use 128 generated tokens in 32 steps (4 tokens per step) on three short prompts, with `--block-length 32` for LLaDA. See [Benchmarks](benchmarks.md#what-is-compared).
+
 ---
 
 ## 22. Performance Philosophy
@@ -983,6 +989,8 @@ Required flags:
 --seed N
 ```
 
+Only `--model` and `--prompt` are required. `--max-tokens` defaults to 128, `--steps` to the value of `--max-tokens`, and `--seed` to 42. `--device` takes `cpu` or `gpu`. The built binary is `build/mojo-dllm`, and the `./mojo-dllm` launcher takes the prompt as its first word. [Command line](cli.md) lists every flag.
+
 Optional:
 
 ```text
@@ -1028,6 +1036,8 @@ generation: 10.4 s
 peak RSS: 6.1 GB
 ```
 
+This sample shows the format only. `run --verbose` prints the model, device, token counts, steps and load time, then the generation time, the per-step time with its GEMM, attention and LM head split, tokens per second and peak RSS; `--dump-step-stats` adds one line per step. The ms / step column of [Benchmarks](benchmarks.md) has the measured step time on the test laptop.
+
 Debug mode MAY expose:
 
 - selected token positions;
@@ -1051,6 +1061,8 @@ ERROR: tensor shape mismatch for blk.0.attn_q.weight
 ERROR: model requires 8.1 GB but available memory is 5.9 GB
 ```
 
+The CPU path has no memory pre-check: a failed allocation prints `out of memory: could not allocate N bytes`. `--device gpu` prints `the model needs N MiB of GPU memory and M MiB are free`.
+
 Avoid assertion-only failure paths in user-facing code.
 
 ---
@@ -1060,7 +1072,7 @@ Avoid assertion-only failure paths in user-facing code.
 For the initial CPU backend:
 
 - memory-map GGUF;
-- keep quantized weights in-place;
+- repack each projection matrix into a heap block at load and release its mapped pages (see [Architecture](architecture.md#memory)), keeping the embedding table mapped;
 - allocate reusable activation buffers;
 - avoid layer-by-layer heap churn;
 - preallocate diffusion state;
@@ -1196,6 +1208,8 @@ Deliverables:
 ## 30. Initial Definition of Done
 
 v0.1 is complete when all of the following are true:
+
+This list records the 0.1 target. The changelog and the README status table record what shipped.
 
 - [ ] LLaDA Q4_K_M GGUF loads directly in Mojo.
 - [ ] No Python process is required during inference.

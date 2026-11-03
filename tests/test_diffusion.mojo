@@ -16,8 +16,15 @@ from mojo_dllm.diffusion.sampler import (
     StepObserver,
     generate_observed,
 )
-from mojo_dllm.models.transformer import DiffusionLM, RowStats
-from mojo_dllm.sys.mem import Floats
+from mojo_dllm.formats.gguf import GGUFFile
+from mojo_dllm.models.transformer import (
+    DenoisingModel,
+    DiffusionLM,
+    ModelConfig,
+    RowStats,
+    Timings,
+)
+from mojo_dllm.sys.mem import F32Ptr, Floats
 
 comptime FIX = "tests/fixtures/"
 
@@ -82,6 +89,101 @@ def _tiny_cfg() -> GenConfig:
     c.steps = 4
     c.mask_id = 511
     return c^
+
+
+struct MaskPreferringModel(DenoisingModel, Movable):
+    var cfg: ModelConfig
+    var timing: Timings
+
+    def __init__(out self, path: String) raises:
+        var gguf = GGUFFile(path)
+        self.cfg = ModelConfig(gguf)
+        self.timing = Timings()
+
+    def config(self) -> ModelConfig:
+        return self.cfg
+
+    def logit_row(self, position: Int) -> Int:
+        if self.cfg.shift_logits:
+            return max(position - 1, 0)
+        return position
+
+    def _write_mask_favouring_logits(self, out_rows: List[Int], logits: F32Ptr):
+        for j in range(len(out_rows)):
+            var row = logits.unsafe_offset(j * self.cfg.vocab)
+            for token in range(self.cfg.vocab):
+                row.unsafe_store(token, -5.0)
+            row.unsafe_store(self.cfg.mask_id, 10.0)
+
+    def forward(
+        mut self, tokens: List[Int], out_rows: List[Int], logits: F32Ptr
+    ) raises:
+        self._write_mask_favouring_logits(out_rows, logits)
+
+    def forward_window(
+        mut self,
+        tokens: List[Int],
+        lo: Int,
+        hi: Int,
+        out_rows: List[Int],
+        logits: F32Ptr,
+    ) raises:
+        self._write_mask_favouring_logits(out_rows, logits)
+
+    def device_row_stats(self) -> Bool:
+        return False
+
+    def forward_stats(
+        mut self, tokens: List[Int], out_rows: List[Int], mut out: RowStats
+    ) raises:
+        raise Error("the mask-preferring test model has no device statistics")
+
+    def model_name(self) raises -> String:
+        return "mask-preferring test model"
+
+    def load_time(self) -> Float64:
+        return 0.0
+
+    def stats(self) -> Timings:
+        return self.timing
+
+
+def _check_mask_suppression_with_mask_preferring_model(path: String) raises:
+    var model = MaskPreferringModel(FIX + path)
+    var mask_id = model.config().mask_id
+    var prompt: List[Int] = [5, 17, 300]
+    var c = GenConfig()
+    c.gen_length = 8
+    c.block_length = 4
+    c.steps = 4
+    c.mask_id = mask_id
+
+    var suppressed = generate(model, prompt, c)
+    for i in range(len(prompt), len(suppressed.tokens)):
+        assert_true(
+            suppressed.tokens[i] != mask_id,
+            path + ": suppression left a mask at position " + String(i),
+        )
+
+    var unsuppressed_cfg = c.copy()
+    unsuppressed_cfg.suppress_mask = False
+    var unsuppressed = generate(model, prompt, unsuppressed_cfg)
+    var masks_left = 0
+    for i in range(len(prompt), len(unsuppressed.tokens)):
+        if unsuppressed.tokens[i] == mask_id:
+            masks_left += 1
+    assert_true(
+        masks_left > 0,
+        path + ": mask-preferring logits did not leave masks when unsuppressed",
+    )
+
+
+def test_mask_suppression_wins_over_mask_favouring_llada_logits() raises:
+    _check_mask_suppression_with_mask_preferring_model("tiny-llada.gguf")
+
+
+def test_mask_suppression_wins_over_mask_favouring_dream_logits() raises:
+    _check_mask_suppression_with_mask_preferring_model("tiny-dream.gguf")
 
 
 def test_generation_resolves_every_mask() raises:

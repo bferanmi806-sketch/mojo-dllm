@@ -42,12 +42,16 @@ to the logits before the argmax; mojo-dllm does the same.
 
 ## Why the runtime looks different
 
-- **No KV cache.** Any position can change between steps, so every step
-  recomputes keys and values for the whole canvas. A step costs a full prompt
-  pass, about 2 × 7.5 billion operations per token on the canvas.
+- **No KV cache by default.** Any position can change between steps, so every
+  step recomputes keys and values for the whole canvas. `--dual-cache` (LLaDA
+  only) keeps a block-level cache and gives up exactness; see
+  [Command line](cli.md). A step costs a full prompt pass, about 2 × 7 billion
+  operations per token on the canvas in LLaDA-8B, plus 2 × 0.5 billion for each
+  row whose logits are computed.
 - **GEMMs, not GEMVs.** A step multiplies weight matrices by a hundred or more
   activation rows at once. The CPU kernel is built for that shape; see
   [The quantized GEMM](kernels.md).
-- **Few rows need logits.** Only the masked positions of the current block
-  are candidates, so mojo-dllm computes the 126 464-way output projection for
-  those rows alone. The benchmark ablation measures what that saves.
+- **Few rows need logits.** Only the masked positions the sampler can commit
+  are candidates (the current block for LLaDA, every masked position for
+  Dream), so mojo-dllm computes the output projection (126 464 columns for
+  LLaDA, 152 064 for Dream) for those rows alone. The LLaDA benchmark ablation measures what that saves.

@@ -15,14 +15,16 @@ Versions: mojo-dllm `bdd268b`, Mojo 1.1.0 (8189361e), llama.cpp `836d571`, diffu
 
 † Not the same work: the inter-step cache reuses stale K/V and `entropy_exit` can stop early. Shown because it is diffuse-cpp's recommended mode.
 
-**LLaDA-8B-Instruct** on the GPU, Q4_K_M. NVIDIA GeForce RTX 3050 6GB Laptop GPU (6144 MiB, driver 595.84), host 13th Gen Intel(R) Core(TM) i5-13420H. Each prompt: 128 generated tokens, 32 denoising steps; median of 3 runs x 3 prompts. Peak RSS is host memory.
+**LLaDA-8B-Instruct** on the GPU, Q4_K_M. NVIDIA GeForce RTX 3050 6GB Laptop GPU (6144 MiB, driver 595.99.02), host 13th Gen Intel(R) Core(TM) i5-13420H. Each prompt: 128 generated tokens, 32 denoising steps; median of 3 runs x 3 prompts. Peak RSS is host memory.
 
 | Runtime | ms / step | tokens / s | startup | peak RSS | language |
 |---|---:|---:|---:|---:|---|
-| **mojo-dllm** `--device gpu` | 424 | 9.43 | 2.9 s | 1.0 GB | Mojo |
-| llama.cpp `llama-diffusion-cli`, CUDA, all layers offloaded | 255 | 15.68 | 2.0 s | 5.2 GB | C/C++, CUDA |
+| **mojo-dllm** `--device gpu` | 221 | 18.13 | 2.2 s | 1.1 GB | Mojo |
+| llama.cpp `llama-diffusion-cli`, CUDA, all layers offloaded | 243 | 16.46 | 1.4 s | 5.3 GB | C/C++, CUDA |
 
-Versions: mojo-dllm `78014b4`, Mojo 1.1.0 (8189361e), llama.cpp `836d571`. Evidence: `bench/results/2026-10-12-gpu-llada.json`.
+Step time of mojo-dllm over llama.cpp: median 0.906, range 0.896 to 0.908 across 9 paired runs, with mojo-dllm's step shorter in 9 of them. A ratio below 1 means mojo-dllm's step is shorter.
+
+Versions: mojo-dllm `69e4024`, Mojo 1.1.0 (8189361e), llama.cpp `7df8b87`. Evidence: `bench/results/2026-11-03-gpu-llada.json`.
 
 **Dream-v0-Instruct-7B**, Q4_K_M. 13th Gen Intel(R) Core(TM) i5-13420H, 12 threads, 33.3 GB RAM, `performance` power profile. Each prompt: 128 generated tokens, 32 denoising steps; median of 3 runs x 3 prompts.
 
@@ -33,14 +35,16 @@ Versions: mojo-dllm `78014b4`, Mojo 1.1.0 (8189361e), llama.cpp `836d571`. Evide
 
 Versions: mojo-dllm `bdd268b`, Mojo 1.1.0 (8189361e), llama.cpp `836d571`. Evidence: `bench/results/2026-10-03-cpu-dream.json`.
 
-**Dream-v0-Instruct-7B** on the GPU, Q4_K_M. NVIDIA GeForce RTX 3050 6GB Laptop GPU (6144 MiB, driver 595.84), host 13th Gen Intel(R) Core(TM) i5-13420H. Each prompt: 128 generated tokens, 32 denoising steps; median of 3 runs x 3 prompts. Peak RSS is host memory.
+**Dream-v0-Instruct-7B** on the GPU, Q4_K_M. NVIDIA GeForce RTX 3050 6GB Laptop GPU (6144 MiB, driver 595.99.02), host 13th Gen Intel(R) Core(TM) i5-13420H. Each prompt: 128 generated tokens, 32 denoising steps; median of 3 runs x 3 prompts. Peak RSS is host memory.
 
 | Runtime | ms / step | tokens / s | startup | peak RSS | language |
 |---|---:|---:|---:|---:|---|
-| **mojo-dllm** `--device gpu` | 412 | 9.71 | 2.9 s | 1.1 GB | Mojo |
-| llama.cpp `llama-diffusion-cli`, CUDA, all layers offloaded | 234 | 17.08 | 1.9 s | 4.9 GB | C/C++, CUDA |
+| **mojo-dllm** `--device gpu` | 219 | 18.29 | 2.0 s | 1.2 GB | Mojo |
+| llama.cpp `llama-diffusion-cli`, CUDA, all layers offloaded | 214 | 18.66 | 1.3 s | 5.0 GB | C/C++, CUDA |
 
-Versions: mojo-dllm `036ef79`, Mojo 1.1.0 (8189361e), llama.cpp `836d571`. Evidence: `bench/results/2026-10-12-gpu-dream.json`.
+Step time of mojo-dllm over llama.cpp: median 1.022, range 1.000 to 1.037 across 9 paired runs, with mojo-dllm's step shorter in 1 of them. A ratio below 1 means mojo-dllm's step is shorter.
+
+Versions: mojo-dllm `69e4024`, Mojo 1.1.0 (8189361e), llama.cpp `7df8b87`. Evidence: `bench/results/2026-11-03-gpu-dream.json`.
 
 **LLaDA-8B-Instruct, llama.cpp thread sweep and forward pass alone**: 13th Gen Intel(R) Core(TM) i5-13420H; median of 2 runs, one prompt, canvas 148 tokens.
 
@@ -58,10 +62,10 @@ The ms / step column runs `llama-diffusion-cli`. The forward pass alone is mojo-
 
 | Runtime | ms / step | forward pass alone |
 |---|---:|---:|
-| mojo-dllm `--device gpu` | 419 | 415 ms |
-| llama.cpp CUDA, `llama-bench -p 148` | | 264 ms |
+| mojo-dllm `--device gpu` | 225 | 225 ms |
+| llama.cpp CUDA, `llama-bench -p 148` | | 243 ms |
 
-The forward pass alone is mojo-dllm's measured forward pass against llama.cpp's `llama-bench` at the same token count. `llama-bench` applies a causal mask and computes logits for one position; mojo-dllm's figure includes logits for up to 32 positions and copying the canvas in. CPU busy before a run: at most 8.9%. Evidence: `bench/results/2026-10-12-fair-gpu-llada.json`.
+The forward pass alone is mojo-dllm's measured forward pass against llama.cpp's `llama-bench` at the same token count. `llama-bench` applies a causal mask and computes logits for one position; mojo-dllm's figure includes logits for up to 32 positions and copying the canvas in. CPU busy before a run: at most 3.1%. Evidence: `bench/results/2026-11-03-fair-gpu-llada.json`.
 <!-- bench:end -->
 
 ## What is compared
@@ -107,10 +111,13 @@ neither runtime reports GPU memory. The GPU tables above come from these
 configs.
 
 The test GPU is a laptop part held to 30 W, whose clocks fall under
-sustained load (`bench/checks/2026-10-12-gpu-power-under-load.txt`) and vary
-from day to day: the same llama.cpp build ran
-LLaDA steps much slower on 2026-10-12 than on 2026-10-09 (compare
-`bench/results/archive/2026-10-09-gpu-llada.json` with the current file).
+sustained load (`bench/checks/2026-10-12-gpu-power-under-load.txt` and
+`bench/checks/2026-11-03-gpu-power-limit.txt`) and vary from day to day: the
+same llama.cpp build ran LLaDA steps much slower on 2026-10-12 than on
+2026-10-09 (compare `bench/results/archive/2026-10-09-gpu-llada.json` with
+`bench/results/archive/2026-10-12-gpu-llada.json`). The 2026-11-03 file
+records three builds run back to back at about 1.1 GHz and 30 W: absolute
+milliseconds follow the clock, and ratios inside one file do not.
 Both runtimes in one result file run interleaved, prompt by prompt, so
 compare them within a file, not across dates.
 
@@ -124,10 +131,21 @@ llama.cpp's `llama-bench` at the same token count).
 
 `bench/run_bench.py` does the measuring:
 
-- three prompts, three repetitions, runtimes interleaved within each
-  repetition;
-- every run starts only when the CPU has been under 10% busy for two seconds;
+- three prompts and, by default, three repetitions (the fairness configs use
+  one prompt, and the CPU thread sweep ran two repetitions), runtimes
+  interleaved within each repetition;
+- every run waits until a two-second sample shows the CPU under 10% busy, and
+  starts anyway after 300 seconds (60 in the fairness configs); the busy
+  fraction before each run is recorded as `cpu_busy_before`, and the tables
+  disclose runs that started above the threshold;
 - the power profile is `performance` for the duration and restored after;
+- on battery, where a laptop caps CPU and GPU power, it pauses before the
+  next run until the charger is back, and a run the charger left midway is
+  thrown away and repeated (`bench/power.py`; each run records
+  `power_waited_s`, `power_retries`, `on_battery`, `power_source` and a snapshot
+  of the supplies it read, and `--allow-battery` measures on battery instead).
+  The check fails closed: a supply file it cannot read stops the run, and a
+  battery with the adapter offline counts as battery whatever its status says;
 - a watchdog kills any `pytest` process (other work on the machine started
   test suites mid-run), and the kills are logged in the result file;
 - generation time excludes model loading, which is reported as startup;
@@ -158,7 +176,8 @@ Evidence: `bench/quality/2026-10-03-LLaDA-8B-Instruct.Q4_K_M.json` (mojo-dllm `b
 <!-- quality:end -->
 
 "Repeated words" counts immediate repetitions such as "the the", a rough
-proxy for parallel-decoding damage. `bench/quality.py` produces this table.
+proxy for parallel-decoding damage. `bench/quality.py` records the runs and
+`scripts/bench_table.py` renders this table.
 
 ### Accuracy of `--threshold` and `--dual-cache`
 
@@ -187,9 +206,11 @@ Evidence: `bench/eval/2026-10-29-baseline-vs-dualcache.json`, `bench/eval/2026-1
   tokens/s depends on the step count you choose, so compare ms / step first.
 - The ablation row shows what computing logits only for candidate positions
   saves.
-- On the GPU, read ms / step and peak RSS together. llama.cpp is faster per
-  step; mojo-dllm holds far less in host memory, because it uploads the
-  weights once and releases the file's pages behind it.
+- On the GPU, read ms / step, the step-time ratio line under each GPU table
+  and peak RSS together. The ratio pairs the two runtimes run by run, and one
+  GPU with one quantization (Q4_K_M) stands behind it. mojo-dllm also holds
+  far less in host memory, because it uploads the weights once and releases
+  the file's pages behind it.
 - The thread sweep and the forward-pass-alone tables test the CPU comparison.
   If llama.cpp ran faster below 12 threads, or mojo-dllm's lead came only from
   skipping logits, those tables would show it. The sweep stops at 12 because

@@ -11,7 +11,9 @@ identical in shape.
 
 Measurement hygiene, all recorded in the output:
   * runs are interleaved (A B C, A B C, ...) so drift hits every runtime;
-  * each run starts only when the 1-minute load average is below a threshold;
+  * each run starts when a two-second sample shows the CPU under `busy_threshold`
+    busy, or after `max_quiet_wait_s` seconds; the busy fraction is recorded as
+    `cpu_busy_before`;
   * a watchdog kills any process named exactly `pytest` while the benchmark
     runs (other sessions on this machine launch test suites that would
     otherwise compete for the CPU) and logs every kill. A config can turn it
@@ -36,11 +38,14 @@ import shlex
 import signal
 import statistics
 import subprocess
+import sys
 import tempfile
 import threading
 import time
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "bench"))
+import power  # noqa: E402  (bench/power.py)
 
 
 class Watchdog(threading.Thread):
@@ -275,6 +280,8 @@ def main() -> int:
     ap.add_argument("--reps", type=int, default=3)
     ap.add_argument("--out", default=None)
     ap.add_argument("--only", default="", help="comma list of runtimes to run")
+    ap.add_argument("--allow-battery", action="store_true",
+                    help="measure on battery instead of pausing (each run records on_battery)")
     args = ap.parse_args()
     c = json.loads(pathlib.Path(args.config).read_text())
     # Paths in the config are written with ~ so the committed file names no
@@ -328,7 +335,7 @@ def main() -> int:
             date=dt.datetime.now().isoformat(timespec="seconds"),
             machine=dict(cpu=sh("lscpu | sed -n 's/^Model name:\\s*//p'"), kernel=platform.release(),
                          ram_gb=round(os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / 1e9, 1),
-                         power_profile="performance", logical_cpus=os.cpu_count(),
+                         power_profile="performance", allow_battery=args.allow_battery, logical_cpus=os.cpu_count(),
                          gpu=sh("nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader")
                          or None),
             versions=versions,
@@ -342,6 +349,35 @@ def main() -> int:
         raise SystemExit(f"stopped by signal {signum}")
 
     signal.signal(signal.SIGTERM, on_term)
+
+    def one_run(rt: str, p: str, ids: str, n_prompt: int, seq_len: int, threads: int) -> tuple[dict, float, float, str]:
+        """One timed run of one runtime on one prompt, once the CPU is quiet."""
+        load, waited = wait_for_quiet(c["busy_threshold"], c["max_quiet_wait_s"])
+        t_start = dt.datetime.now().isoformat(timespec="seconds")
+        if rt == "mojo-dllm":
+            r = run_mojo(c, p, threads, [])
+        elif rt == "mojo-dllm-gpu":
+            r = run_mojo(c, p, threads, ["--device", "gpu"])
+        elif rt == "mojo-dllm-full-logits":
+            r = run_mojo(c, p, threads, ["--full-logits"])
+        elif rt == "llama.cpp":
+            r = run_llama(c, p, threads, seq_len)
+        elif rt == "llama.cpp-cuda":
+            r = run_llama(c, p, threads, seq_len, cuda=True)
+        elif rt.startswith("llama.cpp:t"):
+            r = run_llama(c, p, int(rt.removeprefix("llama.cpp:t")), seq_len)
+        elif rt.startswith("llama-bench:t"):
+            r = run_llama_bench(c, int(rt.removeprefix("llama-bench:t")), seq_len)
+        elif rt == "llama-bench-cuda":
+            r = run_llama_bench(c, threads, seq_len, cuda=True)
+        elif rt == "diffuse-cpp":
+            r = run_diffuse(c, ids, threads, n_prompt, "equal")
+        elif rt == "diffuse-cpp-cache-entropy-exit":
+            r = run_diffuse(c, ids, threads, n_prompt, "default")
+        else:
+            raise SystemExit(f"unknown runtime {rt}")
+        return r, load, waited, t_start
+
     try:
         subprocess.run(["powerprofilesctl", "set", "performance"], check=True)
         if kill_pytest:
@@ -360,32 +396,21 @@ def main() -> int:
                 ids, n_prompt = tok_cache[p]
                 seq_len = n_prompt + c["gen_length"]
                 for rt in runtimes:
-                    load, waited = wait_for_quiet(c["busy_threshold"], c["max_quiet_wait_s"])
-                    t_start = dt.datetime.now().isoformat(timespec="seconds")
-                    if rt == "mojo-dllm":
-                        r = run_mojo(c, p, threads, [])
-                    elif rt == "mojo-dllm-gpu":
-                        r = run_mojo(c, p, threads, ["--device", "gpu"])
-                    elif rt == "mojo-dllm-full-logits":
-                        r = run_mojo(c, p, threads, ["--full-logits"])
-                    elif rt == "llama.cpp":
-                        r = run_llama(c, p, threads, seq_len)
-                    elif rt == "llama.cpp-cuda":
-                        r = run_llama(c, p, threads, seq_len, cuda=True)
-                    elif rt.startswith("llama.cpp:t"):
-                        r = run_llama(c, p, int(rt.removeprefix("llama.cpp:t")), seq_len)
-                    elif rt.startswith("llama-bench:t"):
-                        r = run_llama_bench(c, int(rt.removeprefix("llama-bench:t")), seq_len)
-                    elif rt == "llama-bench-cuda":
-                        r = run_llama_bench(c, threads, seq_len, cuda=True)
-                    elif rt == "diffuse-cpp":
-                        r = run_diffuse(c, ids, threads, n_prompt, "equal")
-                    elif rt == "diffuse-cpp-cache-entropy-exit":
-                        r = run_diffuse(c, ids, threads, n_prompt, "default")
-                    else:
-                        raise SystemExit(f"unknown runtime {rt}")
+                    # On battery the run waits for the charger (with the power profile
+                    # restored meanwhile), and a run the charger left midway is repeated.
+                    (r, load, waited, t_start), pinfo = power.run_on_mains(
+                        lambda: one_run(rt, p, ids, n_prompt, seq_len, threads),
+                        allow_battery=args.allow_battery,
+                        log=lambda m: print(m, flush=True),
+                        on_pause=lambda: subprocess.run(["powerprofilesctl", "set", profile_before or "power-saver"]),
+                        on_resume=lambda: subprocess.run(["powerprofilesctl", "set", "performance"], check=True),
+                    )
                     r.update(runtime=rt, prompt_index=pi, rep=rep, started=t_start,
-                             cpu_busy_before=round(load, 3), waited_s=round(waited, 1))
+                             cpu_busy_before=round(load, 3), waited_s=round(waited, 1),
+                             power_waited_s=round(pinfo["power_waited_s"], 1),
+                             power_retries=pinfo["power_retries"], on_battery=pinfo["on_battery"],
+                             power_source=pinfo["power_source"], power_supplies=pinfo["power_supplies"],
+                             **({"power_root": pinfo["power_root"]} if "power_root" in pinfo else {}))
                     results.append(r)
                     write_doc(partial=True)
                     if not r["ok"]:

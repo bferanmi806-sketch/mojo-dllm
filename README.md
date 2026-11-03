@@ -10,7 +10,7 @@
   <a href="https://github.com/vladimirrott/mojo-dllm/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/vladimirrott/mojo-dllm/ci.yml?branch=main&style=flat-square&label=CI" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square" alt="License: Apache-2.0"></a>
   <img src="https://img.shields.io/badge/Mojo-1.1.0-ff6b1a?style=flat-square" alt="Mojo 1.1.0">
-  <img src="https://img.shields.io/badge/models-LLaDA--8B%20%7C%20Dream--7B-5eead4?style=flat-square" alt="Models: LLaDA-8B, Dream-7B">
+  <img src="https://img.shields.io/badge/models-LLaDA--8B%20%7C%20LLaDA--1.5%20%7C%20Dream--7B%20%7C%20Dream--Coder%20%7C%20DiffuCoder--cpGRPO-5eead4?style=flat-square" alt="Models: LLaDA-8B, LLaDA-1.5, Dream-7B, Dream-Coder, DiffuCoder-cpGRPO">
 </p>
 
 <p align="center">
@@ -26,16 +26,20 @@
   <img src="assets/demo.gif" width="760" alt="mojo-dllm --visual: LLaDA-8B fills a canvas of masked tokens over 16 denoising steps, padding first, then a haiku">
 </p>
 
-mojo-dllm runs **LLaDA-8B** and **Dream-7B**, two diffusion language models,
-from quantized GGUF files on your CPU or on an NVIDIA GPU. The GGUF reader,
-the tokenizer, the quantized matrix multiply, the GPU kernels, the transformer
-and the denoising loop are all Mojo. You need no Python at runtime, and the
-GPU is optional.
+mojo-dllm runs **LLaDA-8B-Instruct**, **LLaDA-1.5**, **Dream-v0-Instruct-7B**,
+**Dream-Coder-v0-Instruct-7B** and **DiffuCoder-7B-cpGRPO** from quantized GGUF
+files. LLaDA-8B and Dream-v0 have CPU and NVIDIA GPU evidence; the added
+checkpoints have CPU smoke and [parity results](docs/correctness.md).
+
+The GGUF reader, the tokenizer, the quantized matrix multiply, the GPU kernels, the transformer
+and the denoising loop are all Mojo. The `build/mojo-dllm` binary needs no
+Python at runtime, and the GPU is optional. The `./mojo-dllm` launcher that
+builds and starts it is a Python script run by uv.
 
 A diffusion model does not write left to right. It starts from a canvas of
 masked tokens and, over a fixed number of steps, commits the tokens it is most
-sure about until none are left. Every step reruns the whole model over the
-whole canvas, so the runtime problem looks like a stream of GEMMs. mojo-dllm
+sure about until none are left. By default every step reruns the whole model
+over the whole canvas, so the runtime problem looks like a stream of GEMMs. mojo-dllm
 is built around that.
 
 ## Benchmarks
@@ -55,14 +59,16 @@ Versions: mojo-dllm `bdd268b`, Mojo 1.1.0 (8189361e), llama.cpp `836d571`, diffu
 
 † Not the same work: the inter-step cache reuses stale K/V and `entropy_exit` can stop early. Shown because it is diffuse-cpp's recommended mode.
 
-**LLaDA-8B-Instruct** on the GPU, Q4_K_M. NVIDIA GeForce RTX 3050 6GB Laptop GPU (6144 MiB, driver 595.84), host 13th Gen Intel(R) Core(TM) i5-13420H. Each prompt: 128 generated tokens, 32 denoising steps; median of 3 runs x 3 prompts. Peak RSS is host memory.
+**LLaDA-8B-Instruct** on the GPU, Q4_K_M. NVIDIA GeForce RTX 3050 6GB Laptop GPU (6144 MiB, driver 595.99.02), host 13th Gen Intel(R) Core(TM) i5-13420H. Each prompt: 128 generated tokens, 32 denoising steps; median of 3 runs x 3 prompts. Peak RSS is host memory.
 
 | Runtime | ms / step | tokens / s | startup | peak RSS | language |
 |---|---:|---:|---:|---:|---|
-| **mojo-dllm** `--device gpu` | 424 | 9.43 | 2.9 s | 1.0 GB | Mojo |
-| llama.cpp `llama-diffusion-cli`, CUDA, all layers offloaded | 255 | 15.68 | 2.0 s | 5.2 GB | C/C++, CUDA |
+| **mojo-dllm** `--device gpu` | 221 | 18.13 | 2.2 s | 1.1 GB | Mojo |
+| llama.cpp `llama-diffusion-cli`, CUDA, all layers offloaded | 243 | 16.46 | 1.4 s | 5.3 GB | C/C++, CUDA |
 
-Versions: mojo-dllm `78014b4`, Mojo 1.1.0 (8189361e), llama.cpp `836d571`. Evidence: `bench/results/2026-10-12-gpu-llada.json`.
+Step time of mojo-dllm over llama.cpp: median 0.906, range 0.896 to 0.908 across 9 paired runs, with mojo-dllm's step shorter in 9 of them. A ratio below 1 means mojo-dllm's step is shorter.
+
+Versions: mojo-dllm `69e4024`, Mojo 1.1.0 (8189361e), llama.cpp `7df8b87`. Evidence: `bench/results/2026-11-03-gpu-llada.json`.
 
 **Dream-v0-Instruct-7B**, Q4_K_M. 13th Gen Intel(R) Core(TM) i5-13420H, 12 threads, 33.3 GB RAM, `performance` power profile. Each prompt: 128 generated tokens, 32 denoising steps; median of 3 runs x 3 prompts.
 
@@ -73,14 +79,16 @@ Versions: mojo-dllm `78014b4`, Mojo 1.1.0 (8189361e), llama.cpp `836d571`. Evide
 
 Versions: mojo-dllm `bdd268b`, Mojo 1.1.0 (8189361e), llama.cpp `836d571`. Evidence: `bench/results/2026-10-03-cpu-dream.json`.
 
-**Dream-v0-Instruct-7B** on the GPU, Q4_K_M. NVIDIA GeForce RTX 3050 6GB Laptop GPU (6144 MiB, driver 595.84), host 13th Gen Intel(R) Core(TM) i5-13420H. Each prompt: 128 generated tokens, 32 denoising steps; median of 3 runs x 3 prompts. Peak RSS is host memory.
+**Dream-v0-Instruct-7B** on the GPU, Q4_K_M. NVIDIA GeForce RTX 3050 6GB Laptop GPU (6144 MiB, driver 595.99.02), host 13th Gen Intel(R) Core(TM) i5-13420H. Each prompt: 128 generated tokens, 32 denoising steps; median of 3 runs x 3 prompts. Peak RSS is host memory.
 
 | Runtime | ms / step | tokens / s | startup | peak RSS | language |
 |---|---:|---:|---:|---:|---|
-| **mojo-dllm** `--device gpu` | 412 | 9.71 | 2.9 s | 1.1 GB | Mojo |
-| llama.cpp `llama-diffusion-cli`, CUDA, all layers offloaded | 234 | 17.08 | 1.9 s | 4.9 GB | C/C++, CUDA |
+| **mojo-dllm** `--device gpu` | 219 | 18.29 | 2.0 s | 1.2 GB | Mojo |
+| llama.cpp `llama-diffusion-cli`, CUDA, all layers offloaded | 214 | 18.66 | 1.3 s | 5.0 GB | C/C++, CUDA |
 
-Versions: mojo-dllm `036ef79`, Mojo 1.1.0 (8189361e), llama.cpp `836d571`. Evidence: `bench/results/2026-10-12-gpu-dream.json`.
+Step time of mojo-dllm over llama.cpp: median 1.022, range 1.000 to 1.037 across 9 paired runs, with mojo-dllm's step shorter in 1 of them. A ratio below 1 means mojo-dllm's step is shorter.
+
+Versions: mojo-dllm `69e4024`, Mojo 1.1.0 (8189361e), llama.cpp `7df8b87`. Evidence: `bench/results/2026-11-03-gpu-dream.json`.
 
 **LLaDA-8B-Instruct, llama.cpp thread sweep and forward pass alone**: 13th Gen Intel(R) Core(TM) i5-13420H; median of 2 runs, one prompt, canvas 148 tokens.
 
@@ -98,21 +106,25 @@ The ms / step column runs `llama-diffusion-cli`. The forward pass alone is mojo-
 
 | Runtime | ms / step | forward pass alone |
 |---|---:|---:|
-| mojo-dllm `--device gpu` | 419 | 415 ms |
-| llama.cpp CUDA, `llama-bench -p 148` | | 264 ms |
+| mojo-dllm `--device gpu` | 225 | 225 ms |
+| llama.cpp CUDA, `llama-bench -p 148` | | 243 ms |
 
-The forward pass alone is mojo-dllm's measured forward pass against llama.cpp's `llama-bench` at the same token count. `llama-bench` applies a causal mask and computes logits for one position; mojo-dllm's figure includes logits for up to 32 positions and copying the canvas in. CPU busy before a run: at most 8.9%. Evidence: `bench/results/2026-10-12-fair-gpu-llada.json`.
+The forward pass alone is mojo-dllm's measured forward pass against llama.cpp's `llama-bench` at the same token count. `llama-bench` applies a causal mask and computes logits for one position; mojo-dllm's figure includes logits for up to 32 positions and copying the canvas in. CPU busy before a run: at most 3.1%. Evidence: `bench/results/2026-11-03-fair-gpu-llada.json`.
 <!-- bench:end -->
 
 On the CPU, mojo-dllm is the fastest runtime in these tables. The fairness
 runs check that lead: llama.cpp is fastest at 12 threads, the most this CPU
 runs, and mojo-dllm's forward pass alone stays ahead of `llama-bench`. The
-ablation row shows that skipping logits saves only a small part of the gap. On the GPU, llama.cpp's CUDA build is faster.
-mojo-dllm's tensor-core kernels are a first version, and what they give you
-today is a small host footprint: the weights live in GPU memory.
+ablation row shows that skipping logits saves only a small part of the gap.
+On the GPU of the test laptop, the line under each GPU table compares
+mojo-dllm's step time with llama.cpp's CUDA build, run by run, and the peak RSS
+column shows the smaller host footprint: mojo-dllm uploads the weights once and
+releases the file's pages behind it. The laptop part is held to 30 W and its
+clocks vary from day to day, so compare the two runtimes inside one result file
+and do not carry absolute milliseconds across dates.
 
-Every number above is rendered from a result file in `bench/results/`, and CI
-fails if the table and the file disagree. [Benchmarks](docs/benchmarks.md)
+Every number in the tables above is rendered from a result file in
+`bench/results/`, and CI fails if a table and its file disagree. [Benchmarks](docs/benchmarks.md)
 explains the setup, including why each runtime's schedule differs and what
 the ablation row measures.
 
@@ -129,7 +141,7 @@ git clone https://github.com/vladimirrott/mojo-dllm && cd mojo-dllm
 builds `build/mojo-dllm`, offers to download LLaDA-8B (4.9 GB, sha256
 checked) and runs a short smoke test. A second `setup` skips the build and
 the download when they are current. `./mojo-dllm doctor` reports what is
-missing and the command that fixes it.
+missing and how to fix it (a missing GPU says that the CPU will be used).
 
 You need Linux on x86-64 with AVX2, glibc 2.34 or newer, and about 6 GB of
 free memory. `run` picks an NVIDIA GPU with compute capability 8.0 or newer
@@ -160,8 +172,9 @@ models, offline use, `inspect`, `tokenize` and the flags.
   once an end-of-text token follows a fully committed answer, no later step
   can change the printed text. mojo-dllm stops there, with the same output.
 - **Logits only where the sampler looks.** A step needs logits for the masked
-  positions of the current block alone, so the 126 464-way output projection
-  runs on those rows.
+  positions the sampler can commit: the current block for LLaDA, every masked
+  position of the canvas for Dream. The output projection (126 464 columns for
+  LLaDA, 152 064 for Dream) runs on those rows.
 - **Each model's own sampler.** LLaDA's blocks and low-confidence remasking
   follow its `generate.py`; Dream's timestep schedule and entropy ranking
   follow its `diffusion_generate`.
@@ -188,7 +201,8 @@ that reproduce it.
 
 Version 0.1 runs on the CPU. Since then, `main` also runs on NVIDIA GPUs
 (`--device gpu`, compute capability 8.0 and newer). Both run LLaDA-8B and Dream-7B from GGUF
-files whose tensors are F32, Q4_K or Q6_K.
+files whose projection matrices are Q4_K or Q6_K. The embedding table and the
+norm and bias vectors may be F32, F16, BF16, Q8_0 or Q5_K as well.
 
 | Milestone | State |
 |---|---|
@@ -197,12 +211,14 @@ files whose tensors are F32, Q4_K or Q6_K.
 | Tokenizer, diffusion sampler, `mojo-dllm run` | done |
 | CPU optimization and benchmark report | two rounds done |
 | Dream-7B (GQA, QKV bias, shifted logits, its sampler) | done |
-| NVIDIA backend (int8 tensor cores) | done on `main`, slower than llama.cpp CUDA |
-| GPU kernel tuning | next |
-| Inter-step caching, block diffusion | research |
+| NVIDIA backend (int8 tensor cores) | done on `main`, compared with llama.cpp CUDA in the GPU tables |
+| GPU kernel tuning | in progress |
+| Inter-step K/V cache (`--dual-cache`, LLaDA) | on `main`, opt in, not exact |
+| Block diffusion models | research |
 
-The [plan](docs/plan.md) lists what the original
-[specification](docs/spec.md) got wrong and how the code handles it.
+The [plan](docs/plan.md) lists seven corrections to the original
+[specification](docs/spec.md) and how the code handles each.
+[Architecture](docs/architecture.md#source-map) maps the source as built.
 
 ## Contributing
 
@@ -211,7 +227,7 @@ Start with [CONTRIBUTING.md](CONTRIBUTING.md). The short version:
 ```bash
 uv sync --frozen
 scripts/ci-local.sh --install-hooks   # pre-commit: fast gates, pre-push: all of them
-scripts/ci-local.sh                   # what CI runs
+scripts/ci-local.sh                   # the CI gates, plus the GPU tests when a GPU is present
 ```
 
 ## License
@@ -221,4 +237,7 @@ Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
 mojo-dllm builds with Modular's Mojo toolchain. The compiler and standard
 library sources are Apache-2.0 with LLVM exceptions; the prebuilt packages and
 runtime libraries that `uv sync` fetches ship under Modular's own terms,
-summarized in NOTICE. LLaDA is by GSAI-ML and released under MIT.
+summarized in NOTICE. LLaDA is by GSAI-ML and released under MIT. Dream-v0 is by
+Dream-org and released under Apache-2.0. DiffuCoder-7B-cpGRPO carries Apple's
+`apple-amlr` license and is not bundled (see the
+[quick start](docs/quickstart.md)).

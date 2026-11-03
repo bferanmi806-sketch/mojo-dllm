@@ -8,7 +8,7 @@ usage: python3 bench/parity.py --model MODEL.gguf [--ref build/llada_ref] [--thr
 records mojo-dllm against it and the two references against each other, which
 shows how far two builds of llama.cpp disagree on the same model.
 
-Writes bench/parity/<date>.json. scripts/bench_table.py renders it into
+Writes bench/parity/<date>-<arch>-<model-stem>[-gpu].json. scripts/bench_table.py renders it into
 docs/correctness.md. Requires build/mojo-dllm and build/llada_ref
 (see docs/correctness.md for how to build the latter).
 """
@@ -21,9 +21,10 @@ import json
 import pathlib
 import subprocess
 import tempfile
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 
-import numpy as np
+if TYPE_CHECKING:
+    import numpy as np
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SPECS = {"llada": dict(vocab=126464, mask=126336), "dream": dict(vocab=152064, mask=151666)}
@@ -62,7 +63,15 @@ def tokenize(model: str, prompt: str) -> list[int]:
     return [int(x) for x in out.strip().splitlines()[-1].strip("[]").split(",")]
 
 
+def result_path(model: str, arch: str, device: str, day: dt.date) -> pathlib.Path:
+    """Different checkpoints of one architecture must not overwrite each other."""
+    suffix = "-gpu" if device == "gpu" else ""
+    return ROOT / "bench" / "parity" / f"{day.isoformat()}-{arch}-{pathlib.Path(model).stem}{suffix}.json"
+
+
 def compare(a: np.ndarray, b: np.ndarray, first_mask: int) -> dict:
+    import numpy as np
+
     cos = np.array([float(x @ y / (np.linalg.norm(x) * np.linalg.norm(y))) for x, y in zip(a, b)])
     rel = np.array([float(np.sqrt(np.mean((x - y) ** 2)) / np.sqrt(np.mean(y**2))) for x, y in zip(a, b)])
     top5 = [len(set(np.argsort(-x)[:5]) & set(np.argsort(-y)[:5])) for x, y in zip(a, b)]
@@ -84,6 +93,8 @@ def main() -> int:
     ap.add_argument("--ref2", default=None, help="a second reference binary, logits only")
     ap.add_argument("--ref2-label", default="llama.cpp CUDA")
     args = ap.parse_args()
+    import numpy as np
+
     VOCAB = SPECS[args.arch]["vocab"]
     MASK = SPECS[args.arch]["mask"]
     logits = []
@@ -145,7 +156,7 @@ def main() -> int:
                reference="llama.cpp libllama via tools/ref/llada_ref.cpp", logits=logits, generation=gens)
     if args.ref2:
         doc["reference2"] = args.ref2_label
-    out = ROOT / "bench" / "parity" / f"{dt.date.today().isoformat()}-{args.arch}{'-gpu' if args.device == 'gpu' else ''}.json"
+    out = result_path(args.model, args.arch, args.device, dt.date.today())
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n")
     print(f"wrote {out.relative_to(ROOT)}")

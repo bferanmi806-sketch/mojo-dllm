@@ -1,0 +1,210 @@
+{
+  "partial": false,
+  "date": "2026-11-03T03:21:50",
+  "machine": {
+    "cpu": "13th Gen Intel(R) Core(TM) i5-13420H",
+    "kernel": "7.0.0-42-generic",
+    "ram_gb": 32.7,
+    "power_profile": "performance",
+    "allow_battery": false,
+    "logical_cpus": 12,
+    "gpu": "NVIDIA GeForce RTX 3050 6GB Laptop GPU, 595.99.02, 6144 MiB"
+  },
+  "versions": {
+    "mojo-dllm": "69e4024",
+    "mojo": "Mojo 1.1.0 (8189361e)",
+    "llama.cpp": "7df8b87",
+    "diffuse-cpp": "1d2bd6a"
+  },
+  "config": {
+    "models": {
+      "gguf": "~/models/llada/LLaDA-8B-Instruct.Q4_K_M.gguf"
+    },
+    "llama_cpp": "~/src/llama.cpp",
+    "diffuse_cpp": "~/src/diffuse-cpp",
+    "runtimes": [
+      "mojo-dllm-gpu",
+      "llama-bench-cuda"
+    ],
+    "prompts": [
+      "Explain speculative decoding in two sentences."
+    ],
+    "gen_length": 128,
+    "steps": 32,
+    "block_length": 32,
+    "threads": 12,
+    "busy_threshold": 0.1,
+    "max_quiet_wait_s": 60,
+    "kill_pytest": false,
+    "kind": "fairness"
+  },
+  "reps": 3,
+  "summary": {
+    "mojo-dllm-gpu": {
+      "runs_ok": 3,
+      "runs_failed": 0,
+      "ms_per_step_median": 225.14541228125,
+      "generate_s_median": 7.204653193,
+      "tokens_per_s_median": 17.76629583286036,
+      "startup_s_median": 2.153183632,
+      "peak_rss_gb_max": 1.145942016,
+      "forward_passes_median": 32,
+      "forward_ms_median": 225.13896334375
+    },
+    "llama-bench-cuda": {
+      "runs_ok": 3,
+      "runs_failed": 0,
+      "ms_per_step_median": null,
+      "generate_s_median": null,
+      "tokens_per_s_median": null,
+      "startup_s_median": null,
+      "peak_rss_gb_max": 5.274099712,
+      "forward_passes_median": null,
+      "forward_ms_median": 242.507514
+    }
+  },
+  "watchdog_kills": [],
+  "runs": [
+    {
+      "ok": true,
+      "wall_s": 9.95,
+      "peak_rss_bytes": 1141706752,
+      "generate_s": 7.19335284,
+      "ms_per_step": 224.79227625000001,
+      "forward_passes": 32,
+      "startup_s": 2.756647159999999,
+      "seq_len": 148,
+      "prompt_tokens": 20,
+      "text": "Speculative decoding is a process used in machine communication to improve the likelihood of a message being by by allowing the receiver of a message to to make the the the best guess guess about the original message based on incomplete information of. This process decoding is often used to the the accuracy of the message of the the original of the message.",
+      "forward_ms": 224.78602028125,
+      "gemm_ms_per_forward": 0.0,
+      "attention_ms_per_forward": 0.1545524375,
+      "lm_head_ms_per_forward": 0.0,
+      "runtime": "mojo-dllm-gpu",
+      "prompt_index": 0,
+      "rep": 0,
+      "started": "2026-11-03T03:21:04",
+      "cpu_busy_before": 0.021,
+      "waited_s": 2.0,
+      "power_waited_s": 0.0,
+      "power_retries": 0,
+      "on_battery": false
+    },
+    {
+      "ok": true,
+      "wall_s": 2.33,
+      "peak_rss_bytes": 5273890816,
+      "forward_ms": 242.507514,
+      "forward_samples_ms": [
+        216.683849,
+        235.385552,
+        275.453143
+      ],
+      "seq_len": 148,
+      "n_threads": 12,
+      "runtime": "llama-bench-cuda",
+      "prompt_index": 0,
+      "rep": 0,
+      "started": "2026-11-03T03:21:16",
+      "cpu_busy_before": 0.014,
+      "waited_s": 2.0,
+      "power_waited_s": 0.0,
+      "power_retries": 0,
+      "on_battery": false
+    },
+    {
+      "ok": true,
+      "wall_s": 9.35,
+      "peak_rss_bytes": 1145913344,
+      "generate_s": 7.204653193,
+      "ms_per_step": 225.14541228125,
+      "forward_passes": 32,
+      "startup_s": 2.1453468069999992,
+      "seq_len": 148,
+      "prompt_tokens": 20,
+      "text": "Speculative decoding is a process used in machine communication to improve the likelihood of a message being by by allowing the receiver of a message to to make the the the best guess guess about the original message based on incomplete information of. This process decoding is often used to the the accuracy of the message of the the original of the message.",
+      "forward_ms": 225.13896334375,
+      "gemm_ms_per_forward": 0.0,
+      "attention_ms_per_forward": 0.15001940625,
+      "lm_head_ms_per_forward": 0.0,
+      "runtime": "mojo-dllm-gpu",
+      "prompt_index": 0,
+      "rep": 1,
+      "started": "2026-11-03T03:21:20",
+      "cpu_busy_before": 0.031,
+      "waited_s": 2.0,
+      "power_waited_s": 0.0,
+      "power_retries": 0,
+      "on_battery": false
+    },
+    {
+      "ok": true,
+      "wall_s": 2.32,
+      "peak_rss_bytes": 5274025984,
+      "forward_ms": 242.411488,
+      "forward_samples_ms": [
+        216.853423,
+        231.882583,
+        278.498458
+      ],
+      "seq_len": 148,
+      "n_threads": 12,
+      "runtime": "llama-bench-cuda",
+      "prompt_index": 0,
+      "rep": 1,
+      "started": "2026-11-03T03:21:32",
+      "cpu_busy_before": 0.016,
+      "waited_s": 2.0,
+      "power_waited_s": 0.0,
+      "power_retries": 0,
+      "on_battery": false
+    },
+    {
+      "ok": true,
+      "wall_s": 9.39,
+      "peak_rss_bytes": 1145942016,
+      "generate_s": 7.236816368,
+      "ms_per_step": 226.15051150000002,
+      "forward_passes": 32,
+      "startup_s": 2.153183632,
+      "seq_len": 148,
+      "prompt_tokens": 20,
+      "text": "Speculative decoding is a process used in machine communication to improve the likelihood of a message being by by allowing the receiver of a message to to make the the the best guess guess about the original message based on incomplete information of. This process decoding is often used to the the accuracy of the message of the the original of the message.",
+      "forward_ms": 226.14372,
+      "gemm_ms_per_forward": 0.0,
+      "attention_ms_per_forward": 0.1546611875,
+      "lm_head_ms_per_forward": 0.0,
+      "runtime": "mojo-dllm-gpu",
+      "prompt_index": 0,
+      "rep": 2,
+      "started": "2026-11-03T03:21:36",
+      "cpu_busy_before": 0.016,
+      "waited_s": 2.0,
+      "power_waited_s": 0.0,
+      "power_retries": 0,
+      "on_battery": false
+    },
+    {
+      "ok": true,
+      "wall_s": 2.34,
+      "peak_rss_bytes": 5274099712,
+      "forward_ms": 244.354782,
+      "forward_samples_ms": [
+        217.732208,
+        236.286978,
+        279.045161
+      ],
+      "seq_len": 148,
+      "n_threads": 12,
+      "runtime": "llama-bench-cuda",
+      "prompt_index": 0,
+      "rep": 2,
+      "started": "2026-11-03T03:21:47",
+      "cpu_busy_before": 0.013,
+      "waited_s": 2.0,
+      "power_waited_s": 0.0,
+      "power_retries": 0,
+      "on_battery": false
+    }
+  ]
+}

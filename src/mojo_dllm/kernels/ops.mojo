@@ -4,8 +4,9 @@ These are a small share of a denoising step (the linear layers are over 98% of
 the arithmetic), so they favour clarity and SIMD over cleverness.
 
 Attention is bidirectional. A diffusion model sees the whole canvas, so there
-is no causal mask and no append-only KV cache: every step recomputes K and V
-for every position, because any position may have changed.
+is no causal mask and, by default, no KV cache: every step recomputes K and V
+for every position, because any position may have changed. `--dual-cache`
+(LLaDA) keeps a block-level cache and gives up exactness.
 """
 
 from std.math import exp, sqrt, cos, sin

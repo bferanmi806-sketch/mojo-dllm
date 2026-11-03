@@ -1,0 +1,24 @@
+# nvidia-smi and one same-session A/B of three builds, 2026-11-03, mains power (ADP1 online=1), power profile balanced
+# Driver 595.99.02, NVIDIA GeForce RTX 3050 6GB Laptop GPU
+# nvidia-smi -q -d POWER (idle):
+        Current Power Limit                            : 30.00 W
+        Requested Power Limit                          : N/A
+        Default Power Limit                            : 60.00 W
+        Min Power Limit                                : 1.00 W
+        Max Power Limit                                : 75.00 W
+        Current Power Limit                            : N/A
+# Per run: LLaDA-8B Q4_K_M, 128 tokens, 32 steps, block 32, --device gpu, three commits interleaved, three rounds.
+# Columns: SM clock and power from nvidia-smi sampled at 1 Hz during the run; throttle is the OR of clocks_throttle_reasons.active
+# (0x4 software power cap, 0x20 software thermal slowdown).
+round  tree   commit   ms_per_step  forward_ms  gemm_ms  attn_ms  clk_med  clk_min  power_med  temp_max  throttle_or  tokens      passes
+1      c50    8d0e36e  247.9        243.8       0.0      0.2      1102.5   210.0    17.7       60.0      0x25         6c03b37da5  32
+1      c53    575dc80  219.6        219.6       0.0      0.2      1061.0   1027.0   29.9       58.0      0x24         6c03b37da5  32
+1      cmain  716e7af  340.3        340.3       0.0      0.3      1072.0   1012.0   29.9       58.0      0x24         6c03b37da5  32
+2      c53    575dc80  219.3        219.3       0.0      0.2      1080.0   1057.0   29.9       58.0      0x24         6c03b37da5  32
+2      cmain  716e7af  218.2        218.2       0.0      0.2      1080.0   1057.0   30.0       56.0      0x24         6c03b37da5  32
+2      c50    8d0e36e  244.2        239.4       0.0      0.3      1132.0   1080.0   29.9       56.0      0x24         6c03b37da5  32
+3      cmain  716e7af  218.4        218.3       0.0      0.2      1080.0   1027.0   29.9       57.0      0x24         6c03b37da5  32
+3      c50    8d0e36e  244.9        240.1       0.0      0.2      1132.0   1057.0   29.9       57.0      0x24         6c03b37da5  32
+3      c53    575dc80  217.9        217.9       0.0      0.2      1076.0   1057.0   30.0       56.0      0x24         6c03b37da5  32
+# commits: c50 = Q4_K prefetch only (8d0e36e), c53 = with #9 to #11 (575dc80), cmain = main at 716e7af.
+# The first main run of round 1 (340.3 ms) is an outlier of unknown cause; the other two main runs agree with c53.

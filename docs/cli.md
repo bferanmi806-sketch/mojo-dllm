@@ -7,6 +7,11 @@ mojo-dllm inspect  PATH
 mojo-dllm logits   --model PATH --tokens IDS --rows POSITIONS --out FILE [--threads N] [--device D]
 ```
 
+This page describes the binary, `build/mojo-dllm`. The `./mojo-dllm run` launcher
+takes the prompt as its first word, accepts `-m` for `--model`, defaults
+`--device` to `auto` and passes the other flags on to the binary; see the
+[Quick start](quickstart.md).
+
 `mojo-dllm COMMAND --help` (or `-h`) prints that command's usage and exits 0.
 Help wins over every other problem in the arguments, wherever it appears, except
 as the value of a flag (`--prompt --help` sets the prompt to `--help`).
@@ -22,8 +27,8 @@ stops the run (see [Errors](#errors)).
 | `--prompt TEXT` | required | the user message |
 | `--max-tokens N` | 128 | tokens to generate (the masked canvas) |
 | `--steps N` | `--max-tokens` | denoising steps; a multiple of the block count |
-| `--block-length N` | 32 | LLaDA's semi-autoregressive block size; must divide `--max-tokens`. Dream ignores it |
-| `--temperature T` | 0 | 0 is greedy; above 0 adds Gumbel noise as LLaDA does |
+| `--block-length N` | 32, or `--max-tokens` when that is smaller | LLaDA's semi-autoregressive block size; must divide `--max-tokens`. Dream ignores it |
+| `--temperature T` | 0 | LLaDA: 0 is greedy; above 0 adds Gumbel noise as LLaDA does. Dream supports only 0 and stops with an error above it |
 | `--remasking S` | `low_confidence` | LLaDA: `low_confidence` or `random`. Dream: `entropy` (the default), `maskgit_plus`, `topk_margin`, `origin`, or llama.cpp-style `random` |
 | `--threshold P` | 0 (off) | LLaDA: each step also commits every masked token whose confidence is at least P, so easy blocks finish in fewer steps (Fast-dLLM's parallel decoding). A step still commits at least what the schedule says. Not exact: see [Benchmarks](benchmarks.md#steps-and-quality) for its measured effect on accuracy |
 | `--dual-cache` | off | LLaDA: cache every position's keys and values and, inside a block, recompute only that block's rows (Fast-dLLM's DualCache). The cache is refreshed at the first step of each block. Not exact: the prompt and later blocks see keys from the block's first step; see [Benchmarks](benchmarks.md#steps-and-quality) for its measured effect on accuracy. Cannot combine with `--full-logits` |
@@ -31,11 +36,12 @@ stops the run (see [Errors](#errors)).
 | `--threads N` | all logical CPUs | worker threads (with `--device gpu`, only the sampler uses them) |
 | `--device D` | `cpu` | `cpu`, or `gpu` for an NVIDIA GPU with compute capability 8.0 or newer |
 | `--no-chat` | off | skip the chat template |
-| `--full-logits` | off | compute logits for every position, as a generic runtime would (for benchmarking) |
+| `--full-logits` | off | LLaDA: compute logits for every position, as a generic runtime would (for benchmarking). Dream ignores it |
 | `--no-suppress-mask` | off | allow the mask token as a sampled answer for parity experiments; by default it is excluded from argmax and the softmax normalizer |
 | `--no-early-stop` | off | run every step even after the answer is final (the benchmark and parity harnesses use it) |
-| `--visual` | off | redraw the canvas after every step: masked positions as teal blocks, tokens committed in that step in bold orange |
-| `--verbose` | off | timings and memory after the text |
+| `--visual` | off | show the canvas: masked positions as teal blocks, tokens committed in that step in bold orange when colour is enabled |
+| `--visual-interval N` | 1 | redraw every N steps and at the final step; requires `--visual` and N at least 1 |
+| `--verbose` | off | model, device and load time before the text; step timings and peak memory after it |
 | `--dump-step-stats` | off | one line per denoising step |
 | `--json` | off | one JSON object with timings, tokens and text |
 
@@ -59,6 +65,26 @@ Mask suppression keeps the Gumbel RNG draw for the excluded token, so toggling
 it does not shift the random stream. On GPU, suppression uses full logits
 because the device row statistics include the mask. `--no-suppress-mask`
 retains the existing device reduction path when its other conditions hold.
+
+### Visual output
+
+The final canvas always appears, including when generation stops early between
+redraws. Its step number is the last observed step; any remaining masks stay
+visible. A final frame that was already drawn is not repeated.
+
+| stdout | `NO_COLOR` | colour codes | clear + home (`ESC[2J ESC[H`) |
+|---|---|---|---|
+| terminal | unset or empty | yes | yes |
+| terminal | non-empty | no | yes |
+| not a terminal | any | no | no; frames separated by one blank line |
+
+Without colour, newly committed tokens have no highlight. Redirected frames
+contain no ANSI escapes. With `--visual --json`, frames still go to stdout
+before the JSON line; consumers should select the line starting with `{`.
+
+Invalid `--visual-interval` values and use without `--visual` exit with status
+1 before model loading. The messages name `--visual-interval`: `must be at
+least 1`, `needs --visual`, or `needs an integer`.
 
 ## `tokenize`
 

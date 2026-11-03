@@ -11,10 +11,10 @@ from mojo_dllm.gpu.model import _Planner, _plan_matrix, GpuDiffusionLM
 
 
 def test_decoder_and_matrix_support() raises:
-    for t in List[Int]([0, 1, 30, 8, 12, 13, 14]):
+    for t in List[Int]([0, 1, 30, 6, 8, 12, 13, 14]):
         assert_true(has_decoder(t))
         assert_equal(has_matrix_kernel(t), t == 12 or t == 14)
-    for t in List[Int]([16, 2, 6]):
+    for t in List[Int]([16, 2, 7]):
         assert_true(not has_decoder(t))
         assert_true(not has_matrix_kernel(t))
 
@@ -85,7 +85,7 @@ def test_gpu_constructor_checks_embedding_before_device_creation() raises:
 
 
 def test_embedding_types_accept_all_decoders_and_name_unknown_tensor() raises:
-    for t in List[Int]([0, 1, 30, 8, 12, 13, 14]):
+    for t in List[Int]([0, 1, 30, 6, 8, 12, 13, 14]):
         check_embedding_type(
             TensorInfo("token_embd.weight", 2, 256, 1, 1, 1, t, 0, 0)
         )

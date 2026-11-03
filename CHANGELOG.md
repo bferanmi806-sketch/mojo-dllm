@@ -12,6 +12,9 @@ semantic versioning (0.y: minor bumps may break things).
   headers, with LLaDA/Dream name mapping and a standalone self-test.
 - Q8_0 and Q5_K reference decoders, with GGUF type sizing and reference tests
   for Q8_0, Q5_K and BF16. Matrix kernel support remains Q4_K and Q6_K.
+- A Q5_0 reference decoder (22-byte blocks of 32 weights) with GGUF type sizing,
+  a reference test against gguf-py's decoder and a hand-built block test of the
+  high-bit layout. It is the first piece of the DiffusionGemma reader (#61).
 - Fused elementwise kernels on the GPU: the residual add, the RMSNorm and the
   activation quantization run as one launch (three per layer boundary plus
   the first norm), and `silu(g) * u` is quantized in the same launch as the
@@ -35,8 +38,9 @@ semantic versioning (0.y: minor bumps may break things).
   `bench/profiles/2026-10-27-argmax-*`, `bench/checks/2026-10-27-argmax-*`).
 - Generation stops once the printed answer is final (an end-of-text token
   after a fully committed answer). The output is identical; `--no-early-stop`
-  runs every step, and the harnesses pass it so comparisons stay step for
-  step.
+  runs every step, and the benchmark, parity, quality and profiling harnesses
+  pass it so comparisons stay step for step. The GSM8K evaluation leaves early
+  stop on.
 - `scripts/gpu_profile.py` (per-kernel device time from an Nsight Systems
   trace), `bench/bench_gpu_gemm.mojo`, and `bench/eval_gsm8k.py`, a paired
   GSM8K-200 evaluation for changes that are not exact.
@@ -55,16 +59,39 @@ semantic versioning (0.y: minor bumps may break things).
   against its CPU twin, and the parity harness takes `--device gpu`.
 - `MOJO_DLLM_GPU_PROFILE=1` splits `--verbose` timings on the GPU.
 - `bench/config-gpu.json` and `bench/config-dream-gpu.json`, against
-  llama.cpp built with CUDA, and their results: llama.cpp's CUDA build is
-  faster than `--device gpu` on the RTX 3050 tested. Results record runs that
+  llama.cpp built with CUDA, and their results. Results record runs that
   started on a busy CPU, and the tables give the quiet-run medians next to
-  them.
+  them. The first results (2026-10-09) had llama.cpp's CUDA build faster than
+  `--device gpu` on the RTX 3050 tested; the kernel work since then reverses
+  that for LLaDA (see Changed).
 - Fairness runs for the CPU comparison: llama.cpp is fastest at 12 threads,
   the most the test CPU runs, and mojo-dllm's forward pass alone stays ahead
   of `llama-bench`.
 
 ### Changed
 
+- The toolchain comes from uv (`uv sync --frozen`, `uv.lock`) instead of pixi, and
+  the `./mojo-dllm` launcher wraps `setup`, `pull`, `run` and `doctor`. The
+  binary exits 2 on a usage error and names the flag, command or value that
+  is wrong.
+- The GPU benchmark tables are refreshed against llama.cpp `7df8b87` (issue
+  #15), on mains power, one result file per table
+  (`bench/results/2026-11-03-*`; the 2026-10-12 files moved to
+  `bench/results/archive/`). The step time of mojo-dllm over llama.cpp CUDA,
+  as the median of paired runs, went from 1.660 to 0.906 for LLaDA and from
+  1.759 to 1.022 for Dream (from 2.413 and 2.391 in the 2026-10-09 files). Both
+  new ratios are rendered under their tables by `scripts/bench_table.py`, which
+  also refuses a ratio from two result files and a summary that disagrees with
+  its runs. `bench/checks/2026-11-03-gpu-power-limit.txt` records the 30 W limit
+  and three builds run back to back: the earlier kernel gains hold, and the day
+  to day swing in absolute milliseconds follows the SM clock.
+- Timed runs happen on mains power. `bench/run_bench.py`,
+  `bench/eval_gsm8k.py`, `bench/quality.py` and `scripts/gpu_profile.py` pause
+  before the next run while the machine is on battery and resume when the
+  charger is back; a run the charger left midway is thrown away and repeated.
+  Each run records `power_retries` and `on_battery`, and `--allow-battery`
+  measures on battery instead. A benchmark refresh started unplugged on
+  2026-10-29, and nothing in the harness noticed.
 - The GGUF reader rejects a `general.alignment` that is not a uint32 or not a
   non-zero power of two, and an array whose element count is negative or
   larger than the bytes left in the file, naming the key (#55, #56). An

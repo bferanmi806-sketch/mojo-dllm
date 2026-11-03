@@ -22,7 +22,8 @@ results):
   denoising step samples only some positions, so the last layer's FFN and the
   output projection run on those rows alone.
 - Every projection reads weights repacked at load time (`kernels/packed.mojo`);
-  the GGUF stays memory-mapped for the embedding table, norms and biases.
+  the GGUF stays memory-mapped for the embedding table, and norms and biases
+  are decoded into f32 arrays at load.
 """
 
 from std.time import perf_counter_ns

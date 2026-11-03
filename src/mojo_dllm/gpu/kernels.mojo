@@ -21,7 +21,7 @@ from std.sys import llvm_intrinsic
 from std.sys.intrinsics import _RegisterPackType
 
 from max.gpu import barrier, block_dim, block_idx, lane_id, thread_idx, warp_id
-from max.gpu.host import DeviceBuffer, DeviceContext
+from max.gpu.host import DeviceAttribute, DeviceBuffer, DeviceContext
 from max.gpu.primitives.warp import (
     max as warp_max,
     shuffle_idx,
@@ -681,12 +681,20 @@ struct GpuQActs(Movable):
     var s: DeviceBuffer[DType.float32]
     var max_tokens: Int
     var K: Int
+    var q4_sm_count: Int
 
     def __init__(out self, ctx: DeviceContext, max_tokens: Int, K: Int) raises:
         if K % 256 != 0:
             raise Error("activation width must be a multiple of 256")
         self.max_tokens = max_tokens
         self.K = K
+        # Query once per buffer, not once per projection. The wave rule is
+        # measured on RTX Blackwell; preserve dispatch on other families.
+        self.q4_sm_count = 0
+        if ctx.get_attribute(DeviceAttribute.COMPUTE_CAPABILITY_MAJOR) == 12:
+            self.q4_sm_count = ctx.get_attribute(
+                DeviceAttribute.MULTIPROCESSOR_COUNT
+            )
         self.q = ctx.enqueue_create_buffer[DType.int8](max_tokens * K)
         self.d = ctx.enqueue_create_buffer[DType.float32](max_tokens * K // QK)
         self.s = ctx.enqueue_create_buffer[DType.float32](max_tokens * K // QK)
@@ -1706,6 +1714,27 @@ def _pick_bn(n_tokens: Int) -> Int:
     return best
 
 
+def _pick_q4_bn(n_tokens: Int, n_rows: Int, sm_count: Int) -> Int:
+    """Use the narrowest Q4_K tile that does not add a block wave.
+
+    Estimate one resident block per SM; this is a scheduling heuristic,
+    not a measured occupancy guarantee. Fewer token tiles alone can waste
+    lanes on a wide GPU: at
+    148 tokens and 4096 weight rows, both BN=80 (64 blocks) and BN=64
+    (96 blocks) fit in one 156-SM wave. The narrower tile does less work.
+    Zero SMs preserves the existing policy for unmeasured device families.
+    """
+    var best = _pick_bn(n_tokens)
+    if sm_count <= 0:
+        return best
+    var row_tiles = _cdiv(n_rows, BM4)
+    var waves = _cdiv(row_tiles * _cdiv(n_tokens, best), sm_count)
+    for bn in [32, 64, 80]:
+        if _cdiv(row_tiles * _cdiv(n_tokens, bn), sm_count) <= waves:
+            return bn
+    return best
+
+
 def gemm_gpu(
     ctx: DeviceContext,
     ggml_type: Int,
@@ -1722,6 +1751,8 @@ def gemm_gpu(
     if K != qa.K or n_tokens > qa.max_tokens:
         raise Error("activation buffer is the wrong shape")
     var bn = _pick_bn(n_tokens)
+    if ggml_type == GGML_Q4_K:
+        bn = _pick_q4_bn(n_tokens, N, qa.q4_sm_count)
     if bn == 32:
         _launch[32](ctx, ggml_type, w, N, K, qa, n_tokens, dst, ldo)
     elif bn == 64:

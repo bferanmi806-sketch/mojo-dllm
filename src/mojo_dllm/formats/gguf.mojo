@@ -30,6 +30,7 @@ comptime GGUF_TYPE_FLOAT64 = 12
 
 comptime GGML_F32 = 0
 comptime GGML_F16 = 1
+comptime GGML_Q5_0 = 6
 comptime GGML_Q8_0 = 8
 comptime GGML_Q4_K = 12
 comptime GGML_Q5_K = 13
@@ -99,6 +100,8 @@ def ggml_row_bytes(t: Int, n: Int) raises -> Int:
         return n * 4
     if t == GGML_F16 or t == GGML_BF16:
         return n * 2
+    if t == GGML_Q5_0:
+        return n // 32 * 22
     if t == GGML_Q8_0:
         return n // 32 * 34
     if t == GGML_Q4_K:
@@ -118,7 +121,7 @@ def _tensor_bytes(t: Int, ne0: Int, rows: Int) -> Int:
 
 
 def ggml_block_size(t: Int) -> Int:
-    if t == GGML_Q8_0:
+    if t == GGML_Q5_0 or t == GGML_Q8_0:
         return 32
     if t == GGML_Q4_K or t == GGML_Q5_K or t == GGML_Q6_K:
         return 256

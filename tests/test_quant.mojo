@@ -1,7 +1,12 @@
 from std.math import abs, sqrt
 from std.testing import assert_equal, assert_true, assert_raises, TestSuite
 
-from mojo_dllm.formats.gguf import GGUFFile, TensorInfo
+from mojo_dllm.formats.gguf import (
+    GGUFFile,
+    TensorInfo,
+    ggml_block_size,
+    ggml_row_bytes,
+)
 from mojo_dllm.quant.kquants import dequant_row, f16_to_f32
 from mojo_dllm.kernels.qgemm import QActs, quantize_acts, qgemm
 from mojo_dllm.kernels.packed import PackedMatrix, pgemm
@@ -59,6 +64,64 @@ def test_f16_special_values() raises:
 def test_q8_0_dequant_matches_reference() raises:
     var g = GGUFFile(FIX + "dequant-types.gguf")
     _expect_rows_match(g, "q8_0", "q8_0.expected")
+
+
+def test_q5_0_dequant_matches_reference() raises:
+    var g = GGUFFile(FIX + "dequant-types.gguf")
+    _expect_rows_match(g, "q5_0", "q5_0.expected")
+
+
+def test_q5_0_high_bits_and_halves() raises:
+    # Block layout: f16 d, uint32 qh (little endian), 16 bytes of nibbles. Weight j
+    # of the first half takes qh bit j, weight j of the second half takes bit j + 16,
+    # and every value is offset by 16 before the scale.
+    var src = Bytes(44)
+    var p = src.u8()
+    # Block 0: d = 1.0, qh bits 0 and 16, qs[0] = 0x21.
+    p.unsafe_store(0, 0x00)
+    p.unsafe_store(1, 0x3C)
+    p.unsafe_store(2, 0x01)
+    p.unsafe_store(3, 0x00)
+    p.unsafe_store(4, 0x01)
+    p.unsafe_store(5, 0x00)
+    p.unsafe_store(6, 0x21)
+    # Block 1: d = 0.5, qh bits 15 and 31, qs[15] = 0x35.
+    p.unsafe_store(22, 0x00)
+    p.unsafe_store(23, 0x38)
+    p.unsafe_store(24, 0x00)
+    p.unsafe_store(25, 0x80)
+    p.unsafe_store(26, 0x00)
+    p.unsafe_store(27, 0x80)
+    p.unsafe_store(28 + 15, 0x35)
+    var dst = Floats(64)
+    dequant_row(6, src.addr, dst.ptr(), 64)
+    for i in range(32):
+        var want = Float32(-16)
+        if i == 0:
+            want = 1
+        if i == 16:
+            want = 2
+        assert_equal(dst[i], want, "block 0 weight " + String(i))
+    for i in range(32):
+        var want = Float32(-8)
+        if i == 15:
+            want = 2.5
+        if i == 31:
+            want = 1.5
+        assert_equal(dst[32 + i], want, "block 1 weight " + String(i))
+
+
+def test_q5_0_row_sizes() raises:
+    assert_equal(ggml_block_size(6), 32)
+    assert_equal(ggml_row_bytes(6, 32), 22)
+    assert_equal(ggml_row_bytes(6, 2816), 2816 // 32 * 22)
+
+
+def test_q5_0_rejects_row_not_multiple_of_32() raises:
+    var src = Bytes(22)
+    var dst = Floats(33)
+    with assert_raises(contains="row length 33 is not a multiple of 32"):
+        dequant_row(6, src.addr, dst.ptr(), 33)
 
 
 def test_q5k_dequant_matches_reference() raises:

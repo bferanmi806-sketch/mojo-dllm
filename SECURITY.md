@@ -2,8 +2,8 @@
 
 mojo-dllm reads GGUF files, which are untrusted input the moment you download
 one. The parser bounds-checks every read against the file size and refuses
-unknown tensor types, implausible counts and tensors that run past the end of
-the file. A crash or out-of-bounds read on a malformed file is a security bug.
+implausible counts and tensors that run past the end of the file. The model
+loaders refuse tensor types they cannot decode. A crash or out-of-bounds read on a malformed file is a security bug.
 
 ## Reporting
 
