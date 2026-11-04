@@ -93,7 +93,8 @@ def test_rejects_too_long_input() raises:
 def test_rejects_wrong_architecture() raises:
     with assert_raises(
         contains=(
-            "unsupported model architecture: test (supported: llada, dream)"
+            "unsupported model architecture: test (runs: llada, dream; read"
+            " only: diffusion-gemma)"
         )
     ):
         _ = DiffusionLM(FIX + "kquants.gguf", threads=1, max_tokens=4)

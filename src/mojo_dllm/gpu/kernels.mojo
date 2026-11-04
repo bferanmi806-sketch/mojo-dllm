@@ -681,18 +681,18 @@ struct GpuQActs(Movable):
     var s: DeviceBuffer[DType.float32]
     var max_tokens: Int
     var K: Int
-    var q4_sm_count: Int
+    var sm_count: Int
 
     def __init__(out self, ctx: DeviceContext, max_tokens: Int, K: Int) raises:
         if K % 256 != 0:
             raise Error("activation width must be a multiple of 256")
         self.max_tokens = max_tokens
         self.K = K
-        # Query once per buffer, not once per projection. The wave rule is
-        # measured on RTX Blackwell; preserve dispatch on other families.
-        self.q4_sm_count = 0
+        # Both dispatch rules share this query, once per activation buffer.
+        # Preserve the old rules outside the measured RTX Blackwell family.
+        self.sm_count = 0
         if ctx.get_attribute(DeviceAttribute.COMPUTE_CAPABILITY_MAJOR) == 12:
-            self.q4_sm_count = ctx.get_attribute(
+            self.sm_count = ctx.get_attribute(
                 DeviceAttribute.MULTIPROCESSOR_COUNT
             )
         self.q = ctx.enqueue_create_buffer[DType.int8](max_tokens * K)
@@ -1431,12 +1431,18 @@ comptime Q6K_WR = (BM * Q6K_CHUNKS + Q6K_THREADS - 1) // Q6K_THREADS
 
 
 @always_inline
-def _q6k_load(
-    w: U8Ptr, row_bytes: Int, r0: Int, n_rows: Int, b: Int, th: Int
-) -> Array[SIMD[DType.int32, 4], Q6K_WR]:
+def _q6k_load[
+    BM: Int = 64, Q6K_THREADS: Int = 128
+](w: U8Ptr, row_bytes: Int, r0: Int, n_rows: Int, b: Int, th: Int) -> Array[
+    SIMD[DType.int32, 4], (BM * Q6K_CHUNKS + Q6K_THREADS - 1) // Q6K_THREADS
+]:
     """This thread's 16-byte chunks of super-block b of rows r0..r0 + BM - 1."""
-    var v = Array[SIMD[DType.int32, 4], Q6K_WR](fill=SIMD[DType.int32, 4](0))
-    comptime for rep in range(Q6K_WR):
+    var v = Array[
+        SIMD[DType.int32, 4], (BM * Q6K_CHUNKS + Q6K_THREADS - 1) // Q6K_THREADS
+    ](fill=SIMD[DType.int32, 4](0))
+    comptime for rep in range(
+        (BM * Q6K_CHUNKS + Q6K_THREADS - 1) // Q6K_THREADS
+    ):
         var unit = th + rep * Q6K_THREADS
         var row = unit // Q6K_CHUNKS
         if unit < BM * Q6K_CHUNKS and r0 + row < n_rows:
@@ -1453,8 +1459,18 @@ def _q6k_load(
 
 
 @always_inline
-def _q6k_store(v: Array[SIMD[DType.int32, 4], Q6K_WR], sW: SharedI32, th: Int):
-    comptime for rep in range(Q6K_WR):
+def _q6k_store[
+    BM: Int = 64, Q6K_THREADS: Int = 128
+](
+    v: Array[
+        SIMD[DType.int32, 4], (BM * Q6K_CHUNKS + Q6K_THREADS - 1) // Q6K_THREADS
+    ],
+    sW: SharedI32,
+    th: Int,
+):
+    comptime for rep in range(
+        (BM * Q6K_CHUNKS + Q6K_THREADS - 1) // Q6K_THREADS
+    ):
         var unit = th + rep * Q6K_THREADS
         if unit < BM * Q6K_CHUNKS:
             sW.unsafe_offset(
@@ -1477,7 +1493,7 @@ def _q6k_frag(ql: Int32, qh: Int32, gg: Int) -> Int32:
 
 
 def _q6k_mma_kernel[
-    BN: Int
+    BN: Int, BM: Int = 64
 ](
     w: U8Ptr,
     N: Int32,
@@ -1489,7 +1505,7 @@ def _q6k_mma_kernel[
     dst: F32Ptr,
     ldo: Int32,
 ):
-    """Q6_K GEMM: BM weight rows by BN tokens per block, 4 warps.
+    """Q6_K GEMM: BM weight rows by BN tokens per block, BM / 16 warps.
 
     Staging is a plain 16-byte copy of each row's 224-byte block (low nibbles,
     high bits, scales, d) into sW. A warp unpacks its A fragments in
@@ -1498,6 +1514,7 @@ def _q6k_mma_kernel[
     the tensor cores. The accumulation order is the one the kernel had when it
     unpacked during staging, so the output is unchanged.
     """
+    comptime Q6K_THREADS = BM * 2
     var sW = unsafe_stack_allocation[
         BM * SWQ6, Int32, alignment=16, address_space=AddressSpace.SHARED
     ]()
@@ -1523,16 +1540,16 @@ def _q6k_mma_kernel[
     var ra = 16 * warp + g
     var rb = ra + 8
     var nb = k // 256
-    var wv = _q6k_load(w, row_bytes, r0, n_rows, 0, th)
+    var wv = _q6k_load[BM, Q6K_THREADS](w, row_bytes, r0, n_rows, 0, th)
     var av = _acts_load[BN, Q6K_THREADS](aq, k, n_tok, t0, 0, th)
     var dv = _scales_load[BN, Q6K_THREADS](ad, as_, k, n_tok, t0, 0, th)
     for b in range(nb):
-        _q6k_store(wv, sW, th)
+        _q6k_store[BM, Q6K_THREADS](wv, sW, th)
         _acts_store[BN, Q6K_THREADS](av, sA, th)
         _scales_store[BN, Q6K_THREADS](dv, sAds, th)
         barrier()
         if b + 1 < nb:
-            wv = _q6k_load(w, row_bytes, r0, n_rows, b + 1, th)
+            wv = _q6k_load[BM, Q6K_THREADS](w, row_bytes, r0, n_rows, b + 1, th)
             av = _acts_load[BN, Q6K_THREADS](aq, k, n_tok, t0, b + 1, th)
             dv = _scales_load[BN, Q6K_THREADS](ad, as_, k, n_tok, t0, b + 1, th)
         # Row words: 0..31 low nibbles, 32..47 high bits, 48..51 the 16 group
@@ -1649,6 +1666,33 @@ def mma_tile_gpu(
         raise Error("mma_tile_gpu takes K = 32 or 16")
 
 
+def _launch_q6[
+    BN: Int, ROWS: Int = 64
+](
+    ctx: DeviceContext,
+    w: U8Ptr,
+    N: Int,
+    K: Int,
+    qa: GpuQActs,
+    n_tokens: Int,
+    dst: F32Ptr,
+    ldo: Int,
+) raises:
+    ctx.enqueue_function[_q6k_mma_kernel[BN, ROWS]](
+        w,
+        Int32(N),
+        Int32(K),
+        dev_i8(qa.q),
+        dev_f32(qa.d),
+        dev_f32(qa.s),
+        Int32(n_tokens),
+        dst,
+        Int32(ldo),
+        grid_dim=(_cdiv(n_tokens, BN), _cdiv(N, ROWS)),
+        block_dim=ROWS * 2,
+    )
+
+
 def _launch[
     BN: Int
 ](
@@ -1714,6 +1758,30 @@ def _pick_bn(n_tokens: Int) -> Int:
     return best
 
 
+def _pick_q6_bn(n_tokens: Int, n_rows: Int, sm_count: Int) -> Int:
+    """Balance short Q6_K tile work against scheduling waves on RTX Blackwell.
+
+    A 16-token overhead per wave approximates staging/barrier work. Unlike
+    just minimizing the number of token tiles, this accounts for narrow GQA
+    projections and for shapes whose 32-token grid fits in two SM waves.
+    It is a measured dispatch heuristic, not an occupancy estimate.
+    Preserve the previous rule for long canvases and other architectures.
+    """
+    var best = _pick_bn(n_tokens)
+    if sm_count <= 0 or n_tokens > 320:
+        return best
+    var row_tiles = _cdiv(n_rows, BM)
+    var cost = (best + 16) * _cdiv(row_tiles * _cdiv(n_tokens, best), sm_count)
+    for bn in [16, 32, 64, 80]:
+        var next_cost = (bn + 16) * _cdiv(
+            row_tiles * _cdiv(n_tokens, bn), sm_count
+        )
+        if next_cost < cost or (next_cost == cost and bn < best):
+            best = bn
+            cost = next_cost
+    return best
+
+
 def _pick_q4_bn(n_tokens: Int, n_rows: Int, sm_count: Int) -> Int:
     """Use the narrowest Q4_K tile that does not add a block wave.
 
@@ -1752,7 +1820,16 @@ def gemm_gpu(
         raise Error("activation buffer is the wrong shape")
     var bn = _pick_bn(n_tokens)
     if ggml_type == GGML_Q4_K:
-        bn = _pick_q4_bn(n_tokens, N, qa.q4_sm_count)
+        bn = _pick_q4_bn(n_tokens, N, qa.sm_count)
+    elif ggml_type == GGML_Q6_K:
+        # Reuse the architecture-qualified SM count cached with the buffer.
+        if qa.sm_count > 0 and n_tokens <= 32 and N >= 65536:
+            _launch_q6[32, 128](ctx, w, N, K, qa, n_tokens, dst, ldo)
+            return
+        bn = _pick_q6_bn(n_tokens, N, qa.sm_count)
+        if bn == 16:
+            _launch_q6[16](ctx, w, N, K, qa, n_tokens, dst, ldo)
+            return
     if bn == 32:
         _launch[32](ctx, ggml_type, w, N, K, qa, n_tokens, dst, ldo)
     elif bn == 64:

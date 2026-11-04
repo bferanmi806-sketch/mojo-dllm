@@ -75,7 +75,7 @@ def extract(root):
                 action, sha = match.groups()
                 line = node.end_mark.line
                 suffix = lines[line][ends[line]:]
-                comment = re.fullmatch(r"\s*#\s*(\S+(?: \(branch\))?)\s*", suffix)
+                comment = re.fullmatch(r"\s*#\s*(\S+)\s*", suffix)
                 if not comment:
                     raise ValueError(f"missing version comment or ambiguous comment for {action}")
                 location = f"{path.relative_to(root).as_posix()}:{node.start_mark.line + 1}"

@@ -55,3 +55,25 @@ to the logits before the argmax; mojo-dllm does the same.
   are candidates (the current block for LLaDA, every masked position for
   Dream), so mojo-dllm computes the output projection (126 464 columns for
   LLaDA, 152 064 for Dream) for those rows alone. The LLaDA benchmark ablation measures what that saves.
+
+## DiffusionGemma's loop
+
+DiffusionGemma does not mask. Its canvas starts as 256 random token ids over
+the whole vocabulary and every step re-scores all of them:
+
+1. Take the temperature `t = t_min + (t_max - t_min) * c / S`, with `c` counting
+   down from `S` (48) to 1: 0.8 on the first step, 0.4 + 0.4/48 on the last.
+2. For each canvas position, find the argmax of its logits, the entropy of
+   `softmax(logits / t)` and one token drawn from that softmax. mojo-dllm reads
+   each 262 144-wide row once for the argmax and the entropy.
+3. Sort positions by entropy, lowest first, and accept each one while the
+   entropies of the positions before it sum to at most 0.1. The lowest-entropy
+   position is always accepted.
+4. Accepted positions keep their drawn token and every other position gets a
+   fresh random id.
+5. The answer is the argmax canvas. The run stops once that canvas has held for
+   one step and its mean entropy is below 0.005, or after 48 steps.
+
+The six numbers are `--eb-steps`, `--eb-t-min`, `--eb-t-max`, `--eb-bound`,
+`--eb-stability` and `--eb-confidence` (see [Command line](cli.md)). A run
+takes as many forward passes as steps, so the sampler decides the cost.

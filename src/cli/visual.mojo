@@ -8,6 +8,12 @@ def frame_style(is_tty: Bool, no_color: String) -> Tuple[Bool, Bool]:
     return (is_tty and no_color == "", is_tty)
 
 
+def prints_answer(visual: Bool, is_tty: Bool) -> Bool:
+    """Whether `run` prints the answer after generation. On a terminal the
+    last canvas frame already shows it, so `--visual` skips the second copy."""
+    return not (visual and is_tty)
+
+
 def render_frame(
     tok: Tokenizer,
     tokens: List[Int],

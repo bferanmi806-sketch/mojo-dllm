@@ -262,3 +262,54 @@ The GPU tables need `--device gpu` and a second reference. Compile
 [Development](development.md#benchmarks)), name the result
 `build/llada_ref_cuda`, and add `--device gpu --ref2 build/llada_ref_cuda` to
 the `bench/parity.py` commands.
+
+## DiffusionGemma
+
+Mainline llama.cpp cannot load a DiffusionGemma GGUF. The reference is the
+branch of ggml-org/llama.cpp#24423, built at one commit by
+`scripts/build_dg_ref.sh` (CPU only, no network after the fetch) into its own
+tree, `$DG_LLAMA_SRC`, beside the mainline checkout. The commit is the
+`PINNED_COMMIT` in that script, and `tests/fixtures/gemma4-tokenizer-golden.provenance.json`
+records the same one. `tools/ref/dg_ref.cpp` is linked against that build and
+writes the canvas logits of one denoising step: the unified `[prompt | canvas]`
+pass or the prompt K/V path (a prefill of the prompt, then one decode step), each
+without self-conditioning and with it, from a previous-step buffer given on the
+command line.
+
+The model file is 16.81 GB and mojo-dllm keeps its own repacked copy beside the
+mapping the reference holds, so the two never run together. `bench/parity.py`
+runs them in turns and compares saved files:
+
+```bash
+scripts/build_dg_ref.sh
+uv run --only-group fixtures python bench/parity.py --arch diffusion-gemma --phase ref \
+    --model models/diffusiongemma-26B-A4B-it-Q4_K_M.gguf --llama-src "$DG_LLAMA_SRC"
+# mojo-dllm writes build/dg-parity/<model>/caseN/<variant>.mojo.f32 (the forward pass is #64)
+uv run --only-group fixtures python bench/parity.py --arch diffusion-gemma --phase compare \
+    --model models/diffusiongemma-26B-A4B-it-Q4_K_M.gguf
+```
+
+The comparison stops with a message while any mojo-dllm file is missing, and
+refuses a file that is byte-identical to the reference's. It writes evidence to
+`bench/parity/` only when every variant is no worse than the worst case of the
+LLaDA comparison in `bench/parity/2026-10-03-llada.json`, on each of minimum
+cosine, argmax agreement, top-5 overlap and maximum relative RMS. The bound is
+read from that file, not typed. A fifth metric holds the largest logit of every
+row to the same relative error as LLaDA's rows reach: the final soft-cap pins
+that logit near 30, so the first four cannot see the cap removed.
+`bench/check_dg_bound.py` shows what the bound rejects.
+
+Each case records how far the reference lies from itself: the prompt K/V path
+against the unified pass, and the unified pass again with the previous-step
+logits changed by one part in a million. On the two LLaDA prompts with a random
+canvas those distances exceed the LLaDA bound (the one-in-a-million change moved
+the output by a median relative RMS of 0.18 to 0.26). No LLaDA spread was
+measured for comparison. The cause is untested: expert routing flips (8 of 128
+experts per token) carried to every row by bidirectional attention are a
+hypothesis. A failed comparison prints these distances beside the verdict. No
+DiffusionGemma result is recorded yet, so the tables above hold none.
+
+The tokenizer goldens in `tests/fixtures/gemma4-tokenizer-golden.tsv` fix the
+encoding only. Decoding the ids through the GGUF vocabulary restores 53 of the
+54 strings; the string holding a literal U+2581 does not come back, because
+decoding turns every U+2581 into a space.

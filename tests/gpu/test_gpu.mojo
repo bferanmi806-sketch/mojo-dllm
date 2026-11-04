@@ -37,6 +37,7 @@ from mojo_dllm.gpu.kernels import (
     _pick_bn,
     _pick_q4_bn,
     _launch,
+    _launch_q6,
 )
 from mojo_dllm.gpu.model import GpuDiffusionLM
 from mojo_dllm.kernels.ops import (
@@ -558,6 +559,36 @@ def test_q4_tile_widths_preserve_outputs() raises:
             assert_equal(x32[i], x80[i], "32 vs 80: " + String(i))
 
 
+def test_q6_short_and_tall_tiles_preserve_outputs() raises:
+    var ctx = DeviceContext()
+    var g = GGUFFile(FIX + "tiny-llada.gguf")
+    var t = g.tensor("blk.1.ffn_down.weight")
+    var K = t.ne0
+    var N = 200
+    var staged = Bytes(staged_matrix_bytes(t.ggml_type, N, K))
+    stage_matrix(g.data_addr(t), t.ggml_type, N, K, staged.u8())
+    var dw = ctx.enqueue_create_buffer[DType.uint8](staged.size)
+    ctx.enqueue_copy(dw, staged.u8())
+    for rows in [1, 17, 32, 155, 283]:
+        var x = Floats(rows * K)
+        _fill(x, 31)
+        var dx = _up(ctx, x)
+        var qa = GpuQActs(ctx, rows, K)
+        quantize_gpu(ctx, dev_f32(dx), rows, K, qa)
+        var a = ctx.enqueue_create_buffer[DType.float32](rows * N)
+        var b = ctx.enqueue_create_buffer[DType.float32](rows * N)
+        var c = ctx.enqueue_create_buffer[DType.float32](rows * N)
+        _launch[80](ctx, t.ggml_type, dev_u8(dw), N, K, qa, rows, dev_f32(a), N)
+        _launch_q6[16](ctx, dev_u8(dw), N, K, qa, rows, dev_f32(b), N)
+        _launch_q6[32, 128](ctx, dev_u8(dw), N, K, qa, rows, dev_f32(c), N)
+        var reference = _down(ctx, a, rows * N)
+        var narrow = _down(ctx, b, rows * N)
+        var tall = _down(ctx, c, rows * N)
+        for i in range(rows * N):
+            assert_equal(reference[i], narrow[i], "Q6 BN16: " + String(i))
+            assert_equal(reference[i], tall[i], "Q6 BM128: " + String(i))
+
+
 def _check_forward(path: String, vocab: Int, bound: Float64) raises:
     # The canvas tests/fixtures/*.expected.f32 was computed for.
     var toks: List[Int] = [5, 17, 300, 511, 511, 42, 511, 7]
@@ -892,6 +923,11 @@ def test_dual_cache_generation_on_the_host_logits_path() raises:
     assert_equal(len(a.tokens), len(b.tokens))
     for i in range(len(a.tokens)):
         assert_equal(a.tokens[i], b.tokens[i], "token " + String(i))
+
+
+def test_the_gpu_model_reads_but_does_not_run_diffusion_gemma() raises:
+    with assert_raises(contains="diffusion-gemma has no forward pass yet"):
+        _ = GpuDiffusionLM(FIX + "tiny-diffusion-gemma.gguf", max_tokens=16)
 
 
 def main() raises:

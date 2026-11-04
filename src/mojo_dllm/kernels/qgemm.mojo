@@ -41,45 +41,67 @@ struct QActs(Movable):
 
     var n_tokens: Int
     var K: Int
+    var block_size: Int
     var q: Bytes
     var d: Floats
-    """One scale per 256 values."""
+    """One scale per block_size values (256 for K-quants, 32 for Q5_0/Q8_0)."""
     var s: Floats
     """d * sum(q) per 16 values."""
 
-    def __init__(out self, n_tokens: Int, K: Int) raises:
-        if K % QK != 0:
+    def __init__(out self, n_tokens: Int, K: Int, block_size: Int = QK) raises:
+        if block_size != 32 and block_size != QK:
             raise Error(
-                "activation length " + String(K) + " is not a multiple of 256"
+                "unsupported activation block size " + String(block_size)
+            )
+        if n_tokens < 0 or K <= 0:
+            raise Error(
+                "activation dimensions need nonnegative tokens and positive K"
+            )
+        if K % block_size != 0:
+            raise Error(
+                "activation length "
+                + String(K)
+                + " is not a multiple of "
+                + String(block_size)
             )
         self.n_tokens = n_tokens
         self.K = K
+        self.block_size = block_size
         self.q = Bytes(n_tokens * K)
-        self.d = Floats(n_tokens * (K // QK))
+        self.d = Floats(n_tokens * (K // block_size))
         self.s = Floats(n_tokens * (K // GROUP))
 
 
 def quantize_acts(x: F32Ptr, n_tokens: Int, K: Int, mut qa: QActs) raises:
-    if K != qa.K or n_tokens > qa.n_tokens:
+    if K != qa.K or n_tokens < 0 or n_tokens > qa.n_tokens:
         raise Error("activation buffer is too small for this matrix")
+    if qa.block_size == 32:
+        _quantize_acts[32](x, n_tokens, K, qa)
+    else:
+        _quantize_acts[QK](x, n_tokens, K, qa)
+
+
+def _quantize_acts[
+    BLOCK: Int
+](x: F32Ptr, n_tokens: Int, K: Int, mut qa: QActs) raises:
     var qp = qa.q.i8()
     var dp = qa.d.ptr()
     var sp = qa.s.ptr()
     var xp = x
-    var nb = K // QK
+    var nb = K // BLOCK
 
     def work(m: Int) {imm}:
         for b in range(nb):
-            var src = xp.unsafe_offset(m * K + b * QK)
+            var src = xp.unsafe_offset(m * K + b * BLOCK)
             var amax = SIMD[DType.float32, 8](0)
-            for i in range(0, QK, 8):
+            for i in range(0, BLOCK, 8):
                 amax = max(amax, abs(src.unsafe_load[width=8](i)))
             var mx = amax.reduce_max()
             var d = mx / 127.0
             var inv = Float32(127.0) / mx if mx > 0 else Float32(0)
             dp.unsafe_store(m * nb + b, d)
-            var dst = qp.unsafe_offset(m * K + b * QK)
-            for g in range(QK // GROUP):
+            var dst = qp.unsafe_offset(m * K + b * BLOCK)
+            for g in range(BLOCK // GROUP):
                 var v0 = round(src.unsafe_load[width=8](g * 16) * inv)
                 var v1 = round(src.unsafe_load[width=8](g * 16 + 8) * inv)
                 var q0 = v0.cast[DType.int32]()
@@ -87,7 +109,7 @@ def quantize_acts(x: F32Ptr, n_tokens: Int, K: Int, mut qa: QActs) raises:
                 dst.unsafe_store(g * 16, q0.cast[DType.int8]())
                 dst.unsafe_store(g * 16 + 8, q1.cast[DType.int8]())
                 sp.unsafe_store(
-                    m * (K // GROUP) + b * (QK // GROUP) + g,
+                    m * (K // GROUP) + b * (BLOCK // GROUP) + g,
                     d * Float32((q0 + q1).reduce_add()),
                 )
 
@@ -299,6 +321,8 @@ def qgemm(
     threads: Int,
 ) raises:
     """out[m * ldo + n] = sum_k W[n, k] * x[m, k] for n < N, m < n_tokens."""
+    if qa.block_size != QK:
+        raise Error("qgemm requires activation block size 256")
     if K != qa.K:
         raise Error(
             "activation length "

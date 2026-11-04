@@ -1,0 +1,80 @@
+{
+  "method": "git ls-remote with annotated-tag peeling; gh unavailable on gpu1",
+  "checks": [
+    {
+      "action": "actions/checkout",
+      "tag": "v7.0.1",
+      "commit": "3d3c42e5aac5ba805825da76410c181273ba90b1",
+      "location": ".github/workflows/ci.yml:25",
+      "matches": true
+    },
+    {
+      "action": "actions/setup-node",
+      "tag": "v7.0.0",
+      "commit": "820762786026740c76f36085b0efc47a31fe5020",
+      "location": ".github/workflows/ci.yml:27",
+      "matches": true
+    },
+    {
+      "action": "astral-sh/setup-uv",
+      "tag": "v10.2.0",
+      "commit": "c18668ad3cf93ea998bef934396af7bb5c839dc7",
+      "location": ".github/workflows/ci.yml:31",
+      "matches": true
+    },
+    {
+      "action": "actions/checkout",
+      "tag": "v7.0.1",
+      "commit": "3d3c42e5aac5ba805825da76410c181273ba90b1",
+      "location": ".github/workflows/ci.yml:82",
+      "matches": true
+    },
+    {
+      "action": "astral-sh/setup-uv",
+      "tag": "v10.2.0",
+      "commit": "c18668ad3cf93ea998bef934396af7bb5c839dc7",
+      "location": ".github/workflows/ci.yml:84",
+      "matches": true
+    },
+    {
+      "action": "actions/checkout",
+      "tag": "v7.0.1",
+      "commit": "3d3c42e5aac5ba805825da76410c181273ba90b1",
+      "location": ".github/workflows/ci.yml:114",
+      "matches": true
+    },
+    {
+      "action": "actions/checkout",
+      "tag": "v7.0.1",
+      "commit": "3d3c42e5aac5ba805825da76410c181273ba90b1",
+      "location": ".github/workflows/docs.yml:32",
+      "matches": true
+    },
+    {
+      "action": "actions/upload-pages-artifact",
+      "tag": "v5.0.0",
+      "commit": "fc324d3547104276b827a68afc52ff2a11cc49c9",
+      "location": ".github/workflows/docs.yml:50",
+      "matches": true
+    },
+    {
+      "action": "actions/deploy-pages",
+      "tag": "v5.0.1",
+      "commit": "368f82528645a54fb793d4d04e342629a3f51346",
+      "location": ".github/workflows/docs.yml:63",
+      "matches": true
+    },
+    {
+      "action": "actions/checkout",
+      "tag": "v7.0.1",
+      "commit": "3d3c42e5aac5ba805825da76410c181273ba90b1",
+      "location": ".github/workflows/secret-scan.yml:31",
+      "matches": true
+    },
+    {
+      "action": "trufflesecurity/trufflehog",
+      "location": ".github/workflows/secret-scan.yml:36",
+      "policy": "moving branch comment; no tag comparison"
+    }
+  ]
+}

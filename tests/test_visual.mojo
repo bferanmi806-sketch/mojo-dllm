@@ -2,7 +2,7 @@ from std.ffi import c_int, c_size_t, external_call
 from std.testing import assert_equal, assert_true, TestSuite
 
 from cli.args import Args
-from cli.visual import CanvasPrinter, frame_style, render_frame
+from cli.visual import CanvasPrinter, frame_style, prints_answer, render_frame
 from main import _run
 from mojo_dllm.diffusion.sampler import (
     GenConfig,
@@ -293,6 +293,14 @@ def test_non_tty_interval_frames_have_no_escapes_or_clears() raises:
         assert_equal(_count(captured, "denoising step"), pair[1])
         assert_equal(captured.find("\u001b"), -1)
         assert_equal(_count(captured, "\n\n"), pair[1] * 2)
+
+
+def test_answer_is_not_printed_twice_on_a_terminal() raises:
+    # The last canvas frame already holds the answer when a terminal shows it.
+    assert_true(not prints_answer(True, True))
+    assert_true(prints_answer(False, True))
+    assert_true(prints_answer(True, False))
+    assert_true(prints_answer(False, False))
 
 
 def main() raises:

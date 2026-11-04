@@ -148,7 +148,9 @@ struct MaskPreferringModel(DenoisingModel, Movable):
         return self.timing
 
 
-def _check_mask_suppression_with_mask_preferring_model(path: String) raises:
+def _check_mask_suppression_with_mask_preferring_model(
+    path: String, temperature: Float64
+) raises:
     var model = MaskPreferringModel(FIX + path)
     var mask_id = model.config().mask_id
     var prompt: List[Int] = [5, 17, 300]
@@ -156,6 +158,7 @@ def _check_mask_suppression_with_mask_preferring_model(path: String) raises:
     c.gen_length = 8
     c.block_length = 4
     c.steps = 4
+    c.temperature = temperature
     c.mask_id = mask_id
 
     var suppressed = generate(model, prompt, c)
@@ -179,11 +182,15 @@ def _check_mask_suppression_with_mask_preferring_model(path: String) raises:
 
 
 def test_mask_suppression_wins_over_mask_favouring_llada_logits() raises:
-    _check_mask_suppression_with_mask_preferring_model("tiny-llada.gguf")
+    _check_mask_suppression_with_mask_preferring_model("tiny-llada.gguf", 0.0)
+
+
+def test_mask_suppression_with_llada_temperature_0_5() raises:
+    _check_mask_suppression_with_mask_preferring_model("tiny-llada.gguf", 0.5)
 
 
 def test_mask_suppression_wins_over_mask_favouring_dream_logits() raises:
-    _check_mask_suppression_with_mask_preferring_model("tiny-dream.gguf")
+    _check_mask_suppression_with_mask_preferring_model("tiny-dream.gguf", 0.0)
 
 
 def test_generation_resolves_every_mask() raises:
@@ -323,6 +330,46 @@ def test_early_stop_keeps_the_visible_answer_llada() raises:
 
 def test_early_stop_keeps_the_visible_answer_dream() raises:
     _check_early_stop("tiny-dream.gguf", 510, 16)
+
+
+def _check_stop_report(path: String, mask: Int, block: Int) raises:
+    # `--json` reports steps_taken and stop_reason for every model: the passes
+    # run, and why the loop ended ("answer_fixed" exactly when it stopped early).
+    var m = DiffusionLM(FIX + path, threads=2, max_tokens=24)
+    var prompt: List[Int] = [5, 17, 300]
+    var c = GenConfig()
+    c.gen_length = 16
+    c.block_length = block
+    c.steps = 16
+    c.mask_id = mask
+    c.early_stop = False
+    var full = generate(m, prompt, c)
+    assert_equal(full.steps_taken, full.forward_passes)
+    assert_equal(full.stop_reason, "complete", path)
+    assert_true(not full.stopped_early)
+    var fixed = 0
+    for i in range(len(prompt), len(full.tokens)):
+        var e = c.copy()
+        e.early_stop = True
+        e.stop_ids = [full.tokens[i]]
+        var early = generate(m, prompt, e)
+        assert_equal(early.steps_taken, early.forward_passes)
+        if early.stopped_early:
+            fixed += 1
+            assert_equal(early.stop_reason, "answer_fixed", path)
+            break
+        assert_equal(early.stop_reason, "complete", path)
+    assert_true(
+        fixed > 0, path + ": no run stopped early, so the check is vacuous"
+    )
+
+
+def test_llada_json_members_report_steps_and_reason() raises:
+    _check_stop_report("tiny-llada.gguf", 511, 4)
+
+
+def test_dream_json_members_report_steps_and_reason() raises:
+    _check_stop_report("tiny-dream.gguf", 510, 16)
 
 
 def _threshold_cfg(threshold: Float64) -> GenConfig:

@@ -1,0 +1,20 @@
+{
+  "models": {
+    "gguf": "/home/hy/experiments/mojo-dllm-6000d-round1/models/Dream-v0-Instruct-7B.Q4_K_M.gguf"
+  },
+  "llama_cpp": "unused",
+  "diffuse_cpp": "unused",
+  "runtimes": [
+    "mojo-dllm-gpu"
+  ],
+  "prompts": [
+    "Explain speculative decoding in two sentences."
+  ],
+  "gen_length": 128,
+  "steps": 32,
+  "block_length": 32,
+  "threads": 8,
+  "busy_threshold": 1.0,
+  "max_quiet_wait_s": 0,
+  "kill_pytest": false
+}

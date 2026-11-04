@@ -2,6 +2,11 @@ name: Feature or model request
 description: A new model, format, backend or flag.
 labels: ["enhancement"]
 body:
+  - type: markdown
+    attributes:
+      value: |
+        Changes that make a forward pass faster, a format better supported, or a number better verified are the ones
+        that land (see [CONTRIBUTING.md](https://github.com/vladimirrott/mojo-dllm/blob/main/CONTRIBUTING.md)).
   - type: textarea
     id: what
     attributes:
@@ -14,5 +19,32 @@ body:
     attributes:
       label: Why
       description: What it lets you do that you cannot do now.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: The part of the project the change touches. Pick the closest one.
+      options:
+        - GPU kernels or dispatch
+        - CPU kernels
+        - Sampler or decoding policy
+        - CLI or launcher
+        - Models or formats
+        - Performance measurement
+        - Tests
+        - CI or release
+        - Docs
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: How we would know it worked
+      description: >-
+        A benchmark, a parity check against a reference implementation, or a test. Name the command, the file or the
+        number you would compare.
     validations:
       required: true

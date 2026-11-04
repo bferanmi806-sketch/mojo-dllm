@@ -3,10 +3,11 @@
     mojo-dllm run      --model M --prompt TEXT [--max-tokens N] [--steps N] [--block-length N]
                        [--seed N] [--temperature T] [--threads N] [--device cpu|gpu]
                        [--remasking S] [--threshold P] [--dual-cache]
-                       [--remasking S] [--threshold P] [--dual-cache]
                        [--no-chat] [--full-logits] [--no-early-stop] [--no-suppress-mask]
                        [--visual] [--visual-interval N] [--verbose]
                        [--dump-step-stats] [--json]
+                       [--eb-steps N] [--eb-t-min T] [--eb-t-max T] [--eb-bound B]
+                       [--eb-stability N] [--eb-confidence C]
     mojo-dllm tokenize --model M --prompt TEXT [--no-chat]
     mojo-dllm inspect  MODEL.gguf
     mojo-dllm logits   --model M --tokens 1,2,3 --rows 0,2 --out logits.f32 [--threads N] [--device cpu|gpu]
@@ -19,14 +20,20 @@ from std.sys import argv, exit, num_logical_cores
 from std.time import perf_counter_ns
 
 from cli.args import Args, parse_csv_ints, unknown_flag_error
-from cli.visual import CanvasPrinter
+from cli.visual import CanvasPrinter, prints_answer
 from mojo_dllm.formats.gguf import GGUFFile, GGUF_TYPE_ARRAY
 from mojo_dllm.diffusion.sampler import (
     GenConfig,
+    GenResult,
     generate_observed,
 )
 from mojo_dllm.gpu.model import GpuDiffusionLM
-from mojo_dllm.models.transformer import DenoisingModel, DiffusionLM
+from mojo_dllm.models.transformer import (
+    DenoisingModel,
+    DiffusionLM,
+    ModelConfig,
+    GEMMA_ARCH,
+)
 from mojo_dllm.sys.mem import Bytes, Floats
 from mojo_dllm.tokenizer.bpe import Tokenizer
 
@@ -78,6 +85,12 @@ def command_spec(command: String) raises -> CommandSpec:
                 "threads",
                 "device",
                 "visual-interval",
+                "eb-steps",
+                "eb-t-min",
+                "eb-t-max",
+                "eb-bound",
+                "eb-stability",
+                "eb-confidence",
             ],
             boolean_flags(),
             ["model", "prompt"],
@@ -108,7 +121,10 @@ def command_usage(command: String) raises -> String:
             + "                [--remasking S] [--threshold P] [--dual-cache]\n"
             + "                [--no-chat] [--full-logits] [--no-early-stop]"
             " [--no-suppress-mask] [--visual] [--visual-interval N] [--verbose]"
-            " [--dump-step-stats] [--json]"
+            " [--dump-step-stats] [--json]\n"
+            + "                [--eb-steps 48] [--eb-t-min 0.4] [--eb-t-max"
+            " 0.8] [--eb-bound 0.1]\n"
+            + "                [--eb-stability 1] [--eb-confidence 0.005]"
         )
     if command == "tokenize":
         return "  mojo-dllm tokenize --model M --prompt TEXT [--no-chat]"
@@ -126,6 +142,11 @@ def usage_for(command: String) raises -> String:
     return "usage:\n" + command_usage(command)
 
 
+def version_line() -> String:
+    """The one line `mojo-dllm --version` prints."""
+    return "mojo-dllm " + VERSION
+
+
 def usage() raises -> String:
     return (
         "mojo-dllm "
@@ -141,6 +162,7 @@ def usage() raises -> String:
         + command_usage("logits")
         + "\n"
         + "\nrun mojo-dllm COMMAND --help for one command's usage\n"
+        + "run mojo-dllm --version to print the version\n"
     )
 
 
@@ -189,7 +211,15 @@ def _number_problems(a: Args) raises -> String:
     Run before any model is mapped: `--steps abc` and `--threads 0` are
     wrong whatever the model is.
     """
-    for flag in ["max-tokens", "steps", "block-length", "threads", "seed"]:
+    for flag in [
+        "max-tokens",
+        "steps",
+        "block-length",
+        "threads",
+        "seed",
+        "eb-steps",
+        "eb-stability",
+    ]:
         if not a.has(flag):
             continue
         var raw = a.values[flag]
@@ -198,8 +228,30 @@ def _number_problems(a: Args) raises -> String:
             n = Int(raw)
         except:
             return "flag --" + flag + " needs an integer, got '" + raw + "'"
-        if flag != "seed" and n < 1:
+        if flag == "eb-stability":
+            if n < 0:
+                return "flag --" + flag + " must be at least 0, got " + raw
+        elif flag != "seed" and n < 1:
             return "flag --" + flag + " must be at least 1, got " + raw
+    for flag in ["eb-t-min", "eb-t-max", "eb-bound", "eb-confidence"]:
+        if not a.has(flag):
+            continue
+        var raw = a.values[flag]
+        var x = Float64(0)
+        var parsed = True
+        try:
+            x = Float64(raw)
+        except:
+            parsed = False
+        if not parsed or not isfinite(x):
+            return (
+                "flag --" + flag + " needs a finite number, got '" + raw + "'"
+            )
+        if flag == "eb-t-max":
+            if x <= 0:
+                return "flag --" + flag + " must be above 0, got " + raw
+        elif x < 0:
+            return "flag --" + flag + " must be at least 0, got " + raw
     if a.has("temperature"):
         var raw = a.values["temperature"]
         var t = Float64(0)
@@ -374,6 +426,45 @@ def cmd_tokenize(a: Args) raises:
     print("[" + s + "]")
 
 
+def eb_flags() -> List[String]:
+    """The flags only DiffusionGemma's entropy-bounded denoiser reads."""
+    return [
+        "eb-steps",
+        "eb-t-min",
+        "eb-t-max",
+        "eb-bound",
+        "eb-stability",
+        "eb-confidence",
+    ]
+
+
+def check_arch_flags(a: Args, arch: String) raises:
+    """Refuse a flag the model's architecture ignores: a run that quietly
+    takes another number of steps than asked for is a wrong answer."""
+    if arch == "diffusion-gemma":
+        if a.has("steps"):
+            raise Error(
+                "--steps does not apply to diffusion-gemma; use --eb-steps"
+            )
+        return
+    for flag in eb_flags():
+        if a.has(flag):
+            raise Error(
+                "--" + flag + " applies to diffusion-gemma only, not " + arch
+            )
+
+
+def stop_json(res: GenResult) -> String:
+    """The JSON members that say how many steps ran and why the run ended."""
+    return (
+        ', "steps_taken": '
+        + String(res.steps_taken)
+        + ', "stop_reason": "'
+        + res.stop_reason
+        + '"'
+    )
+
+
 def cmd_run(a: Args) raises:
     var interval: Int
     try:
@@ -397,8 +488,17 @@ def cmd_run(a: Args) raises:
     cfg.dual_cache = a.has("dual-cache")
     cfg.suppress_mask = not a.has("no-suppress-mask")
     cfg.threads = threads
+    cfg.eb_steps = a.int_or("eb-steps", cfg.eb_steps)
+    cfg.eb_t_min = a.float_or("eb-t-min", cfg.eb_t_min)
+    cfg.eb_t_max = a.float_or("eb-t-max", cfg.eb_t_max)
+    cfg.eb_bound = a.float_or("eb-bound", cfg.eb_bound)
+    cfg.eb_stability = a.int_or("eb-stability", cfg.eb_stability)
+    cfg.eb_confidence = a.float_or("eb-confidence", cfg.eb_confidence)
     var t0 = perf_counter_ns()
     var g = GGUFFile(a.get("model"))
+    check_arch_flags(a, g.architecture())
+    if g.architecture() == "diffusion-gemma":
+        cfg.steps = cfg.eb_steps
     var tok = Tokenizer(g)
     var prompt = encode_prompt(tok, g.architecture(), a)
     _ = g^
@@ -477,6 +577,21 @@ def _run[
                 "  schedule: Dream timesteps, eps",
                 cfg.eps,
             )
+        elif model.config().arch == "diffusion-gemma":
+            print(
+                "diffusion steps: at most",
+                cfg.eb_steps,
+                "  entropy bound:",
+                cfg.eb_bound,
+                "  temperature:",
+                cfg.eb_t_max,
+                "down to",
+                cfg.eb_t_min,
+                "  stop: stable for",
+                cfg.eb_stability,
+                "and mean entropy below",
+                cfg.eb_confidence,
+            )
         else:
             print(
                 "diffusion steps:",
@@ -492,13 +607,14 @@ def _run[
     for s in [tok.eos_id, tok.eot_id]:
         if s >= 0:
             cfg.stop_ids.append(s)
+    var is_tty = external_call["isatty", c_int](c_int(1)) != 0
     var printer = CanvasPrinter(
         tok^,
         len(prompt),
         model.config().mask_id,
         a.has("visual"),
         a.int_or("visual-interval", 1),
-        external_call["isatty", c_int](c_int(1)) != 0,
+        is_tty,
         getenv("NO_COLOR"),
     )
     var res = generate_observed(model, prompt, cfg, printer)
@@ -545,6 +661,7 @@ def _run[
             + ("true" if res.stopped_early else "false")
             + ', "forward_passes": '
             + String(res.forward_passes)
+            + stop_json(res)
             + ', "load_s": '
             + String(model.load_time())
             + ', "tokenizer_s": '
@@ -573,7 +690,8 @@ def _run[
             + "}"
         )
         return
-    print(text)
+    if prints_answer(a.has("visual"), is_tty):
+        print(text)
     if verbose:
         print()
         print(
@@ -610,31 +728,116 @@ def _csv(xs: List[Int]) -> String:
     return s
 
 
-def cmd_inspect(a: Args) raises:
-    var g = GGUFFile(a.positional[0])
-    print("file:", a.positional[0])
-    print("gguf version:", g.version)
-    print("architecture:", g.get_str_or("general.architecture", "?"))
-    print("name:", g.get_str_or("general.name", "?"))
-    print("tensors:", g.n_tensors())
-    print("metadata keys:", len(g.kvs))
-    print()
-    print("metadata:")
+def _gemma_config_text(g: GGUFFile) -> String:
+    """The `config:` block of `inspect` for a diffusion-gemma file: what the
+    reader took from it, or the reason it refuses the file. `inspect` lists a
+    file either way."""
+    try:
+        var c = ModelConfig(g)
+        var sliding = 0
+        var global_layers = String("")
+        for i in range(c.n_layers):
+            if c.is_sliding(i):
+                sliding += 1
+            else:
+                if global_layers.byte_length() > 0:
+                    global_layers += ", "
+                global_layers += String(i)
+        if global_layers.byte_length() == 0:
+            global_layers = "none"
+        var text = String("config:\n")
+        text += (
+            "  blocks: "
+            + String(c.n_layers)
+            + " (sliding "
+            + String(sliding)
+            + ", global "
+            + String(c.n_layers - sliding)
+            + ")\n"
+        )
+        text += "  global layers: " + global_layers + "\n"
+        text += "  hidden size: " + String(c.hidden) + "\n"
+        text += "  heads: " + String(c.n_heads) + "\n"
+        text += (
+            "  kv heads: "
+            + String(c.n_kv_heads_swa)
+            + " sliding, "
+            + String(c.n_kv_heads)
+            + " global\n"
+        )
+        text += (
+            "  head size: "
+            + String(c.head_dim_swa)
+            + " sliding, "
+            + String(c.head_dim)
+            + " global\n"
+        )
+        text += (
+            "  rope base: "
+            + String(c.theta_swa)
+            + " sliding, "
+            + String(c.theta)
+            + " global\n"
+        )
+        text += "  sliding window: " + String(c.sliding_window) + "\n"
+        text += "  dense ffn: " + String(c.ffn) + "\n"
+        text += (
+            "  experts: "
+            + String(c.n_experts)
+            + " ("
+            + String(c.n_experts_used)
+            + " used), ffn "
+            + String(c.expert_ffn)
+            + "\n"
+        )
+        text += (
+            "  vocabulary: "
+            + String(c.vocab)
+            + ", mask token "
+            + String(c.mask_id)
+            + "\n"
+        )
+        text += "  final logit softcap: " + String(c.softcap) + "\n"
+        text += "  canvas length: " + String(c.canvas) + "\n"
+        text += "  context length: " + String(c.ctx) + "\n"
+        return text
+    except e:
+        return "config: refused: " + String(e) + "\n"
+
+
+def inspect_text(path: String) raises -> String:
+    """What `inspect` prints, as one string."""
+    var g = GGUFFile(path)
+    var text = String("")
+    text += "file: " + path + "\n"
+    text += "gguf version: " + String(g.version) + "\n"
+    text += "architecture: " + g.get_str_or("general.architecture", "?") + "\n"
+    text += "name: " + g.get_str_or("general.name", "?") + "\n"
+    text += "tensors: " + String(g.n_tensors()) + "\n"
+    text += "metadata keys: " + String(len(g.kvs)) + "\n"
+    if g.get_str_or("general.architecture", "?") == GEMMA_ARCH:
+        text += "\n" + _gemma_config_text(g)
+    text += "\nmetadata:\n"
     for i in range(len(g.kvs)):
-        print("  ", g.kvs[i].key, " = ", g.value_str(i), sep="")
+        text += "  " + g.kvs[i].key + " = " + g.value_str(i) + "\n"
     var counts = Dict[String, Int]()
     for i in range(g.n_tensors()):
         var tn = g.tensors[i].type_name()
         counts[tn] = counts.get(tn, 0) + 1
-    print()
-    print("tensor types:")
+    text += "\ntensor types:\n"
     for e in counts.items():
-        print("  ", e.key, ": ", e.value, sep="")
-    print()
-    print("tensors:")
+        text += "  " + e.key + ": " + String(e.value) + "\n"
+    text += "\ntensors:\n"
     for i in range(g.n_tensors()):
         var t = g.tensors[i]
-        print("  ", t.name, "  ", t.type_name(), "  ", t.shape_str(), sep="")
+        text += (
+            "  " + t.name + "  " + t.type_name() + "  " + t.shape_str() + "\n"
+        )
+    return text
+
+
+def cmd_inspect(a: Args) raises:
+    print(inspect_text(a.positional[0]), end="")
 
 
 def cmd_logits(a: Args) raises:
@@ -715,6 +918,8 @@ def decide(raw: List[String]) raises -> Decision:
     var command = raw[1] if len(raw) > 1 else String("")
     if is_top_level_help(command):
         return Decision(0, usage(), False, False)
+    if command == "--version":
+        return Decision(0, version_line(), False, False)
     if not command_known(command):
         return Decision(
             2,

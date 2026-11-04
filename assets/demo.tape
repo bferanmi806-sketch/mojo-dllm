@@ -1,7 +1,8 @@
-# Records assets/demo.gif with charmbracelet/vhs:  vhs assets/demo.tape
+# Records the raw take with charmbracelet/vhs:  vhs assets/demo.tape
+# assets/README.md has the ffmpeg step that retimes it into assets/demo.gif.
 # Needs build/mojo-dllm and the LLaDA GGUF at ~/models/llada/.
 
-Output assets/demo.gif
+Output "/tmp/demo-raw.gif"
 
 Set Shell "bash"
 Set FontSize 18
@@ -18,7 +19,7 @@ Sleep 500ms
 Show
 
 Type `build/mojo-dllm run --model /tmp/llada-8b.gguf --prompt "Write a haiku about compilers." --max-tokens 32 --steps 16 --visual`
-Sleep 400ms
+Sleep 3s
 Enter
-Sleep 32s
+Sleep 34s
 Sleep 3s

@@ -20,6 +20,10 @@ Outputs (deterministic, seed 1234 unless noted):
   tests/fixtures/tiny-dream.expected.f32
   tests/fixtures/malformed/        one-byte-damaged GGUF headers and metadata
   tests/fixtures/metadata/         valid and invalid ModelConfig metadata
+  tests/fixtures/entropy-rows.tsv  logits rows with numpy f64 argmax, entropy and inverse-CDF draws, seed 65065
+  tests/fixtures/tiny-diffusion-gemma.gguf
+                                   2-layer diffusion-gemma model (one sliding, one global, 4 experts), seed 610061
+  tests/fixtures/diffusion-gemma/  that model's metadata and tensor directory with one thing wrong per file
 """
 
 from __future__ import annotations
@@ -28,7 +32,7 @@ import pathlib
 
 import numpy as np
 from gguf import GGMLQuantizationType as Q
-from gguf import GGUFReader, GGUFWriter
+from gguf import GGUFReader, GGUFValueType, GGUFWriter
 from gguf.quants import dequantize, quantize
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -57,23 +61,28 @@ def f16_bytes(values: np.ndarray) -> np.ndarray:
     return values.astype(np.float16).view(np.uint8)
 
 
-def random_q4k(rows: int, cols: int, d_scale: float) -> np.ndarray:
-    """Valid Q4_K bytes: small positive f16 d/dmin, random 6-bit scales, random nibbles."""
+def random_q4k(rows: int, cols: int, d_scale: float, rng: np.random.Generator | None = None) -> np.ndarray:
+    """Valid Q4_K bytes: small positive f16 d/dmin, random 6-bit scales, random nibbles.
+
+    `rng` is a separate stream for generators added after the first fixtures,
+    so that they leave every earlier fixture byte for byte unchanged."""
+    gen = RNG if rng is None else rng
     nb = rows * cols // QK_K
     blocks = np.zeros((nb, Q4K_BYTES), dtype=np.uint8)
-    blocks[:, 0:2] = f16_bytes(RNG.uniform(0.2, 1.0, nb) * d_scale).reshape(nb, 2)
-    blocks[:, 2:4] = f16_bytes(RNG.uniform(0.2, 1.0, nb) * d_scale * 4).reshape(nb, 2)
-    blocks[:, 4:16] = RNG.integers(0, 256, (nb, 12), dtype=np.uint8)
-    blocks[:, 16:] = RNG.integers(0, 256, (nb, 128), dtype=np.uint8)
+    blocks[:, 0:2] = f16_bytes(gen.uniform(0.2, 1.0, nb) * d_scale).reshape(nb, 2)
+    blocks[:, 2:4] = f16_bytes(gen.uniform(0.2, 1.0, nb) * d_scale * 4).reshape(nb, 2)
+    blocks[:, 4:16] = gen.integers(0, 256, (nb, 12), dtype=np.uint8)
+    blocks[:, 16:] = gen.integers(0, 256, (nb, 128), dtype=np.uint8)
     return blocks.reshape(rows, cols // QK_K * Q4K_BYTES)
 
 
-def random_q6k(rows: int, cols: int, d_scale: float) -> np.ndarray:
+def random_q6k(rows: int, cols: int, d_scale: float, rng: np.random.Generator | None = None) -> np.ndarray:
+    gen = RNG if rng is None else rng
     nb = rows * cols // QK_K
     blocks = np.zeros((nb, Q6K_BYTES), dtype=np.uint8)
-    blocks[:, 0:192] = RNG.integers(0, 256, (nb, 192), dtype=np.uint8)
-    blocks[:, 192:208] = RNG.integers(-64, 64, (nb, 16)).astype(np.int8).view(np.uint8)
-    blocks[:, 208:210] = f16_bytes(RNG.uniform(0.2, 1.0, nb) * d_scale).reshape(nb, 2)
+    blocks[:, 0:192] = gen.integers(0, 256, (nb, 192), dtype=np.uint8)
+    blocks[:, 192:208] = gen.integers(-64, 64, (nb, 16)).astype(np.int8).view(np.uint8)
+    blocks[:, 208:210] = f16_bytes(gen.uniform(0.2, 1.0, nb) * d_scale).reshape(nb, 2)
     return blocks.reshape(rows, cols // QK_K * Q6K_BYTES)
 
 
@@ -479,6 +488,296 @@ def metadata_cases() -> None:
                                     "llada.rope.scaling.factor": 1.0})
 
 
+GEMMA_ARCH = "diffusion-gemma"
+GEMMA_KEY = GEMMA_ARCH + "."
+# The real file (diffusiongemma-26B-A4B-it-Q4_K_M.gguf) has 30 blocks, hidden size 2816, 16 heads and
+# global layers 5, 11, 17, 23, 29. This one keeps its structure at a size a test can load: one sliding
+# and one global layer, a different K width on each, and a head size that differs by kind.
+GEMMA: dict = dict(
+    layers=2,
+    sliding=[True, False],
+    kv=[4, 1],
+    hidden=256,
+    heads=8,
+    key_swa=64,
+    key=128,
+    window=128,
+    ffn=512,
+    experts=4,
+    used=2,
+    expert_ffn=64,
+    vocab=512,
+    mask=4,
+    canvas=16,
+)
+GEMMA_SEED = 610061
+# GGUF value kind, in the form the writer is called with, for each metadata value of a case.
+GEMMA_BLOCKS = {"Q4_K": (256, Q4K_BYTES), "Q6_K": (256, Q6K_BYTES), "Q5_0": (32, 22), "Q8_0": (32, 34)}
+
+
+def gemma_keys(c: dict) -> dict[str, tuple[str, object]]:
+    """The metadata of the real file (44 keys) that the reader reads, as (kind, value)."""
+    a = GEMMA_KEY
+    return {
+        a + "block_count": ("u32", c["layers"]),
+        a + "context_length": ("u32", 8192),
+        a + "embedding_length": ("u32", c["hidden"]),
+        a + "feed_forward_length": ("u32", c["ffn"]),
+        a + "attention.head_count": ("u32", c["heads"]),
+        a + "attention.head_count_kv": ("i32[]", c["kv"]),
+        a + "rope.freq_base": ("f32", 1000000.0),
+        a + "rope.freq_base_swa": ("f32", 10000.0),
+        a + "attention.layer_norm_rms_epsilon": ("f32", 1e-6),
+        a + "expert_count": ("u32", c["experts"]),
+        a + "expert_used_count": ("u32", c["used"]),
+        a + "attention.key_length": ("u32", c["key"]),
+        a + "attention.value_length": ("u32", c["key"]),
+        a + "final_logit_softcapping": ("f32", 30.0),
+        a + "attention.sliding_window": ("u32", c["window"]),
+        a + "attention.shared_kv_layers": ("u32", 0),
+        a + "embedding_length_per_layer_input": ("u32", 0),
+        a + "attention.sliding_window_pattern": ("bool[]", c["sliding"]),
+        a + "attention.key_length_swa": ("u32", c["key_swa"]),
+        a + "attention.value_length_swa": ("u32", c["key_swa"]),
+        a + "expert_feed_forward_length": ("u32", c["expert_ffn"]),
+        a + "rope.dimension_count": ("u32", c["key"]),
+        a + "rope.dimension_count_swa": ("u32", c["key_swa"]),
+        a + "attention.causal": ("bool", False),
+        "diffusion.canvas_length": ("u32", c["canvas"]),
+        "tokenizer.ggml.mask_token_id": ("u32", c["mask"]),
+    }
+
+
+def gemma_tensors(c: dict, full: bool) -> dict[str, tuple[tuple[int, ...], str]]:
+    """Tensor name -> (shape with the innermost dimension first, GGML type), as in the real file.
+
+    `full` is every tensor of the real file. Otherwise only those the reader looks at: the embedding, the
+    rope table, and each block's K, V (sliding blocks), and expert tensors."""
+    h, f, ex, ef = c["hidden"], c["ffn"], c["experts"], c["expert_ffn"]
+    t: dict[str, tuple[tuple[int, ...], str]] = {"token_embd.weight": ((h, c["vocab"]), "Q6_K")}
+    if full:
+        t["output_norm.weight"] = ((h,), "F32")
+    if not all(c["sliding"]):
+        t["rope_freqs.weight"] = ((c["key"] // 2,), "F32")
+    if full:
+        t["self_cond_pre_norm.weight"] = ((h,), "F32")
+        t["self_cond_gate.weight"] = ((h, f), "Q4_K")
+        t["self_cond_up.weight"] = ((h, f), "Q4_K")
+        t["self_cond_down.weight"] = ((f, h), "Q5_0")
+    for i in range(c["layers"]):
+        p = f"blk.{i}."
+        sliding, kv = c["sliding"][i], c["kv"][i]
+        size = c["key_swa"] if sliding else c["key"]
+        down = "Q5_0" if i % 2 == 0 else "Q8_0"
+        if full:
+            t[p + "attn_norm.weight"] = ((h,), "F32")
+            t[p + "attn_q.weight"] = ((h, c["heads"] * size), "Q4_K")
+        t[p + "attn_k.weight"] = ((h, kv * size), "Q4_K")
+        if sliding:
+            t[p + "attn_v.weight"] = ((h, kv * size), "Q6_K" if i % 2 == 0 else "Q4_K")
+        if full:
+            t[p + "attn_output.weight"] = ((c["heads"] * size, h), "Q4_K")
+            t[p + "attn_q_norm.weight"] = ((size,), "F32")
+            t[p + "attn_k_norm.weight"] = ((size,), "F32")
+            t[p + "post_attention_norm.weight"] = ((h,), "F32")
+            t[p + "layer_output_scale.weight"] = ((1,), "F32")
+            t[p + "enc_layer_output_scale.weight"] = ((1,), "F32")
+            t[p + "ffn_norm.weight"] = ((h,), "F32")
+            t[p + "ffn_gate.weight"] = ((h, f), "Q4_K")
+            t[p + "ffn_up.weight"] = ((h, f), "Q4_K")
+            t[p + "ffn_down.weight"] = ((f, h), down)
+            for extra in ("post_ffw_norm", "post_ffw_norm_1", "post_ffw_norm_2", "pre_ffw_norm_2"):
+                t[p + extra + ".weight"] = ((h,), "F32")
+            t[p + "ffn_gate_inp.weight"] = ((h, ex), "F32")
+            t[p + "ffn_gate_inp.scale"] = ((h,), "F32")
+        t[p + "ffn_gate_up_exps.weight"] = ((h, 2 * ef, ex), "Q4_K")
+        t[p + "ffn_down_exps.weight"] = ((ef, h, ex), down)
+        if full:
+            t[p + "ffn_down_exps.scale"] = ((ex,), "F32")
+    return t
+
+
+def gemma_tensor_data(rng: np.random.Generator, ne: tuple[int, ...], kind: str, zero: bool):
+    """The array and GGML type to hand to the writer for one tensor. `zero` writes all-zero bytes, which
+    the reader's shape checks accept and git stores for nothing."""
+    shape = tuple(reversed(ne))
+    if kind == "F32":
+        arr = np.zeros(shape, np.float32) if zero else rng.uniform(0.8, 1.2, shape).astype(np.float32)
+        return arr, None
+    block, nbytes = GEMMA_BLOCKS[kind]
+    assert ne[0] % block == 0, (ne, kind)
+    byte_shape = shape[:-1] + (ne[0] // block * nbytes,)
+    rows = int(np.prod(shape[:-1]))
+    if zero:
+        return np.zeros(byte_shape, np.uint8), getattr(Q, kind)
+    if kind == "Q4_K":
+        return random_q4k(rows, ne[0], 0.004, rng).reshape(byte_shape), Q.Q4_K
+    if kind == "Q6_K":
+        return random_q6k(rows, ne[0], 0.0004, rng).reshape(byte_shape), Q.Q6_K
+    return quantize(rng.standard_normal(shape).astype(np.float32), getattr(Q, kind)), getattr(Q, kind)
+
+
+def write_gemma(
+    path: pathlib.Path,
+    *,
+    c: dict | None = None,
+    keys: dict | None = None,
+    drop: tuple[str, ...] = (),
+    shapes: dict | None = None,
+    types: dict | None = None,
+    omit: tuple[str, ...] = (),
+    add: dict | None = None,
+    tensors: str = "thin",
+    rng: np.random.Generator | None = None,
+) -> None:
+    """One diffusion-gemma file. `keys` replaces metadata values and `drop` removes keys; `shapes` and `types`
+    replace tensor shapes and GGML types, `omit` removes tensors and `add` adds (name -> (shape, type)).
+    `tensors` is "full" (every
+    tensor of the real file, random weights), "thin" (what the reader looks at, zero bytes) or "none"."""
+    c = c or GEMMA
+    meta = {**gemma_keys(c), **(keys or {})}
+    for key in drop:
+        del meta[key]
+    w = GGUFWriter(str(path), GEMMA_ARCH)
+    w.add_name("tiny-diffusion-gemma")
+    for key, (kind, value) in meta.items():
+        if kind == "u32":
+            w.add_uint32(key, value)
+        elif kind == "f32":
+            w.add_float32(key, value)
+        elif kind == "bool":
+            w.add_bool(key, value)
+        elif kind == "str":
+            w.add_string(key, value)
+        elif kind == "f64[]":
+            w.add_key_value(key, value, GGUFValueType.ARRAY, sub_type=GGUFValueType.FLOAT64)
+        else:
+            assert kind in ("i32[]", "bool[]", "f32[]", "str[]"), kind
+            w.add_array(key, value)
+    spec = {} if tensors == "none" else gemma_tensors(c, tensors == "full")
+    for name, shape in (shapes or {}).items():
+        assert name in spec, name
+        spec[name] = (shape, spec[name][1])
+    for name, kind in (types or {}).items():
+        assert name in spec, name
+        spec[name] = (spec[name][0], kind)
+    for name in omit:
+        del spec[name]
+    spec.update(add or {})
+    rng = rng or np.random.default_rng(GEMMA_SEED)
+    for name, (ne, kind) in spec.items():
+        data, raw = gemma_tensor_data(rng, ne, kind, zero=tensors != "full")
+        if raw is None:
+            w.add_tensor(name, data)
+        else:
+            w.add_tensor(name, data, raw_shape=data.shape, raw_dtype=raw)
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()
+
+
+# Metadata the reader requires, and the ones that must be positive.
+GEMMA_REQUIRED = (
+    "block_count", "embedding_length", "feed_forward_length", "attention.head_count", "attention.head_count_kv",
+    "rope.freq_base", "rope.freq_base_swa", "attention.layer_norm_rms_epsilon", "expert_count",
+    "expert_used_count", "attention.key_length", "attention.value_length", "attention.sliding_window",
+    "attention.sliding_window_pattern", "attention.key_length_swa", "attention.value_length_swa",
+    "expert_feed_forward_length", "rope.dimension_count", "rope.dimension_count_swa",
+)
+GEMMA_POSITIVE = (
+    "block_count", "attention.head_count", "attention.key_length", "attention.key_length_swa",
+    "attention.sliding_window", "expert_count", "expert_feed_forward_length",
+)
+
+
+def diffusion_gemma() -> None:
+    """The DiffusionGemma reader's inputs: a tiny model that passes, and one file per refusal."""
+    write_gemma(OUT / "tiny-diffusion-gemma.gguf", tensors="full", rng=np.random.default_rng(GEMMA_SEED))
+    out = OUT / "diffusion-gemma"
+    out.mkdir(parents=True, exist_ok=True)
+    k = lambda name: GEMMA_KEY + name  # noqa: E731
+    pattern, kv = k("attention.sliding_window_pattern"), k("attention.head_count_kv")
+
+    # Metadata only: the reader refuses before it looks at a tensor.
+    for name in GEMMA_REQUIRED:
+        write_gemma(out / f"missing-{k(name)}.gguf", drop=(k(name),), tensors="none")
+    for name in ("diffusion.canvas_length", "tokenizer.ggml.mask_token_id"):
+        write_gemma(out / f"missing-{name}.gguf", drop=(name,), tensors="none")
+    for name in GEMMA_POSITIVE:
+        write_gemma(out / f"zero-{k(name)}.gguf", keys={k(name): ("u32", 0)}, tensors="none")
+    write_gemma(out / "zero-diffusion.canvas_length.gguf", keys={"diffusion.canvas_length": ("u32", 0)}, tensors="none")
+    cases: dict[str, dict] = {
+        "pattern-length": dict(keys={pattern: ("bool[]", [True, False, False])}),
+        "pattern-length-short": dict(keys={pattern: ("bool[]", [True])}),
+        "kv-heads-length": dict(keys={kv: ("i32[]", [4, 1, 1])}),
+        "kv-heads-length-short": dict(keys={kv: ("i32[]", [4])}),
+        "pattern-type": dict(keys={pattern: ("i32[]", [1, 0])}),
+        "kv-heads-scalar": dict(keys={kv: ("u32", 4)}),
+        "kv-heads-type": dict(keys={kv: ("f32[]", [4.0, 1.0])}),
+        "kv-heads-bool": dict(keys={kv: ("bool[]", [True, True])}),
+        "kv-heads-f64": dict(keys={kv: ("f64[]", [4.0, 1.0])}),
+        "kv-heads-strings": dict(keys={kv: ("str[]", ["4", "1"])}),
+        "kv-heads-divisor": dict(keys={kv: ("i32[]", [3, 3])}),
+        "kv-heads-negative": dict(keys={kv: ("i32[]", [4, -1])}),
+        "kv-heads-zero": dict(keys={kv: ("i32[]", [0, 1])}),
+        "shared-kv-layers": dict(keys={k("attention.shared_kv_layers"): ("u32", 2)}),
+        "per-layer-input": dict(keys={k("embedding_length_per_layer_input"): ("u32", 64)}),
+        "causal": dict(keys={k("attention.causal"): ("bool", True)}),
+        "value-length": dict(keys={k("attention.value_length"): ("u32", 64)}),
+        "value-length-wide": dict(keys={k("attention.value_length"): ("u32", 256)}),
+        "value-length-swa": dict(keys={k("attention.value_length_swa"): ("u32", 32)}),
+        "rope-width": dict(keys={k("rope.dimension_count"): ("u32", 64)}),
+        "rope-width-swa": dict(keys={k("rope.dimension_count_swa"): ("u32", 32)}),
+        "expert-used-over": dict(keys={k("expert_used_count"): ("u32", 5)}),
+        "expert-used-zero": dict(keys={k("expert_used_count"): ("u32", 0)}),
+        "softcap-negative": dict(keys={k("final_logit_softcapping"): ("f32", -1.0)}),
+    }
+    for name, case in cases.items():
+        write_gemma(out / f"{name}.gguf", tensors="none", **case)
+    # Three layers, so that two sliding layers can disagree.
+    c3 = {**GEMMA, "layers": 3, "sliding": [True, True, False], "kv": [4, 2, 1]}
+    write_gemma(out / "kv-heads-uneven.gguf", c=c3, tensors="none")
+    c3 = {**GEMMA, "layers": 3, "sliding": [True, False, False], "kv": [4, 1, 2]}
+    write_gemma(out / "kv-heads-uneven-global.gguf", c=c3, tensors="none")
+
+    # Tensor directory checks. Each file differs from the passing control in one tensor.
+    write_gemma(out / "thin-valid.gguf")
+    # Every positive value at its smallest, and the optional keys absent: they must still pass.
+    ones = {**GEMMA, "layers": 1, "sliding": [True], "kv": [1], "heads": 1, "key_swa": 1, "key": 1, "window": 1,
+            "experts": 1, "used": 1, "expert_ffn": 1, "canvas": 1}
+    write_gemma(
+        out / "ones.gguf",
+        c=ones,
+        drop=(k("context_length"), k("final_logit_softcapping"), k("attention.shared_kv_layers"),
+              k("embedding_length_per_layer_input"), k("attention.causal")),
+        types={"blk.0.ffn_down_exps.weight": "F32"},  # one expert row of 1 is no Q5_0 block
+    )
+    # Files with one kind of layer pass: no rope table without a global layer, no attn_v without a sliding one.
+    write_gemma(out / "all-sliding.gguf", c={**GEMMA, "sliding": [True, True], "kv": [4, 4]})
+    write_gemma(out / "all-global.gguf", c={**GEMMA, "sliding": [False, False], "kv": [1, 1]})
+    h, ex, ef = GEMMA["hidden"], GEMMA["experts"], GEMMA["expert_ffn"]
+    tensor_cases: dict[str, dict] = {
+        "global-with-attn-v": dict(add={"blk.1.attn_v.weight": ((h, 128), "Q4_K")}),
+        "sliding-without-attn-v": dict(omit=("blk.0.attn_v.weight",)),
+        "k-width-sliding": dict(shapes={"blk.0.attn_k.weight": (h, 512)}),
+        "k-width-global": dict(shapes={"blk.1.attn_k.weight": (h, 256)}),
+        "k-hidden": dict(shapes={"blk.0.attn_k.weight": (512, 256)}),
+        "k-dims": dict(shapes={"blk.1.attn_k.weight": (h, 128, 2)}),
+        "k-missing": dict(omit=("blk.1.attn_k.weight",)),
+        "rope-freqs-missing": dict(omit=("rope_freqs.weight",)),
+        "rope-freqs-width": dict(shapes={"rope_freqs.weight": (128,)}),
+        "exps-gate-up": dict(shapes={"blk.0.ffn_gate_up_exps.weight": (h, ef, ex)}),
+        "exps-gate-up-dims": dict(shapes={"blk.0.ffn_gate_up_exps.weight": (h, 2 * ef, ex, 1)}),
+        "exps-down-count": dict(shapes={"blk.1.ffn_down_exps.weight": (ef, h, 8)}),
+        "exps-down-width": dict(shapes={"blk.1.ffn_down_exps.weight": (32, h, ex)}),
+        "exps-missing": dict(omit=("blk.1.ffn_gate_up_exps.weight",)),
+        "embd-width": dict(shapes={"token_embd.weight": (512, 512)}),
+    }
+    for name, case in tensor_cases.items():
+        write_gemma(out / f"{name}.gguf", **case)
+
+
 def main() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
     kquants()
@@ -488,8 +787,58 @@ def main() -> None:
     dequant_types()
     unsupported_embedding()
     metadata_cases()
+    entropy_rows()
+    diffusion_gemma()
     for p in sorted(OUT.iterdir()):
         print(f"{p.stat().st_size:>9}  {p.relative_to(ROOT)}")
+
+
+def entropy_rows() -> None:
+    """Logits rows with the entropy-bounded denoiser's per-row answers in f64.
+
+    One line per case: name, vocab, temperature, draw u, argmax of the raw row,
+    entropy of softmax(row / temperature) in nats, the token an inverse-CDF
+    draw at u picks (first index whose cumulative probability reaches u), and
+    the row as float32 values written with enough digits to read back exactly.
+    A separate seed keeps every other fixture's bytes where they were.
+    """
+    rng = np.random.default_rng(65065)
+    cases = []
+
+    def add(name, row, temperature, u):
+        cases.append((name, row.astype(np.float32), temperature, u))
+
+    add("mixed40", rng.normal(0, 3, 40), 0.8, 0.37)
+    tie = rng.normal(0, 1, 12)
+    tie[3] = tie[9] = 5.0
+    add("ties", tie, 0.5, 0.9)
+    peaked = rng.normal(0, 0.5, 64)
+    peaked[41] = 25.0
+    add("peaked", peaked, 0.4 + 0.4 / 48, 0.5)
+    add("flat30", np.zeros(30), 0.8, 0.55)
+    wide = rng.normal(0, 4, 2500)
+    wide[2300] = 14.0
+    add("wide2500", wide, 0.6, 0.81)
+    add("ascending3000", np.linspace(-10, 10, 3000), 0.7, 0.2)
+    add("exact1024", rng.normal(0, 2, 1024), 0.8, 0.5)
+    add("large-negative", -1000.0 + rng.normal(0, 3, 50), 0.8, 0.66)
+    add("u-low", rng.normal(0, 3, 40), 0.8, 1e-9)
+    add("u-high", rng.normal(0, 3, 40), 0.8, 0.999999)
+    lines = []
+    for name, row, t, u in cases:
+        x = row.astype(np.float64) / t
+        p = np.exp(x - x.max())
+        p /= p.sum()
+        nz = p[p > 0]
+        entropy = float(-(nz * np.log(nz)).sum())
+        cum = np.cumsum(p)
+        sampled = int(np.searchsorted(cum, u, side="left"))
+        # An answer that sits within rounding of a boundary would test rounding.
+        assert np.abs(cum - u).min() > 1e-7, name
+        argmax = int(np.argmax(row))
+        values = " ".join(repr(float(v)) for v in row)
+        lines.append(f"{name}\t{len(row)}\t{t!r}\t{u!r}\t{argmax}\t{entropy!r}\t{sampled}\t{values}")
+    (OUT / "entropy-rows.tsv").write_text("\n".join(lines) + "\n")
 
 
 def unsupported_embedding() -> None:

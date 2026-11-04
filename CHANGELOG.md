@@ -8,6 +8,33 @@ semantic versioning (0.y: minor bumps may break things).
 
 ### Added
 
+- `scripts/capped.sh` runs a command in its own memory-capped systemd scope: a hard cap, no swap and a
+  whole-scope kill on an OOM, so a job that outgrows the machine dies alone instead of taking its terminal with
+  it. It refuses to start when less memory is available than the job needs or when the user manager cannot
+  enforce limits. `docs/development.md` ("Heavy jobs") explains the settings and what does not isolate a job.
+- The DiffusionGemma reference (issues #66 and #62). `scripts/build_dg_ref.sh`
+  builds the ggml-org/llama.cpp#24423 branch at a pinned commit, CPU only and
+  offline, into its own tree beside the mainline checkout. `tools/ref/dg_ref.cpp`
+  writes the canvas logits of one denoising step for a fixed prompt and canvas:
+  the unified `[prompt | canvas]` pass or the prompt K/V path (prefill, then one
+  decode step), each with or without self-conditioning from a given
+  previous-step buffer. `bench/parity.py --arch diffusion-gemma` runs the
+  reference phase, and a comparison phase that stops with a message until
+  mojo-dllm's own outputs exist (#64). The comparison's bound comes from the
+  LLaDA evidence plus a check on each row's largest logit, and every case
+  records how far the reference lies from itself. `bench/check_dg_bound.py`
+  shows the bound rejecting a missing final soft-cap and a dropped layer scale
+  (`bench/checks/2026-11-04-dg-bound.json`). The tokenizer goldens for `gemma4`
+  are in `tests/fixtures/gemma4-tokenizer-golden.tsv`, with their provenance.
+- DiffusionGemma's entropy-bounded denoiser (`_generate_diffusion_gemma`,
+  issue #65): a random canvas over the whole vocabulary, a per-position
+  argmax, entropy and draw from one pass over each logits row, acceptance of
+  the lowest-entropy positions while the entropies before them sum to at most
+  the bound, and a stop once the argmax canvas holds and the mean entropy is
+  small. Six flags (`--eb-steps`, `--eb-t-min`, `--eb-t-max`, `--eb-bound`,
+  `--eb-stability`, `--eb-confidence`) default to the llama.cpp branch's
+  values. `--json` gains `steps_taken` and `stop_reason` for every model. The
+  forward pass is #64; tests use a scripted model.
 - `scripts/check_weights.py` compares GGUF tensor shapes with safetensors
   headers, with LLaDA/Dream name mapping and a standalone self-test.
 - Q8_0 and Q5_K reference decoders, with GGUF type sizing and reference tests
@@ -15,6 +42,15 @@ semantic versioning (0.y: minor bumps may break things).
 - A Q5_0 reference decoder (22-byte blocks of 32 weights) with GGUF type sizing,
   a reference test against gguf-py's decoder and a hand-built block test of the
   high-bit layout. It is the first piece of the DiffusionGemma reader (#61).
+- A `diffusion-gemma` branch of `ModelConfig` reads the DiffusionGemma
+  metadata (per-layer sliding/global pattern and K/V head counts, head sizes and
+  RoPE bases per kind, experts, canvas length, soft cap) and checks the tensor
+  directory against it: `attn_v` exactly on sliding layers, K width, the 3-D
+  expert tensors and the rope table. A wrong key or tensor is refused by name,
+  as are non-zero `attention.shared_kv_layers` and
+  `embedding_length_per_layer_input`. `inspect` prints the config. `DiffusionLM`
+  and the GPU model stop on these files: there is no forward pass yet (#61).
+  The key names come from the unmerged ggml-org/llama.cpp#24423.
 - Fused elementwise kernels on the GPU: the residual add, the RMSNorm and the
   activation quantization run as one launch (three per layer boundary plus
   the first norm), and `silu(g) * u` is quantized in the same launch as the

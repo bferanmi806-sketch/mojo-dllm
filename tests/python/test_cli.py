@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import os
 import re
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -24,6 +25,7 @@ def test_help_lists_every_command_and_the_environment() -> None:
     assert "Quick start" in text and "Examples" in text
     assert "./mojo-dllm run" in text and "./mojo-dllm doctor" in text and "./mojo-dllm setup" in text
     assert "inspect" in text and "tokenize" in text
+    assert "--version" in text
 
 
 def test_help_has_no_colour_when_disabled_and_some_when_enabled() -> None:
@@ -98,6 +100,28 @@ def test_a_mistyped_command_builds_nothing_and_names_the_closest(
     assert cli.main(["doctr"]) == 2
     err = capsys.readouterr().err
     assert err.startswith("error:") and "did you mean doctor?" in err and "./mojo-dllm help" in err
+
+
+def test_version_prints_the_pyproject_version_and_builds_nothing(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def forbidden(*args: object, **kwargs: object) -> None:
+        raise AssertionError("--version must not build, probe, or exec")
+
+    monkeypatch.setattr(cli, "ensure_built", forbidden)
+    monkeypatch.setattr(cli, "real_probes", forbidden)
+    monkeypatch.setattr(os, "execv", forbidden)
+    version = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]
+    assert cli.main(["--version"]) == 0
+    assert capsys.readouterr().out == f"mojo-dllm {version}\n"
+
+
+def test_version_without_pyproject_is_an_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(cli, "ROOT", tmp_path)
+    assert cli.main(["--version"]) == 1
+    assert capsys.readouterr().err.startswith("error: cannot read pyproject.toml")
 
 
 def test_a_word_close_to_nothing_still_points_at_help(

@@ -482,10 +482,28 @@ struct GGUFFile(Movable):
         var kv = self._kv(key)
         if kv.kind != GGUF_TYPE_ARRAY:
             raise Error("metadata key " + key + " is not an array")
+        if (
+            kv.elem_kind == GGUF_TYPE_FLOAT32
+            or kv.elem_kind == GGUF_TYPE_FLOAT64
+            or kv.elem_kind == GGUF_TYPE_STRING
+            or kv.elem_kind == GGUF_TYPE_BOOL
+        ):
+            raise Error("metadata key " + key + " is not an integer array")
         var sz = _scalar_size(kv.elem_kind)
         var out = List[Int](capacity=kv.count)
         for i in range(kv.count):
             out.append(self._read_scalar_int(kv.elem_kind, kv.at + i * sz))
+        return out^
+
+    def get_bool_array(self, key: String) raises -> List[Bool]:
+        var kv = self._kv(key)
+        # elem_kind is -1 for a scalar, so this also refuses a lone bool.
+        if kv.elem_kind != GGUF_TYPE_BOOL:
+            raise Error("metadata key " + key + " is not a bool array")
+        var out = List[Bool](capacity=kv.count)
+        var r = Reader(self.map.addr, self.map.size, kv.at)
+        for _ in range(kv.count):
+            out.append(r.u8() != 0)
         return out^
 
     def get_f32_array(self, key: String) raises -> List[Float32]:

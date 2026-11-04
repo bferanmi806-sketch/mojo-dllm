@@ -182,6 +182,7 @@ struct GpuDiffusionLM(DenoisingModel, Movable):
         # Validate host metadata before creating a device or allocating buffers.
         self.gguf = GGUFFile(path)
         self.cfg = ModelConfig(self.gguf)
+        self.cfg.check_runnable()
         var c = self.cfg
         self.max_tokens = max_tokens
         self.embd = self.gguf.tensor("token_embd.weight")

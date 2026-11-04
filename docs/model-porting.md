@@ -1,6 +1,7 @@
 # Porting a model
 
-mojo-dllm supports the LLaDA and Dream architectures. Tested Q4_K_M checkpoints
+mojo-dllm runs the LLaDA and Dream architectures, and reads the metadata of
+`diffusion-gemma` (see below). Tested Q4_K_M checkpoints
 are LLaDA-8B-Instruct, LLaDA-1.5, Dream-v0-Instruct-7B,
 Dream-Coder-v0-Instruct-7B and DiffuCoder-7B-cpGRPO. The added checkpoints have
 CPU smoke and [parity evidence](correctness.md); GPU evidence remains limited
@@ -52,6 +53,49 @@ required. Other scaling metadata is not interpreted. These compatibility checks
 do not add general validation of metadata ranges. Whether to constrain canvases
 by `context_length` or reject `attention.causal = true` remains a separate policy
 decision.
+
+### DiffusionGemma metadata
+
+A `diffusion-gemma` file is read into a `ModelConfig`, and `mojo-dllm inspect`
+prints the result, or the refusal and its key. `DiffusionLM` and the GPU model
+stop on it with `diffusion-gemma has no forward pass yet`, so a clean `inspect`
+does not mean the file runs. The names come from the unmerged
+ggml-org/llama.cpp#24423 and appear once each, as the `GEMMA_*` constants at the
+top of `models/transformer.mojo`. Keys carry the `diffusion-gemma.` prefix
+except `diffusion.canvas_length` and `tokenizer.ggml.mask_token_id`.
+
+| Key | Required/default | Interpretation |
+|---|---|---|
+| `block_count`, `attention.head_count`, `attention.key_length`, `attention.key_length_swa`, `attention.sliding_window`, `expert_count`, `expert_feed_forward_length`, `diffusion.canvas_length` | required, positive | layers, query heads, head size of global and of sliding layers, window, experts, expert width, canvas tokens |
+| `embedding_length`, `feed_forward_length` | required | hidden width, dense feed-forward width |
+| `attention.head_count_kv` | required, i32 array with one entry per block | K/V heads of each layer; one value per kind of layer, a divisor of `attention.head_count` |
+| `attention.sliding_window_pattern` | required, bool array with one entry per block | `true` marks a sliding layer, `false` a global one |
+| `expert_used_count` | required, from 1 to `expert_count` | experts per token |
+| `rope.freq_base`, `rope.freq_base_swa` | required | RoPE base of global and of sliding layers |
+| `attention.layer_norm_rms_epsilon`, `tokenizer.ggml.mask_token_id` | required | RMSNorm epsilon, mask token |
+| `attention.value_length`, `attention.value_length_swa`, `rope.dimension_count`, `rope.dimension_count_swa` | required, equal to the key length of their kind | other widths are refused |
+| `context_length` | optional, 4096 | stored in config |
+| `final_logit_softcapping` | optional, 0 (off) | a negative value is refused |
+| `attention.shared_kv_layers`, `embedding_length_per_layer_input` | optional, 0 | any other value is refused: no forward pass handles it |
+| `attention.causal` | optional, false | true is refused; the canvas attends in both directions |
+
+The config keeps the global layers' values in `n_kv_heads`, `head_dim` and
+`theta`, and the sliding layers' in the `_swa` fields. `kv_heads(i)`,
+`head_size(i)` and `rope_base(i)` pick the right one for layer `i`. The
+vocabulary is the row count of `token_embd.weight`, because the file has no
+`output.weight` (the logits are tied to the embedding).
+
+The tensor directory has to agree with the flags and keys, and a mismatch names
+the tensor and the keys that set its shape:
+
+- `blk.N.attn_v.weight` exists on a sliding layer and on no global one (a global
+  layer reuses K as V).
+- `blk.N.attn_k.weight` is `[embedding_length, head_count_kv * key_length]` of
+  that layer, with `key_length_swa` on a sliding layer.
+- `blk.N.ffn_gate_up_exps.weight` is `[embedding_length, 2 * expert_feed_forward_length, expert_count]`
+  and `blk.N.ffn_down_exps.weight` is `[expert_feed_forward_length, embedding_length, expert_count]`.
+- `rope_freqs.weight` has `key_length / 2` entries when any layer is global, and
+  `token_embd.weight` is `embedding_length` wide.
 
 To convert a Hugging Face source with llama.cpp and quantize the result:
 

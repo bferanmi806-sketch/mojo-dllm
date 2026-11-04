@@ -1,0 +1,220 @@
+{
+  "schema_version": 1,
+  "benchmark": "synthetic_moe_layer",
+  "recorded_at": "2026-11-04T02:59:54.506041+00:00",
+  "measurement": "router plus grouped experts, including activation quantization",
+  "excluded": "weight generation, packing, workspace allocation, one warmup",
+  "synthetic_seed": [
+    630001,
+    630002,
+    630003
+  ],
+  "machine": {
+    "platform": "Linux-6.6.114.1-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+    "lscpu": "Architecture:                            x86_64\nCPU op-mode(s):                          32-bit, 64-bit\nAddress sizes:                           42 bits physical, 48 bits virtual\nByte Order:                              Little Endian\nCPU(s):                                  8\nOn-line CPU(s) list:                     0-7\nVendor ID:                               GenuineIntel\nModel name:                              Intel(R) Core(TM) Ultra 7 258V\nCPU family:                              6\nModel:                                   189\nThread(s) per core:                      1\nCore(s) per socket:                      8\nSocket(s):                               1\nStepping:                                1\nBogoMIPS:                                6604.79\nFlags:                                   fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology tsc_reliable nonstop_tsc cpuid tsc_known_freq pni pclmulqdq vmx ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch ssbd ibrs ibpb stibp ibrs_enhanced tpr_shadow ept vpid ept_ad fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves avx_vnni vnmi umip waitpkg gfni vaes vpclmulqdq rdpid movdiri movdir64b fsrm md_clear serialize flush_l1d arch_capabilities\nVirtualization:                          VT-x\nHypervisor vendor:                       Microsoft\nVirtualization type:                     full\nL1d cache:                               384 KiB (8 instances)\nL1i cache:                               512 KiB (8 instances)\nL2 cache:                                20 MiB (8 instances)\nL3 cache:                                12 MiB (1 instance)\nNUMA node(s):                            1\nNUMA node0 CPU(s):                       0-7\nVulnerability Gather data sampling:      Not affected\nVulnerability Indirect target selection: Not affected\nVulnerability Itlb multihit:             Not affected\nVulnerability L1tf:                      Not affected\nVulnerability Mds:                       Not affected\nVulnerability Meltdown:                  Not affected\nVulnerability Mmio stale data:           Not affected\nVulnerability Reg file data sampling:    Not affected\nVulnerability Retbleed:                  Mitigation; Enhanced IBRS\nVulnerability Spec rstack overflow:      Not affected\nVulnerability Spec store bypass:         Mitigation; Speculative Store Bypass disabled via prctl\nVulnerability Spectre v1:                Mitigation; usercopy/swapgs barriers and __user pointer sanitization\nVulnerability Spectre v2:                Mitigation; Enhanced / Automatic IBRS; IBPB conditional; PBRSB-eIBRS SW sequence; BHI BHI_DIS_S\nVulnerability Srbds:                     Not affected\nVulnerability Tsa:                       Not affected\nVulnerability Tsx async abort:           Not affected\nVulnerability Vmscape:                   Not affected",
+    "affinity": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ],
+    "load_average_before": [
+      1.025390625,
+      0.296875,
+      0.10107421875
+    ],
+    "mojo": "Mojo 1.1.0 (8189361e)",
+    "git_head": "81d1e660d626a37b10d2de8ed799836cd6dbec68",
+    "git_status": "M docs/development.md\n M docs/kernels.md\n M src/mojo_dllm/kernels/packed.mojo\n M src/mojo_dllm/kernels/qgemm.mojo\n?? bench/MOE.md\n?? bench/bench_moe.mojo\n?? bench/run_moe.py\n?? scripts/gen_moe_fixture.py\n?? src/mojo_dllm/kernels/moe.mojo\n?? tests/fixtures/moe-q4-q5.bin\n?? tests/fixtures/moe-q4-q8.bin\n?? tests/fixtures/moe-q5.bin\n?? tests/fixtures/moe-q8.bin\n?? tests/python/test_moe_bench.py\n?? tests/test_moe.mojo\n?? tests/test_packed32.mojo",
+    "omp_num_threads": "8",
+    "load_average_after": [
+      1.5146484375,
+      0.47900390625,
+      0.16796875
+    ]
+  },
+  "runs": [
+    {
+      "down_format": "Q5_0",
+      "command": [
+        "/mnt/d/ai/2026-11-04/github-followups/mojo-63/build/bench_moe",
+        "8",
+        "256",
+        "5",
+        "6",
+        "2816",
+        "704",
+        "128",
+        "8"
+      ],
+      "stdout": "{\"kind\":\"setup\",\"threads\":8,\"tokens\":256,\"hidden\":2816,\"ffn\":704,\"experts\":128,\"top_k\":8,\"down_type\":6,\"setup_seconds\":4.82083172,\"raw_weight_bytes\":459931648,\"packed_weight_bytes\":586809344}\n{\"kind\":\"sample\",\"index\":-1,\"warmup\":true,\"seconds\":0.539623616,\"checksum\":-1014019.0199471107,\"max_abs\":31.554201}\n{\"kind\":\"sample\",\"index\":0,\"warmup\":false,\"seconds\":0.556602917,\"checksum\":-1014019.0199471107,\"max_abs\":31.554201}\n{\"kind\":\"sample\",\"index\":1,\"warmup\":false,\"seconds\":0.526561824,\"checksum\":-1014019.0199471107,\"max_abs\":31.554201}\n{\"kind\":\"sample\",\"index\":2,\"warmup\":false,\"seconds\":0.592998102,\"checksum\":-1014019.0199471107,\"max_abs\":31.554201}\n{\"kind\":\"sample\",\"index\":3,\"warmup\":false,\"seconds\":0.500688265,\"checksum\":-1014019.0199471107,\"max_abs\":31.554201}\n{\"kind\":\"sample\",\"index\":4,\"warmup\":false,\"seconds\":0.539861836,\"checksum\":-1014019.0199471107,\"max_abs\":31.554201}\n{\"kind\":\"routing\",\"active_experts\":128,\"max_tokens_per_expert\":24,\"token_expert_pairs\":2048}\n",
+      "stderr": "",
+      "exit_code": 0,
+      "setup": {
+        "kind": "setup",
+        "threads": 8,
+        "tokens": 256,
+        "hidden": 2816,
+        "ffn": 704,
+        "experts": 128,
+        "top_k": 8,
+        "down_type": 6,
+        "setup_seconds": 4.82083172,
+        "raw_weight_bytes": 459931648,
+        "packed_weight_bytes": 586809344
+      },
+      "routing": {
+        "kind": "routing",
+        "active_experts": 128,
+        "max_tokens_per_expert": 24,
+        "token_expert_pairs": 2048
+      },
+      "samples": [
+        {
+          "kind": "sample",
+          "index": -1,
+          "warmup": true,
+          "seconds": 0.539623616,
+          "checksum": -1014019.0199471107,
+          "max_abs": 31.554201
+        },
+        {
+          "kind": "sample",
+          "index": 0,
+          "warmup": false,
+          "seconds": 0.556602917,
+          "checksum": -1014019.0199471107,
+          "max_abs": 31.554201
+        },
+        {
+          "kind": "sample",
+          "index": 1,
+          "warmup": false,
+          "seconds": 0.526561824,
+          "checksum": -1014019.0199471107,
+          "max_abs": 31.554201
+        },
+        {
+          "kind": "sample",
+          "index": 2,
+          "warmup": false,
+          "seconds": 0.592998102,
+          "checksum": -1014019.0199471107,
+          "max_abs": 31.554201
+        },
+        {
+          "kind": "sample",
+          "index": 3,
+          "warmup": false,
+          "seconds": 0.500688265,
+          "checksum": -1014019.0199471107,
+          "max_abs": 31.554201
+        },
+        {
+          "kind": "sample",
+          "index": 4,
+          "warmup": false,
+          "seconds": 0.539861836,
+          "checksum": -1014019.0199471107,
+          "max_abs": 31.554201
+        }
+      ],
+      "median_seconds": 0.539861836,
+      "min_seconds": 0.500688265,
+      "max_seconds": 0.592998102
+    },
+    {
+      "down_format": "Q8_0",
+      "command": [
+        "/mnt/d/ai/2026-11-04/github-followups/mojo-63/build/bench_moe",
+        "8",
+        "256",
+        "5",
+        "8",
+        "2816",
+        "704",
+        "128",
+        "8"
+      ],
+      "stdout": "{\"kind\":\"setup\",\"threads\":8,\"tokens\":256,\"hidden\":2816,\"ffn\":704,\"experts\":128,\"top_k\":8,\"down_type\":8,\"setup_seconds\":7.43783486,\"raw_weight_bytes\":555089920,\"packed_weight_bytes\":586809344}\n{\"kind\":\"sample\",\"index\":-1,\"warmup\":true,\"seconds\":0.649569323,\"checksum\":-253098.52256131137,\"max_abs\":39.171234}\n{\"kind\":\"sample\",\"index\":0,\"warmup\":false,\"seconds\":0.71543447,\"checksum\":-253098.52256131137,\"max_abs\":39.171234}\n{\"kind\":\"sample\",\"index\":1,\"warmup\":false,\"seconds\":0.51577521,\"checksum\":-253098.52256131137,\"max_abs\":39.171234}\n{\"kind\":\"sample\",\"index\":2,\"warmup\":false,\"seconds\":0.553104684,\"checksum\":-253098.52256131137,\"max_abs\":39.171234}\n{\"kind\":\"sample\",\"index\":3,\"warmup\":false,\"seconds\":0.533226622,\"checksum\":-253098.52256131137,\"max_abs\":39.171234}\n{\"kind\":\"sample\",\"index\":4,\"warmup\":false,\"seconds\":0.69562695,\"checksum\":-253098.52256131137,\"max_abs\":39.171234}\n{\"kind\":\"routing\",\"active_experts\":128,\"max_tokens_per_expert\":24,\"token_expert_pairs\":2048}\n",
+      "stderr": "",
+      "exit_code": 0,
+      "setup": {
+        "kind": "setup",
+        "threads": 8,
+        "tokens": 256,
+        "hidden": 2816,
+        "ffn": 704,
+        "experts": 128,
+        "top_k": 8,
+        "down_type": 8,
+        "setup_seconds": 7.43783486,
+        "raw_weight_bytes": 555089920,
+        "packed_weight_bytes": 586809344
+      },
+      "routing": {
+        "kind": "routing",
+        "active_experts": 128,
+        "max_tokens_per_expert": 24,
+        "token_expert_pairs": 2048
+      },
+      "samples": [
+        {
+          "kind": "sample",
+          "index": -1,
+          "warmup": true,
+          "seconds": 0.649569323,
+          "checksum": -253098.52256131137,
+          "max_abs": 39.171234
+        },
+        {
+          "kind": "sample",
+          "index": 0,
+          "warmup": false,
+          "seconds": 0.71543447,
+          "checksum": -253098.52256131137,
+          "max_abs": 39.171234
+        },
+        {
+          "kind": "sample",
+          "index": 1,
+          "warmup": false,
+          "seconds": 0.51577521,
+          "checksum": -253098.52256131137,
+          "max_abs": 39.171234
+        },
+        {
+          "kind": "sample",
+          "index": 2,
+          "warmup": false,
+          "seconds": 0.553104684,
+          "checksum": -253098.52256131137,
+          "max_abs": 39.171234
+        },
+        {
+          "kind": "sample",
+          "index": 3,
+          "warmup": false,
+          "seconds": 0.533226622,
+          "checksum": -253098.52256131137,
+          "max_abs": 39.171234
+        },
+        {
+          "kind": "sample",
+          "index": 4,
+          "warmup": false,
+          "seconds": 0.69562695,
+          "checksum": -253098.52256131137,
+          "max_abs": 39.171234
+        }
+      ],
+      "median_seconds": 0.553104684,
+      "min_seconds": 0.51577521,
+      "max_seconds": 0.71543447
+    }
+  ]
+}

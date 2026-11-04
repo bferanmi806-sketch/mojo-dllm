@@ -1,4 +1,4 @@
-"""Masked-diffusion transformers: LLaDA and Dream.
+"""Masked-diffusion transformers: LLaDA and Dream, and the DiffusionGemma config.
 
 Both are pre-norm decoder stacks run with bidirectional attention:
 
@@ -24,6 +24,10 @@ results):
 - Every projection reads weights repacked at load time (`kernels/packed.mojo`);
   the GGUF stays memory-mapped for the embedding table, and norms and biases
   are decoded into f32 arrays at load.
+
+`diffusion-gemma` files are read into a `ModelConfig` and checked against their
+tensor directory, but `DiffusionLM` refuses to run them: there is no forward pass
+for that architecture yet.
 """
 
 from std.time import perf_counter_ns
@@ -48,7 +52,57 @@ from mojo_dllm.quant.kquants import (
 from mojo_dllm.sys.mem import F32Ptr, Floats
 
 
+# DiffusionGemma's metadata keys and tensor names. They come from the unmerged
+# ggml-org/llama.cpp#24423 (gguf-py/gguf/constants.py, src/llama-arch.cpp) and
+# are spelled here and nowhere else, so a rename when it merges is a one-line
+# change. Keys are relative to `<arch>.`, except GEMMA_CANVAS.
+comptime GEMMA_ARCH = "diffusion-gemma"
+comptime GEMMA_BLOCK_COUNT = "block_count"
+comptime GEMMA_CONTEXT_LENGTH = "context_length"
+comptime GEMMA_EMBEDDING_LENGTH = "embedding_length"
+comptime GEMMA_FFN_LENGTH = "feed_forward_length"
+comptime GEMMA_HEAD_COUNT = "attention.head_count"
+comptime GEMMA_HEAD_COUNT_KV = "attention.head_count_kv"
+comptime GEMMA_KEY_LENGTH = "attention.key_length"
+comptime GEMMA_KEY_LENGTH_SWA = "attention.key_length_swa"
+comptime GEMMA_VALUE_LENGTH = "attention.value_length"
+comptime GEMMA_VALUE_LENGTH_SWA = "attention.value_length_swa"
+comptime GEMMA_WINDOW = "attention.sliding_window"
+comptime GEMMA_PATTERN = "attention.sliding_window_pattern"
+comptime GEMMA_CAUSAL = "attention.causal"
+comptime GEMMA_SHARED_KV = "attention.shared_kv_layers"
+comptime GEMMA_LAYER_INPUT = "embedding_length_per_layer_input"
+comptime GEMMA_EPSILON = "attention.layer_norm_rms_epsilon"
+comptime GEMMA_ROPE_BASE = "rope.freq_base"
+comptime GEMMA_ROPE_BASE_SWA = "rope.freq_base_swa"
+comptime GEMMA_ROPE_DIMS = "rope.dimension_count"
+comptime GEMMA_ROPE_DIMS_SWA = "rope.dimension_count_swa"
+comptime GEMMA_EXPERT_COUNT = "expert_count"
+comptime GEMMA_EXPERT_USED = "expert_used_count"
+comptime GEMMA_EXPERT_FFN = "expert_feed_forward_length"
+comptime GEMMA_SOFTCAP = "final_logit_softcapping"
+comptime GEMMA_CANVAS = "diffusion.canvas_length"
+comptime GEMMA_TOKEN_EMBD = "token_embd.weight"
+comptime GEMMA_ROPE_FREQS = "rope_freqs.weight"
+comptime GEMMA_ATTN_K = "attn_k.weight"
+comptime GEMMA_ATTN_V = "attn_v.weight"
+comptime GEMMA_EXPERTS_UP = "ffn_gate_up_exps.weight"
+comptime GEMMA_EXPERTS_DOWN = "ffn_down_exps.weight"
+
+
+@fieldwise_init
 struct ModelConfig(Copyable, ImplicitlyCopyable, Movable):
+    """The hyperparameters of a GGUF model.
+
+    LLaDA and Dream use one attention shape in every layer. `diffusion-gemma`
+    has two, so for it `n_kv_heads`, `head_dim` and `theta` hold the global
+    layers' values (the GGUF keys without a suffix) and the `_swa` fields the
+    sliding layers'. Read them per layer through `kv_heads`, `head_size` and
+    `rope_base`: a sliding layer that takes the global head size computes
+    garbage without an error. `head_dim` is not `hidden / n_heads` there.
+    The fields below `shift_logits` are 0 or empty for the other architectures.
+    """
+
     var arch: String
     var n_layers: Int
     var hidden: Int
@@ -63,15 +117,44 @@ struct ModelConfig(Copyable, ImplicitlyCopyable, Movable):
     var mask_id: Int
     var rope_neox: Bool
     var shift_logits: Bool
+    var layer_kinds: String
+    """One byte per layer, `s` for sliding-window attention and `g` for global."""
+    var n_kv_heads_swa: Int
+    var head_dim_swa: Int
+    var theta_swa: Float32
+    var sliding_window: Int
+    var n_experts: Int
+    var n_experts_used: Int
+    var expert_ffn: Int
+    var softcap: Float32
+    """`final_logit_softcapping`: logits become softcap * tanh(logit / softcap); 0 is off."""
+    var canvas: Int
+    """`diffusion.canvas_length`: the tokens the model denoises after the prompt."""
 
     def __init__(out self, g: GGUFFile) raises:
-        self.arch = g.architecture()
+        var arch = g.architecture()
+        if arch == GEMMA_ARCH:
+            self = _read_diffusion_gemma(g)
+            return
+        self.arch = arch
         if self.arch != "llada" and self.arch != "dream":
             raise Error(
                 "unsupported model architecture: "
                 + self.arch
-                + " (supported: llada, dream)"
+                + " (runs: llada, dream; read only: "
+                + GEMMA_ARCH
+                + ")"
             )
+        self.layer_kinds = String("")
+        self.n_kv_heads_swa = 0
+        self.head_dim_swa = 0
+        self.theta_swa = 0.0
+        self.sliding_window = 0
+        self.n_experts = 0
+        self.n_experts_used = 0
+        self.expert_ffn = 0
+        self.softcap = 0.0
+        self.canvas = 0
         var a = self.arch + "."
         self.n_layers = g.get_int(a + "block_count")
         self.hidden = g.get_int(a + "embedding_length")
@@ -138,7 +221,379 @@ struct ModelConfig(Copyable, ImplicitlyCopyable, Movable):
             )
 
     def kv_dim(self) -> Int:
+        """Width of K or V when every layer has the same shape (LLaDA, Dream).
+        """
         return self.n_kv_heads * self.head_dim
+
+    def is_sliding(self, layer: Int) -> Bool:
+        return (
+            layer < self.layer_kinds.byte_length()
+            and self.layer_kinds.as_bytes()[layer] == UInt8(ord("s"))
+        )
+
+    def kv_heads(self, layer: Int) -> Int:
+        if self.is_sliding(layer):
+            return self.n_kv_heads_swa
+        return self.n_kv_heads
+
+    def head_size(self, layer: Int) -> Int:
+        """The width of one K or V head in `layer`."""
+        if self.is_sliding(layer):
+            return self.head_dim_swa
+        return self.head_dim
+
+    def rope_base(self, layer: Int) -> Float32:
+        if self.is_sliding(layer):
+            return self.theta_swa
+        return self.theta
+
+    def check_runnable(self) raises:
+        """Refuses a config the loaders can read but no forward pass runs."""
+        if self.arch == GEMMA_ARCH:
+            raise Error(
+                GEMMA_ARCH
+                + " has no forward pass yet: the file can be inspected but not"
+                " run"
+            )
+
+
+def _positive(g: GGUFFile, key: String) raises -> Int:
+    var value = g.get_int(key)
+    if value <= 0:
+        raise Error(key + " must be positive, got " + String(value))
+    return value
+
+
+def _equal_to(g: GGUFFile, key: String, want: Int, other: String) raises:
+    var got = g.get_int(key)
+    if got != want:
+        raise Error(
+            key
+            + " must equal "
+            + other
+            + " "
+            + String(want)
+            + ", got "
+            + String(got)
+        )
+
+
+def _must_be_zero(g: GGUFFile, key: String, why: String) raises:
+    var got = g.get_int_or(key, 0)
+    if got != 0:
+        raise Error(key + " must be 0, got " + String(got) + ": " + why)
+
+
+def _shape_str(dims: List[Int]) -> String:
+    var s = String("[")
+    for i in range(len(dims)):
+        s += ("" if i == 0 else ", ") + String(dims[i])
+    return s + "]"
+
+
+def _expect_shape(
+    g: GGUFFile, name: String, dims: List[Int], why: String
+) raises:
+    """The tensor has exactly these dimensions; `why` says which keys set them.
+    """
+    var t = g.tensor(name)
+    var have = [t.ne0, t.ne1, t.ne2, t.ne3]
+    var same = t.n_dims == len(dims)
+    for i in range(len(dims)):
+        if i < 4 and have[i] != dims[i]:
+            same = False
+    if not same:
+        raise Error(
+            "tensor shape mismatch for "
+            + name
+            + ": "
+            + t.shape_str()
+            + ", expected "
+            + _shape_str(dims)
+            + " ("
+            + why
+            + ")"
+        )
+
+
+def _read_diffusion_gemma(g: GGUFFile) raises -> ModelConfig:
+    """The `diffusion-gemma` branch of `ModelConfig`.
+
+    Each per-layer array must have one entry per block, and the tensor
+    directory must agree with the flags (see `_check_diffusion_gemma_tensors`).
+    Whatever the forward pass would have to handle differently is refused by
+    key: shared K/V layers, a per-layer input embedding, causal attention,
+    value heads that differ from key heads, and partial rotary widths.
+    """
+    var a = String(GEMMA_ARCH) + "."
+    var n_layers = _positive(g, a + GEMMA_BLOCK_COUNT)
+    var hidden = g.get_int(a + GEMMA_EMBEDDING_LENGTH)
+    var ffn = g.get_int(a + GEMMA_FFN_LENGTH)
+    var n_heads = _positive(g, a + GEMMA_HEAD_COUNT)
+    var head_dim = _positive(g, a + GEMMA_KEY_LENGTH)
+    var head_dim_swa = _positive(g, a + GEMMA_KEY_LENGTH_SWA)
+    _equal_to(g, a + GEMMA_VALUE_LENGTH, head_dim, String(a + GEMMA_KEY_LENGTH))
+    _equal_to(
+        g,
+        a + GEMMA_VALUE_LENGTH_SWA,
+        head_dim_swa,
+        String(a + GEMMA_KEY_LENGTH_SWA),
+    )
+    _equal_to(g, a + GEMMA_ROPE_DIMS, head_dim, String(a + GEMMA_KEY_LENGTH))
+    _equal_to(
+        g,
+        a + GEMMA_ROPE_DIMS_SWA,
+        head_dim_swa,
+        String(a + GEMMA_KEY_LENGTH_SWA),
+    )
+
+    var pattern_key = a + GEMMA_PATTERN
+    var kv_key = a + GEMMA_HEAD_COUNT_KV
+    var pattern = g.get_bool_array(pattern_key)
+    if len(pattern) != n_layers:
+        raise Error(
+            pattern_key
+            + " has length "
+            + String(len(pattern))
+            + ", expected "
+            + String(n_layers)
+            + " ("
+            + a
+            + GEMMA_BLOCK_COUNT
+            + ")"
+        )
+    var kv = g.get_int_array(kv_key)
+    if len(kv) != n_layers:
+        raise Error(
+            kv_key
+            + " has length "
+            + String(len(kv))
+            + ", expected "
+            + String(n_layers)
+            + " ("
+            + a
+            + GEMMA_BLOCK_COUNT
+            + ")"
+        )
+    # The forward pass takes one K/V head count per kind of layer, so a layer
+    # that disagrees with the first of its kind is refused instead of averaged.
+    var kinds = String("")
+    var n_kv_heads = 0
+    var n_kv_heads_swa = 0
+    for i in range(n_layers):
+        var heads = kv[i]
+        if heads <= 0 or n_heads % heads != 0:
+            raise Error(
+                kv_key
+                + "["
+                + String(i)
+                + "] is "
+                + String(heads)
+                + ", expected a positive divisor of "
+                + a
+                + GEMMA_HEAD_COUNT
+                + " ("
+                + String(n_heads)
+                + ")"
+            )
+        var kind = "sliding" if pattern[i] else "global"
+        var first = n_kv_heads_swa if pattern[i] else n_kv_heads
+        if first != 0 and heads != first:
+            raise Error(
+                kv_key
+                + "["
+                + String(i)
+                + "] is "
+                + String(heads)
+                + ", but every "
+                + kind
+                + " layer must have "
+                + String(first)
+                + " (the first one does)"
+            )
+        if pattern[i]:
+            kinds += "s"
+            n_kv_heads_swa = heads
+        else:
+            kinds += "g"
+            n_kv_heads = heads
+
+    var experts = _positive(g, a + GEMMA_EXPERT_COUNT)
+    var used = g.get_int(a + GEMMA_EXPERT_USED)
+    if used < 1 or used > experts:
+        raise Error(
+            a
+            + GEMMA_EXPERT_USED
+            + " must be between 1 and "
+            + a
+            + GEMMA_EXPERT_COUNT
+            + " ("
+            + String(experts)
+            + "), got "
+            + String(used)
+        )
+    var expert_ffn = _positive(g, a + GEMMA_EXPERT_FFN)
+    var window = _positive(g, a + GEMMA_WINDOW)
+    var canvas = _positive(g, GEMMA_CANVAS)
+    _must_be_zero(
+        g,
+        a + GEMMA_SHARED_KV,
+        "layers that reuse another layer's K/V are not implemented",
+    )
+    _must_be_zero(
+        g,
+        a + GEMMA_LAYER_INPUT,
+        "per-layer input embeddings are not implemented",
+    )
+    if g.has_key(a + GEMMA_CAUSAL) and g.get_bool(a + GEMMA_CAUSAL):
+        raise Error(
+            a
+            + GEMMA_CAUSAL
+            + " is true: only the bidirectional canvas is implemented"
+        )
+    var softcap = g.get_f32_or(a + GEMMA_SOFTCAP, 0.0)
+    if softcap < 0.0:
+        raise Error(
+            a + GEMMA_SOFTCAP + " must not be negative, got " + String(softcap)
+        )
+
+    var ctx = g.get_int_or(a + GEMMA_CONTEXT_LENGTH, 4096)
+    var eps = g.get_f32(a + GEMMA_EPSILON)
+    var theta = g.get_f32(a + GEMMA_ROPE_BASE)
+    var theta_swa = g.get_f32(a + GEMMA_ROPE_BASE_SWA)
+    var mask_id = g.get_int("tokenizer.ggml.mask_token_id")
+    # Every key is read before the first tensor, so a missing key is named
+    # first even in a file without tensors.
+    var vocab = g.tensor(GEMMA_TOKEN_EMBD).n_rows()
+
+    var c = ModelConfig(
+        arch=String(GEMMA_ARCH),
+        n_layers=n_layers,
+        hidden=hidden,
+        n_heads=n_heads,
+        n_kv_heads=n_kv_heads,
+        head_dim=head_dim,
+        ffn=ffn,
+        vocab=vocab,
+        ctx=ctx,
+        eps=eps,
+        theta=theta,
+        mask_id=mask_id,
+        # llama.cpp: LLM_ARCH_DIFFUSION_GEMMA -> LLAMA_ROPE_TYPE_NEOX. The
+        # canvas rows score their own positions, so logits are not shifted.
+        rope_neox=True,
+        shift_logits=False,
+        layer_kinds=kinds,
+        n_kv_heads_swa=n_kv_heads_swa,
+        head_dim_swa=head_dim_swa,
+        theta_swa=theta_swa,
+        sliding_window=window,
+        n_experts=experts,
+        n_experts_used=used,
+        expert_ffn=expert_ffn,
+        softcap=softcap,
+        canvas=canvas,
+    )
+    _check_diffusion_gemma_tensors(g, c)
+    return c
+
+
+def _check_diffusion_gemma_tensors(g: GGUFFile, c: ModelConfig) raises:
+    """The tensor directory agrees with the config, layer by layer.
+
+    A sliding layer has its own V projection and a global one reuses K, so
+    `attn_v` must be there exactly when the pattern says sliding. K must be
+    `head_count_kv` heads of the layer's key length, and the expert tensors
+    must carry `expert_count` experts of `expert_feed_forward_length`.
+    """
+    var a = String(GEMMA_ARCH) + "."
+    _expect_shape(
+        g,
+        GEMMA_TOKEN_EMBD,
+        [c.hidden, c.vocab],
+        a + GEMMA_EMBEDDING_LENGTH + " " + String(c.hidden),
+    )
+    if "g" in c.layer_kinds:
+        _expect_shape(
+            g,
+            GEMMA_ROPE_FREQS,
+            [c.head_dim // 2],
+            "half of " + a + GEMMA_KEY_LENGTH + " " + String(c.head_dim),
+        )
+    for i in range(c.n_layers):
+        var p = "blk." + String(i) + "."
+        var kind = "sliding" if c.is_sliding(i) else "global"
+        var v = p + GEMMA_ATTN_V
+        if c.is_sliding(i) and not g.has_tensor(v):
+            raise Error(
+                "tensor "
+                + v
+                + " is missing: layer "
+                + String(i)
+                + " is sliding ("
+                + a
+                + GEMMA_PATTERN
+                + " is true), so it has its own V projection"
+            )
+        if not c.is_sliding(i) and g.has_tensor(v):
+            raise Error(
+                "tensor "
+                + v
+                + " is present: layer "
+                + String(i)
+                + " is global ("
+                + a
+                + GEMMA_PATTERN
+                + " is false), so V reuses K"
+            )
+        _expect_shape(
+            g,
+            p + GEMMA_ATTN_K,
+            [c.hidden, c.kv_heads(i) * c.head_size(i)],
+            "layer "
+            + String(i)
+            + " is "
+            + kind
+            + ": "
+            + a
+            + GEMMA_HEAD_COUNT_KV
+            + " "
+            + String(c.kv_heads(i))
+            + " x "
+            + a
+            + (GEMMA_KEY_LENGTH_SWA if c.is_sliding(i) else GEMMA_KEY_LENGTH)
+            + " "
+            + String(c.head_size(i)),
+        )
+        _expect_shape(
+            g,
+            p + GEMMA_EXPERTS_UP,
+            [c.hidden, 2 * c.expert_ffn, c.n_experts],
+            "gate and up fused: 2 x "
+            + a
+            + GEMMA_EXPERT_FFN
+            + " "
+            + String(c.expert_ffn)
+            + ", "
+            + a
+            + GEMMA_EXPERT_COUNT
+            + " "
+            + String(c.n_experts),
+        )
+        _expect_shape(
+            g,
+            p + GEMMA_EXPERTS_DOWN,
+            [c.expert_ffn, c.hidden, c.n_experts],
+            a
+            + GEMMA_EXPERT_FFN
+            + " "
+            + String(c.expert_ffn)
+            + ", "
+            + a
+            + GEMMA_EXPERT_COUNT
+            + " "
+            + String(c.n_experts),
+        )
 
 
 struct Layer(Movable):
@@ -353,6 +808,7 @@ struct DiffusionLM(DenoisingModel, Movable):
         var t0 = perf_counter_ns()
         self.gguf = GGUFFile(path)
         self.cfg = ModelConfig(self.gguf)
+        self.cfg.check_runnable()
         var c = self.cfg
         self.threads = threads
         self.max_tokens = max_tokens

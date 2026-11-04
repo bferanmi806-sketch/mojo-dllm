@@ -5,10 +5,10 @@ from __future__ import annotations
 import difflib
 import sys
 
-from launcher.build import BINARY, ensure_built, exec_binary
+from launcher.build import BINARY, ROOT, ensure_built, exec_binary
 from launcher.doctor import run_doctor
 from launcher.errors import LauncherError, UsageError
-from launcher.probes import real_probes
+from launcher.probes import read_project_version, real_probes
 from launcher.runcmd import cmd_pull, cmd_run
 from launcher.ui import Style
 from launcher.wizard import parse_setup_args, real_env, run_setup
@@ -39,6 +39,7 @@ def help_text(style: Style) -> str:
         row("doctor", "check platform, toolchain, binary, GPU and model; changes nothing"),
         row("help", "show this text"),
         "  inspect, tokenize and logits go to the binary unchanged, after the build is current.",
+        "  --version prints the version from pyproject.toml and exits.",
         "",
         b("Options"),
         "  setup [--model MODEL] [--yes] [--no-model]",
@@ -81,6 +82,13 @@ def main(argv: list[str]) -> int:
         print(help_text(Style.for_stream(sys.stdout)))
         return 0
     try:
+        if command == "--version":
+            try:
+                text = (ROOT / "pyproject.toml").read_text()
+            except OSError as e:
+                raise LauncherError(f"cannot read pyproject.toml: {e.strerror}. Restore it from git.") from e
+            print(f"mojo-dllm {read_project_version(text)}")
+            return 0
         if command == "setup":
             return run_setup(parse_setup_args(rest), real_env())
         if command == "pull":

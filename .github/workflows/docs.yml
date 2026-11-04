@@ -14,8 +14,6 @@ on:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 concurrency:
   group: pages
@@ -28,6 +26,7 @@ jobs:
     # by itself on the day the repo goes public.
     if: github.event.repository.visibility == 'public'
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
@@ -54,7 +53,13 @@ jobs:
   deploy:
     if: github.event.repository.visibility == 'public'
     needs: build
+    # deploy-pages needs these two and nothing else. A job-level block replaces
+    # the workflow-level one, so contents is none here (this job has no checkout).
+    permissions:
+      pages: write
+      id-token: write
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

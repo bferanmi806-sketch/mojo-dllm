@@ -7,15 +7,15 @@ kernel that does it.
 
 ## The shape of the problem
 
-A step multiplies each weight matrix W (N rows × K columns, 4 to 6 bits per
+A step multiplies each weight matrix W (N rows × K columns, 4 to 8 bits per
 weight) by an activation matrix X (L rows × K). L is the canvas length, a few
 hundred at most. That is a skinny GEMM, and it is compute-bound: each weight
 is read once per step and used L times.
 
 ## Activations: int8 with a scale per 256
 
-Before a projection, each activation row is quantized to int8 with one f32
-scale per 256 values, and the sum of each group of 16 values is kept as a
+For a Q4_K or Q6_K projection, each activation row is quantized to int8 with
+one f32 scale per 256 values, and the sum of each group of 16 values is kept as a
 float. This is llama.cpp's Q8_K scheme, which keeps the comparison with it
 fair. Integer dot products are 4× denser than f32 FMAs on AVX2.
 
@@ -58,6 +58,46 @@ weights. Swapping the nibble halves or dropping the Q6_K zero point fails
 these tests; that mutation check runs before changes to this file land.
 
 `bench/bench_qgemm.mojo` measures the kernel alone on LLaDA's layer shapes.
+
+## Q5_0 and Q8_0 CPU matrices
+
+`PackedMatrix` and `pgemm` also accept Q5_0 and Q8_0 weights. Their blocks
+contain 32 weights and one f16 scale, so their activations use
+`QActs(tokens, K, block_size=32)`. This supports widths such as 704 and 2112
+that do not fit the K-quant activation layout. The existing default remains
+256, and `pgemm` checks that the activation block size matches the matrix.
+
+Each packed block holds eight f32 weight scales and interleaved bytes for
+eight rows. Q5_0 uses unsigned values with zero point 16; Q8_0 uses zero
+point 128. The activation sums remove those offsets after the integer dot
+product. On AVX2, the Q8_0 path splits the high bit before `pmaddubsw` so
+full-range unsigned weights cannot saturate its signed 16-bit intermediate.
+VNNI uses the full-byte dot product directly.
+
+`tests/test_packed32.mojo` compares both formats at the model's two widths
+with scalar products of independently dequantized weights. It also covers
+ragged token tiles, output strides, scale changes between blocks and extreme
+Q8_0 values, including a build that explicitly targets AVX2 without VNNI.
+
+## Routing and grouped CPU experts
+
+`kernels/moe.mojo` provides the layer primitives for DiffusionGemma's CPU
+forward-pass integration. `route_tokens` applies unweighted RMS normalization,
+the inverse square root of the hidden width, the router scale vector and an
+F32 projection. It computes softmax, selects the highest-weight experts with
+lower expert IDs winning ties, and renormalizes the selected weights.
+
+`ExpertWeights` repacks each expert's slice once. `MoEWorkspace` stores
+reusable buffers large enough for every token to select the same expert.
+`grouped_experts` counts and groups token/expert pairs, skips empty experts,
+and runs batched gate/up and down projections for each active expert. Between
+the projections it applies `gelu_tanh(gate) * up`; the scatter-add multiplies
+each output by the expert scale and the token's router weight.
+
+The tiny MoE tests compare routing and final outputs with a separate scalar
+reference, including mixed K-quant gate/up and 32-weight-block down matrices.
+The [MoE benchmark](https://github.com/vladimirrott/mojo-dllm/blob/main/bench/MOE.md) measures a complete synthetic layer at
+the intended model dimensions and retains its raw timing samples.
 
 ## The GPU path
 
@@ -138,7 +178,7 @@ narrowest width that does not increase the estimated number of block waves
 across the device's SMs. The estimate assumes one resident block per SM;
 it is a dispatch heuristic, not an occupancy measurement. It can trade more
 blocks for less work within each block when a wide GPU has spare parallelism.
-Q6_K and other device families keep their existing rule. The SM count is read
+Other device families keep their existing rule. The SM count is read
 when activation buffers are created, not on every GEMM call.
 
 The LM head's small row count still uses the narrow tile. The available token
@@ -147,6 +187,15 @@ widths remain 32, 64 and 80; 80 is the widest whose shared memory fits the
 accumulation order are unchanged. Token tiles of one weight tile run back to
 back, so they read it through L2. The exact cross-width GPU test also covers
 ragged token counts and partial weight-row tiles.
+
+Q6_K on compute capability 12 also offers a 16-token tile for canvases of
+at most 320 tokens. It chooses among widths 16, 32, 64 and 80 by minimizing
+`(width + 16) * ceil(blocks / SM_count)`, preferring the narrower width on a
+tie. For vocabulary projections with at least 65,536 weight rows and at most
+32 tokens, it instead uses a 128-row, 32-token tile. Both Q4_K and Q6_K read
+the same cached SM count; Q6_K keeps its previous rule on other devices and
+longer canvases. Direct-launch tests compare the new Q6_K tiles exactly with
+the original tile, including partial token and weight-row tiles.
 
 **Shared-memory layout.** Rows are padded so the 8 rows a fragment load reads
 fall in different banks: activation rows are 272 bytes apart (256 plus 16),

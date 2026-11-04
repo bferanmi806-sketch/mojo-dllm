@@ -2,6 +2,7 @@ from std.os import remove
 from std.testing import assert_equal, assert_true, assert_raises, TestSuite
 
 from cli.args import Args
+from mojo_dllm.diffusion.sampler import GenResult
 from mojo_dllm.formats.gguf import GGUFFile
 from mojo_dllm.sys.mmap import Mapping
 from main import (
@@ -9,13 +10,17 @@ from main import (
     boolean_flags,
     chat_prompt,
     check_args,
+    check_arch_flags,
     command_spec,
     decide,
     execute,
+    inspect_text,
     json_str,
     _csv,
     is_top_level_help,
     model_error,
+    version_line,
+    stop_json,
     usage,
     usage_for,
 )
@@ -103,7 +108,7 @@ def _check(command: String, rest: List[String]) raises -> String:
 
 def test_every_command_declares_its_flags() raises:
     var run = command_spec("run")
-    assert_equal(len(run.values), 12)
+    assert_equal(len(run.values), 18)
     assert_equal(len(run.booleans), 9)
     var tokenize = command_spec("tokenize")
     assert_equal(len(tokenize.values), 2)
@@ -309,6 +314,21 @@ def test_help_exits_zero_and_wins_over_other_problems() raises:
     assert_equal(execute(["mojo-dllm", "--help"]), 0)
 
 
+def test_version_flag_prints_one_line_and_exits_zero() raises:
+    var d = _decide("--version", [])
+    assert_equal(d.code, 0)
+    assert_true(not d.is_error)
+    assert_true(not d.proceed)
+    assert_equal(d.text, version_line())
+    assert_true(not d.text.__contains__("\n"))
+    assert_true(usage().startswith(version_line() + ": "))
+    assert_equal(execute(["mojo-dllm", "--version"]), 0)
+
+
+def test_usage_mentions_the_version_flag() raises:
+    assert_true(usage().__contains__("mojo-dllm --version"))
+
+
 def test_usage_errors_exit_two() raises:
     var unknown = _decide("run", ["--stpes", "3"])
     assert_equal(unknown.code, 2)
@@ -457,6 +477,119 @@ def test_values_that_can_never_be_valid_are_refused() raises:
     assert_equal(_check("run", ok), "")
 
 
+def test_entropy_bound_flags_are_checked_before_the_model_loads() raises:
+    var base = List[String](["--model", "m", "--prompt", "p"])
+    for flag in List[String](["eb-steps", "eb-stability"]):
+        var r = base.copy()
+        r.append("--" + flag)
+        r.append("x")
+        assert_equal(
+            _check("run", r),
+            "flag --"
+            + flag
+            + " needs an integer, got 'x'\nsee: mojo-dllm run --help",
+        )
+    var low = base.copy()
+    low.append("--eb-steps")
+    low.append("0")
+    assert_equal(
+        _check("run", low),
+        "flag --eb-steps must be at least 1, got 0\nsee: mojo-dllm run --help",
+    )
+    var stab = base.copy()
+    stab.append("--eb-stability")
+    stab.append("-1")
+    assert_equal(
+        _check("run", stab),
+        (
+            "flag --eb-stability must be at least 0, got -1\nsee: mojo-dllm"
+            " run --help"
+        ),
+    )
+    for flag in List[String](
+        ["eb-t-min", "eb-t-max", "eb-bound", "eb-confidence"]
+    ):
+        for bad in List[String](["warm", "nan", "inf", ""]):
+            var r = base.copy()
+            r.append("--" + flag)
+            r.append(bad)
+            assert_equal(
+                _check("run", r),
+                "flag --"
+                + flag
+                + " needs a finite number, got '"
+                + bad
+                + "'\nsee: mojo-dllm run --help",
+            )
+    var zero_max = base.copy()
+    zero_max.append("--eb-t-max")
+    zero_max.append("0")
+    assert_equal(
+        _check("run", zero_max),
+        "flag --eb-t-max must be above 0, got 0\nsee: mojo-dllm run --help",
+    )
+    for flag in List[String](["eb-t-min", "eb-bound", "eb-confidence"]):
+        var r = base.copy()
+        r.append("--" + flag)
+        r.append("-0.5")
+        assert_equal(
+            _check("run", r),
+            "flag --"
+            + flag
+            + " must be at least 0, got -0.5\nsee: mojo-dllm run --help",
+        )
+    # The branch's own defaults, and the boundary values, are valid.
+    var ok = base.copy()
+    for pair in List[String](
+        [
+            "--eb-steps",
+            "48",
+            "--eb-t-min",
+            "0",
+            "--eb-t-max",
+            "0.8",
+            "--eb-bound",
+            "0",
+            "--eb-stability",
+            "0",
+            "--eb-confidence",
+            "0",
+        ]
+    ):
+        ok.append(pair)
+    assert_equal(_check("run", ok), "")
+
+
+def test_entropy_bound_flags_belong_to_diffusion_gemma() raises:
+    var spec = command_spec("run")
+    var with_eb = Args(
+        ["x", "run", "--eb-bound", "0.2"], spec.values, spec.booleans
+    )
+    with assert_raises(contains="--eb-bound applies to diffusion-gemma only"):
+        check_arch_flags(with_eb, "llada")
+    with assert_raises(contains="not dream"):
+        check_arch_flags(with_eb, "dream")
+    check_arch_flags(with_eb, "diffusion-gemma")
+    var plain = Args(["x", "run"], spec.values, spec.booleans)
+    check_arch_flags(plain, "llada")
+    var steps = Args(["x", "run", "--steps", "9"], spec.values, spec.booleans)
+    with assert_raises(contains="use --eb-steps"):
+        check_arch_flags(steps, "diffusion-gemma")
+    check_arch_flags(steps, "llada")
+
+
+def test_json_reports_steps_taken_and_the_stop_reason() raises:
+    var res = GenResult()
+    assert_equal(
+        stop_json(res), ', "steps_taken": 0, "stop_reason": "complete"'
+    )
+    res.steps_taken = 17
+    res.stop_reason = "converged"
+    assert_equal(
+        stop_json(res), ', "steps_taken": 17, "stop_reason": "converged"'
+    )
+
+
 def test_csv_flags_of_logits_are_checked() raises:
     var message = _check(
         "logits",
@@ -487,6 +620,125 @@ def test_equals_form_says_how_values_are_given() raises:
             " mojo-dllm run --help"
         ),
     )
+
+
+def _joined(lines: List[String]) -> String:
+    var text = String("")
+    for line in lines:
+        text += line + "\n"
+    return text
+
+
+def test_inspect_pins_the_diffusion_gemma_fixture_output() raises:
+    var path = "tests/fixtures/tiny-diffusion-gemma.gguf"
+    var text = inspect_text(path)
+    var head = _joined(
+        [
+            "file: " + path,
+            "gguf version: 3",
+            "architecture: diffusion-gemma",
+            "name: tiny-diffusion-gemma",
+            "tensors: 52",
+            "metadata keys: 28",
+            "",
+            "config:",
+            "  blocks: 2 (sliding 1, global 1)",
+            "  global layers: 1",
+            "  hidden size: 256",
+            "  heads: 8",
+            "  kv heads: 4 sliding, 1 global",
+            "  head size: 64 sliding, 128 global",
+            "  rope base: 10000.0 sliding, 1000000.0 global",
+            "  sliding window: 128",
+            "  dense ffn: 512",
+            "  experts: 4 (2 used), ffn 64",
+            "  vocabulary: 512, mask token 4",
+            "  final logit softcap: 30.0",
+            "  canvas length: 16",
+            "  context length: 8192",
+            "",
+            "metadata:",
+            '  general.architecture = "diffusion-gemma"',
+            '  general.name = "tiny-diffusion-gemma"',
+            "  diffusion-gemma.block_count = 2",
+            "  diffusion-gemma.context_length = 8192",
+            "  diffusion-gemma.embedding_length = 256",
+            "  diffusion-gemma.feed_forward_length = 512",
+            "  diffusion-gemma.attention.head_count = 8",
+            "  diffusion-gemma.attention.head_count_kv = <array of 2>",
+            "  diffusion-gemma.rope.freq_base = 1000000.0",
+            "  diffusion-gemma.rope.freq_base_swa = 10000.0",
+            "  diffusion-gemma.attention.layer_norm_rms_epsilon = 1e-06",
+            "  diffusion-gemma.expert_count = 4",
+            "  diffusion-gemma.expert_used_count = 2",
+            "  diffusion-gemma.attention.key_length = 128",
+            "  diffusion-gemma.attention.value_length = 128",
+            "  diffusion-gemma.final_logit_softcapping = 30.0",
+            "  diffusion-gemma.attention.sliding_window = 128",
+            "  diffusion-gemma.attention.shared_kv_layers = 0",
+            "  diffusion-gemma.embedding_length_per_layer_input = 0",
+            "  diffusion-gemma.attention.sliding_window_pattern = <array of 2>",
+            "  diffusion-gemma.attention.key_length_swa = 64",
+            "  diffusion-gemma.attention.value_length_swa = 64",
+            "  diffusion-gemma.expert_feed_forward_length = 64",
+            "  diffusion-gemma.rope.dimension_count = 128",
+            "  diffusion-gemma.rope.dimension_count_swa = 64",
+            "  diffusion-gemma.attention.causal = false",
+            "  diffusion.canvas_length = 16",
+            "  tokenizer.ggml.mask_token_id = 4",
+            "",
+            "tensor types:",
+            "  Q6_K: 2",
+            "  F32: 31",
+            "  Q4_K: 14",
+            "  Q5_0: 3",
+            "  Q8_0: 2",
+            "",
+            "tensors:",
+        ]
+    )
+    assert_true(text.startswith(head), "the inspect output starts differently")
+    assert_true(
+        "  blk.1.ffn_gate_up_exps.weight  Q4_K  [256, 128, 4]\n" in text,
+        "a 3-D expert tensor is listed with its shape",
+    )
+    assert_true(
+        "  blk.0.ffn_down_exps.weight  Q5_0  [64, 256, 4]\n" in text,
+        "a Q5_0 expert tensor is listed with its type",
+    )
+    assert_true("blk.1.attn_v.weight" not in text, "a global layer has no V")
+
+
+def test_inspect_says_why_a_diffusion_gemma_config_is_refused() raises:
+    var text = inspect_text(
+        "tests/fixtures/diffusion-gemma/shared-kv-layers.gguf"
+    )
+    assert_true("architecture: diffusion-gemma\n" in text)
+    assert_true(
+        "config: refused: diffusion-gemma.attention.shared_kv_layers must be 0,"
+        " got 2"
+        in text,
+        "inspect names the refused key",
+    )
+    assert_true(
+        "  diffusion-gemma.attention.shared_kv_layers = 2\n" in text,
+        "inspect still lists the metadata",
+    )
+
+
+def test_inspect_lists_every_global_layer() raises:
+    var two = inspect_text("tests/fixtures/diffusion-gemma/all-global.gguf")
+    assert_true("  blocks: 2 (sliding 0, global 2)\n" in two)
+    assert_true("  global layers: 0, 1\n" in two)
+    var none = inspect_text("tests/fixtures/diffusion-gemma/all-sliding.gguf")
+    assert_true("  blocks: 2 (sliding 2, global 0)\n" in none)
+    assert_true("  global layers: none\n" in none)
+
+
+def test_inspect_prints_no_config_for_the_other_architectures() raises:
+    var text = inspect_text("tests/fixtures/tiny-llada.gguf")
+    assert_true("architecture: llada\n" in text)
+    assert_true("config:" not in text)
 
 
 def test_inspect_rejects_a_second_path() raises:

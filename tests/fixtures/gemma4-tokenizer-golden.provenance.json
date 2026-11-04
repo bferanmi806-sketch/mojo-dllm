@@ -1,0 +1,18 @@
+{
+  "llama_cpp": {
+    "repository": "https://github.com/danielhanchen/llama.cpp",
+    "pull_request": "ggml-org/llama.cpp#24423",
+    "commit": "2e715c0639c6f07c57c943f8d5a7919953af8f7c"
+  },
+  "model": {
+    "file": "diffusiongemma-26B-A4B-it-Q4_K_M.gguf",
+    "size_bytes": 16806810208,
+    "sha256": "24523b6c833c9ce9f5f34f9b333ab1517d73d6f1e76a103645353114c8028bc5"
+  },
+  "command": "llama-tokenize -m MODEL.gguf -f CASE.txt --ids --no-bos --no-escape --log-disable",
+  "regenerate": "uv run --only-group fixtures python scripts/gen_tokenizer_fixture.py --golden-only MODEL.gguf $DG_LLAMA_SRC/build/bin/llama-tokenize gemma4",
+  "bos_id": 2,
+  "bos_check": "for every case the ids with BOS equal [bos_id] + the ids without it",
+  "cases": 54,
+  "golden_sha256": "0b7be390aef5aab33bbe2071b5810d0329d4cfdf2779347d8668cfbe75c0c1c5"
+}

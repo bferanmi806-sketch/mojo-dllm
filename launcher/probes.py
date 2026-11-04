@@ -10,6 +10,7 @@ import platform
 import re
 import shutil
 import subprocess
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -42,6 +43,17 @@ def read_mojo_pin(pyproject: str) -> str:
     if match is None:
         raise LauncherError("pyproject.toml has no mojo==X pin; restore it from git, then run ./mojo-dllm doctor again.")
     return match.group(1)
+
+
+def read_project_version(pyproject: str) -> str:
+    try:
+        project = tomllib.loads(pyproject).get("project")
+        version = project.get("version") if isinstance(project, dict) else None
+    except (tomllib.TOMLDecodeError, TypeError):
+        version = None
+    if not isinstance(version, str):
+        raise LauncherError("pyproject.toml has no [project] version; restore it from git, then run ./mojo-dllm --version again.")
+    return version
 
 
 def _capture(cmd: list[str]) -> str | None:

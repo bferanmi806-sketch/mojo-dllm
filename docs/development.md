@@ -54,9 +54,13 @@ live in `tests/fixtures/` and come from scripts, never from hand:
 | Fixture | Made by | Checks |
 |---|---|---|
 | `kquants.gguf`, `bad-magic.gguf`, `tiny-llada.gguf`, `tiny-llada.expected.f32`, `tiny-dream.gguf`, `tiny-dream.expected.f32`, `malformed/`, `metadata/` | `scripts/gen_fixtures.py` | GGUF parsing and rejection, decoders, `ModelConfig` validation, the forward pass against a numpy reference |
+| `tiny-diffusion-gemma.gguf`, `diffusion-gemma/` | `scripts/gen_fixtures.py` | the `diffusion-gemma` config (seed 610061): a 2-layer model with one sliding and one global layer, 4 experts, the tensor names and types of the real file, and one file per refusal (metadata only, or zero-filled tensors) |
 | `dequant-types.gguf`, `unsupported-embedding.gguf` | `scripts/gen_fixtures.py` | Q8_0/Q5_K/BF16/Q5_0 references (seed 340034) and embedding rejection before CPU/GPU allocation (no RNG) |
 | `llada-tokenizer.gguf`, `llada-tokenizer-golden.tsv`, `dream-tokenizer.gguf`, `dream-tokenizer-golden.tsv` | `scripts/gen_tokenizer_fixture.py` | tokenizer ids against `llama-tokenize` |
+| `gemma4-tokenizer-golden.tsv`, `gemma4-tokenizer-golden.provenance.json` | `scripts/gen_tokenizer_fixture.py --golden-only` | DiffusionGemma tokenizer ids against `llama-tokenize` from the ggml-org/llama.cpp#24423 branch at the commit `scripts/build_dg_ref.sh` pins; the provenance file records that commit, the model file's sha256 and the command |
+| `golden-generation.tsv` | `UPDATE_GOLDEN=1 build/tests/test_golden` | tiny LLaDA/Dream token sequences, forward-pass counts, early stopping and per-step commits |
 | `src/mojo_dllm/tokenizer/unicode_tables.mojo` | `scripts/gen_unicode_tables.py` | code point classes from llama.cpp's own tables |
+| `moe-q5.bin`, `moe-q8.bin`, `moe-q4-q5.bin`, `moe-q4-q8.bin` | `scripts/gen_moe_fixture.py` | deterministic raw expert tensors for scalar MoE comparisons, including mixed activation block sizes |
 | GGUF/source tensor shape report | `scripts/check_weights.py` (`--self-test`) | LLaDA and Dream name mapping and safetensors header shapes; run with `uv run --only-group fixtures python scripts/check_weights.py MODEL.gguf INDEX.json` (the second argument may be one `.safetensors` file) |
 
 `tests/gpu/test_gpu.mojo` holds the GPU tests: each kernel against the CPU
@@ -67,6 +71,95 @@ The tiny model is 2 layers of hidden size 256 with random K-quant blocks. Its
 expected logits come from a float numpy forward pass over the weights that
 the `gguf` package dequantizes, so the Mojo forward pass is checked against
 the reference formats, not against itself.
+
+### Sampler goldens
+
+`tests/test_golden.mojo` pins current behavior on the tiny fixtures. These
+outputs come from mojo-dllm itself: they detect changes, not independent
+correctness. The numpy forward-pass tests and real-model parity runs provide
+that evidence. No model download or GPU is needed.
+
+Run from the repository root:
+
+```bash
+bash scripts/build.sh tests/test_golden.mojo build/tests/test_golden
+build/tests/test_golden
+# Only after reviewing an intentional behavior change:
+UPDATE_GOLDEN=1 build/tests/test_golden
+```
+
+Only `UPDATE_GOLDEN=1` writes the file. Normal runs reject missing, empty,
+duplicate, unknown or incomplete cases and compare tokens and schedule metadata
+exactly. A mismatch names the case, the first differing token position (including
+the prompt), both token lists and both complete rows. A golden diff in a PR needs
+a sentence explaining why behavior changed, and `test_model.mojo` must still
+pass. Do not regenerate merely to silence a failure on another machine; inspect
+the differing logits and select a case without an unstable near-tie.
+
+The 14 cases cover LLaDA block geometry, uneven transfer counts, serial commits,
+random remasking, temperature and early stop, plus Dream's three confidence
+rules, uneven timesteps, nondefault `eps` and early stop. LLaDA uses prompt
+`[5, 17, 300]`; Dream uses `[448, 50, 134]` because the original prompt gave
+identical all-49 outputs for D1 and D5. To avoid duplicate token lists, L5 uses
+seed 1, D2 uses `eps=0.2`, D3 uses a 12-token canvas and D4 uses `eps=0.1`.
+D1/D5 retain the same prompt, length and steps and differ only in `eps`.
+L8/D6 use fixed stop ids 347/49 taken from the baseline outputs, never selected
+at runtime. All cases disable threshold and dual-cache acceleration.
+
+## Heavy jobs
+
+A job that holds more memory than the machine can spare makes the kernel's global OOM killer pick a victim.
+With systemd's default `OOMPolicy=stop`, systemd then stops every process in the victim's scope, and a job
+started from a terminal lives in that terminal's scope: the shell, the editor session and every agent in the
+window end with it. A measured run of DiffusionGemma-26B on the CPU peaked at about 25.6 GiB resident, and on a
+30 GiB machine with a 2 GiB swapfile that run ended in exactly this way.
+
+`scripts/capped.sh` starts a command in a scope of its own, under a hard cap, so only that scope can fail:
+
+```bash
+scripts/capped.sh --mem 26G -- build/mojo-dllm run --model model.gguf --prompt "hello"
+```
+
+It sets four things, each for a reason you can check in the documentation of the kernel's cgroup v2 memory
+controller and of systemd's resource control:
+
+| Setting | Effect |
+|---|---|
+| `MemoryMax=26G` | the hard cap (`memory.max`); the kernel OOM killer runs inside the scope when it is reached and kills nothing outside it |
+| `MemorySwapMax=0` | no swap, so a job over its cap dies instead of dragging the desktop through swap |
+| `OOMPolicy=kill` | one OOM kill ends the whole scope (`memory.oom.group`), not half of it |
+| `CPUQuota=N00%` | only with `--cpus N`, so a job leaves cores for the desktop |
+
+It never sets `MemoryHigh`. Below the cap, `MemoryHigh` throttles a process that has nothing to reclaim until it
+stands still (state `D`, no progress); a job that really needs its memory should be killed, not frozen.
+
+The script also refuses to start a job in two cases:
+
+- `/proc/meminfo` reports less `MemAvailable` than `--need` (default: `--mem`). A cap larger than the available
+  memory does not protect the machine, because the global OOM killer still runs. Exit status 75.
+- The systemd user manager cannot enforce a memory limit (no cgroup v2, or the `memory` controller is not
+  delegated to it). It never runs the command uncapped. Exit status 69.
+
+`--dry-run` runs both checks and prints the `systemd-run` command without running it. When a capped job dies with
+exit status 137, the cap was most likely reached; `journalctl -k | grep oom-kill` tells the cases apart:
+`constraint=CONSTRAINT_MEMCG` is the cap working, while `constraint=CONSTRAINT_NONE` with `global_oom` means the
+whole machine ran out of memory.
+
+For a container, set the same two limits on the container: `podman run --memory 12g --memory-swap 12g`
+(`--memory-swap` counts memory plus swap, so equal values mean no swap).
+
+What does not isolate a job on its own:
+
+- `ulimit -v` limits address space, which counts mapped files such as a 16 GB model that is read lazily, and it
+  does not stop a process that stays below the limit but takes the machine's last free page.
+- `systemd-oomd` reacts to memory pressure and swap use over seconds, and a job that fills memory in one
+  allocation burst can reach the kernel's killer first.
+- A swapfile only delays the kill and slows the machine while it lasts.
+
+References: the kernel's [Control Group v2](https://docs.kernel.org/admin-guide/cgroup-v2.html) memory
+interface, systemd's
+[resource control](https://www.freedesktop.org/software/systemd/man/latest/systemd.resource-control.html) and
+[scope units](https://www.freedesktop.org/software/systemd/man/latest/systemd.scope.html) (`OOMPolicy=`).
 
 ## Benchmarks
 

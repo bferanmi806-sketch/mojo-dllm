@@ -4,12 +4,26 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import os
 from pathlib import Path
 
 import pytest
 
 from launcher.probes import Probes
 from launcher.verified import VerifiedStore
+
+
+@pytest.fixture(autouse=True)
+def no_git_hook_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run every test as if git had not called it.
+
+    git exports GIT_DIR, GIT_WORK_TREE and GIT_INDEX_FILE to its hooks, and the pre-push hook runs this suite.
+    A test that then ran `git init` or `git commit` in a temporary directory acted on the repository being
+    pushed: it added commits to the branch and set core.bare in the shared config
+    (tests/python/test_git_env_isolation.py).
+    """
+    for name in [k for k in os.environ if k.startswith("GIT_")]:
+        monkeypatch.delenv(name)
 
 CPUINFO = "processor\t: 0\nflags\t\t: fpu sse4_2 avx avx2 fma\n"
 MEMINFO = "MemTotal:       16000000 kB\nMemAvailable:   12000000 kB\n"

@@ -34,3 +34,25 @@ shot /tmp/logo1024.svg 1024 1024 logo/mojo-dllm-1024.png
 shot "$PWD/assets/logo/wordmark.svg" 720 200 logo/wordmark.png
 shot "$PWD/assets/social-preview.svg" 1280 640 social-preview.png
 ```
+
+## Demo GIF
+
+`demo.gif` is `demo.tape` recorded at real speed and retimed. The take shows
+the typed command, then the model load and the denoising steps, which are slow.
+This keeps the typing and the command at 1x, holds the finished command for 2.5
+more seconds, plays the load at 8x and the denoising at 4x:
+
+```bash
+vhs assets/demo.tape            # writes /tmp/demo-raw.gif (about 43 s)
+ffmpeg -y -i /tmp/demo-raw.gif -filter_complex "
+[0:v]split=4[a][b][c][d];
+[a]trim=0:8.4,setpts=PTS-STARTPTS,tpad=stop_mode=clone:stop_duration=2.5[A];
+[b]trim=8.4:19.6,setpts=(PTS-STARTPTS)/8[B];
+[c]trim=19.6:40.2,setpts=(PTS-STARTPTS)/4[C];
+[d]trim=40.2,setpts=PTS-STARTPTS[D];
+[A][B][C][D]concat=n=4:v=1,split[s0][s1];[s0]palettegen=stats_mode=diff[p];
+[s1][p]paletteuse=dither=bayer:bayer_scale=5" -loop 0 assets/demo.gif
+```
+
+The cut times match a take on the development laptop. Check them against a new
+recording before reusing them.

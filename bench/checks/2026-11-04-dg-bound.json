@@ -1,0 +1,167 @@
+{
+  "date": "2026-11-04T07:04:22",
+  "bound": {
+    "min_cosine": 0.9950793075151103,
+    "argmax_fraction": 0.9523809523809523,
+    "mean_top5_overlap": 4.674603174603175,
+    "max_rel_rms": 0.12048543340018987,
+    "max_top1_rel_err": 0.12048543340018987,
+    "source": "bench/parity/2026-10-03-llada.json"
+  },
+  "model": "diffusiongemma-26B-A4B-it-Q4_K_M.gguf",
+  "model_sha256": "24523b6c833c9ce9f5f34f9b333ab1517d73d6f1e76a103645353114c8028bc5",
+  "llama_cpp_commit": "2e715c0639c6f07c57c943f8d5a7919953af8f7c",
+  "dropped_layer": 15,
+  "dropped_model": {
+    "model": "diffusiongemma-layer15-scale-dropped.gguf",
+    "model_sha256": "604052d90ed5b9a5e90d7201617a5d9fb39c044aa3987b1d4764e12feb1ea0df"
+  },
+  "results": [
+    {
+      "case": "case0",
+      "prompt": "Explain speculative decoding in two sentences.",
+      "mutant": "control",
+      "rejected": false,
+      "expected_rejected": false,
+      "violations": [],
+      "rows": 256,
+      "min_cosine": 0.9999999999999998,
+      "median_cosine": 1.0,
+      "masked_median_cosine": 1.0,
+      "max_rel_rms": 0.0,
+      "median_rel_rms": 0.0,
+      "argmax_agree": 256,
+      "mean_top5_overlap": 5.0,
+      "worst_rows": [
+        2,
+        57,
+        63
+      ],
+      "top1_max_rel_err": 0.0
+    },
+    {
+      "case": "case0",
+      "prompt": "Explain speculative decoding in two sentences.",
+      "mutant": "soft-cap removed",
+      "rejected": true,
+      "expected_rejected": true,
+      "violations": [
+        "top logit relative error 1.8186 > 0.1205"
+      ],
+      "rows": 256,
+      "min_cosine": 0.9972626437977988,
+      "median_cosine": 0.9994544332082205,
+      "masked_median_cosine": 0.9994544332082205,
+      "max_rel_rms": 0.11096944854562285,
+      "median_rel_rms": 0.05003978097338032,
+      "argmax_agree": 256,
+      "mean_top5_overlap": 5.0,
+      "worst_rows": [
+        34,
+        35,
+        33
+      ],
+      "top1_max_rel_err": 1.8186452606704404
+    },
+    {
+      "case": "case0",
+      "prompt": "Explain speculative decoding in two sentences.",
+      "mutant": "layer 15 output scale dropped",
+      "rejected": true,
+      "expected_rejected": true,
+      "violations": [
+        "min_cosine 0.81554 < 0.99508",
+        "top-5 overlap 4.004 < 4.675",
+        "max relative RMS 0.5998 > 0.1205"
+      ],
+      "rows": 256,
+      "min_cosine": 0.815536781751106,
+      "median_cosine": 0.9760767436164841,
+      "masked_median_cosine": 0.9760767436164841,
+      "max_rel_rms": 0.5998447511984154,
+      "median_rel_rms": 0.254271619597642,
+      "argmax_agree": 253,
+      "mean_top5_overlap": 4.00390625,
+      "worst_rows": [
+        13,
+        0,
+        16
+      ],
+      "top1_max_rel_err": 0.052115379307001976
+    },
+    {
+      "case": "case1",
+      "prompt": "List three differences between diffusion language models and autoregressive language models.",
+      "mutant": "control",
+      "rejected": false,
+      "expected_rejected": false,
+      "violations": [],
+      "rows": 256,
+      "min_cosine": 0.9999999999999999,
+      "median_cosine": 1.0,
+      "masked_median_cosine": 1.0,
+      "max_rel_rms": 0.0,
+      "median_rel_rms": 0.0,
+      "argmax_agree": 256,
+      "mean_top5_overlap": 5.0,
+      "worst_rows": [
+        4,
+        13,
+        10
+      ],
+      "top1_max_rel_err": 0.0
+    },
+    {
+      "case": "case1",
+      "prompt": "List three differences between diffusion language models and autoregressive language models.",
+      "mutant": "soft-cap removed",
+      "rejected": true,
+      "expected_rejected": true,
+      "violations": [
+        "top logit relative error 1.0780 > 0.1205"
+      ],
+      "rows": 256,
+      "min_cosine": 0.9972151184433128,
+      "median_cosine": 0.9975760491564387,
+      "masked_median_cosine": 0.9975760491564387,
+      "max_rel_rms": 0.11724089384409285,
+      "median_rel_rms": 0.10746057738181575,
+      "argmax_agree": 256,
+      "mean_top5_overlap": 5.0,
+      "worst_rows": [
+        142,
+        126,
+        133
+      ],
+      "top1_max_rel_err": 1.0780428029603708
+    },
+    {
+      "case": "case1",
+      "prompt": "List three differences between diffusion language models and autoregressive language models.",
+      "mutant": "layer 15 output scale dropped",
+      "rejected": true,
+      "expected_rejected": true,
+      "violations": [
+        "min_cosine 0.93220 < 0.99508",
+        "argmax agreement 52/256 = 0.2031 < 0.9524",
+        "top-5 overlap 2.844 < 4.675",
+        "max relative RMS 0.3720 > 0.1205"
+      ],
+      "rows": 256,
+      "min_cosine": 0.9321991546020605,
+      "median_cosine": 0.9756862548067333,
+      "masked_median_cosine": 0.9756862548067333,
+      "max_rel_rms": 0.3720499630148975,
+      "median_rel_rms": 0.22367962947735687,
+      "argmax_agree": 52,
+      "mean_top5_overlap": 2.84375,
+      "worst_rows": [
+        2,
+        0,
+        128
+      ],
+      "top1_max_rel_err": 0.055248476533448075
+    }
+  ],
+  "all_as_expected": true
+}

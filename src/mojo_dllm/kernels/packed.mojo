@@ -19,7 +19,13 @@ Per 8-row group and per 256-weight super-block:
     f32 d[8]  | i8 sc[16 groups][8 rows]
     | 16 groups x 4 steps x 32 bytes: byte 4r+k = w[r][16g + 4s + k] + 32
 
-Values stay unsigned (0..15, 0..63), which is what `vpdpbusd` multiplies
+Per 8-row group and per 32-weight block:
+
+  Q5_0 / Q8_0 (288 bytes):
+    f32 d[8] | 8 steps x 32 bytes: byte 4r+k = w[r][4s+k] + zero_point
+    zero_point is 16 for Q5_0 and 128 for Q8_0.
+
+Values stay unsigned, which is what `vpdpbusd` multiplies
 against signed int8 activations; the zero points become per-group offsets
 dotted with the activation sums, as in `qgemm.mojo`.
 """
@@ -29,6 +35,8 @@ from std.sys import CompilationTarget, llvm_intrinsic
 from max.algorithm import parallelize
 
 from mojo_dllm.formats.gguf import (
+    GGML_Q5_0,
+    GGML_Q8_0,
     GGML_Q4_K,
     GGML_Q6_K,
     ggml_type_name,
@@ -42,6 +50,8 @@ from mojo_dllm.sys.parallel import parallel_for
 comptime QK = 256
 comptime P4_SB = 1216
 comptime P6_SB = 2208
+comptime P32_SB = 288
+"""Per 32 weights: f32 scales[8], then 8 steps x 4 bytes x 8 rows."""
 comptime TOK_TILE_Q4 = 8
 """Tokens per register tile for Q4_K: 8 independent vpdpbusd chains hide its
 5-cycle latency (measured +10% over 4 on an i5-13420H)."""
@@ -54,24 +64,41 @@ struct PackedMatrix(Movable):
     var kind: Int
     var N: Int
     var K: Int
+    var block_size: Int
     var data: Bytes
     var group_bytes: Int
-    """Bytes per 8-row group across all super-blocks."""
+    """Bytes per 8-row group across all blocks."""
 
     def __init__(out self, src_addr: Int, kind: Int, N: Int, K: Int) raises:
-        if kind != GGML_Q4_K and kind != GGML_Q6_K:
+        if (
+            kind != GGML_Q4_K
+            and kind != GGML_Q6_K
+            and kind != GGML_Q5_0
+            and kind != GGML_Q8_0
+        ):
             raise Error("cannot repack weight type " + ggml_type_name(kind))
-        if N % 8 != 0:
+        if N <= 0 or N % 8 != 0:
             raise Error(
                 "repacked matrices need a multiple of 8 rows, got " + String(N)
             )
-        if K % QK != 0:
-            raise Error("row length " + String(K) + " is not a multiple of 256")
+        var block_size = 32 if kind == GGML_Q5_0 or kind == GGML_Q8_0 else QK
+        if K <= 0 or K % block_size != 0:
+            raise Error(
+                "row length "
+                + String(K)
+                + " is not a "
+                + ("positive " if K <= 0 else "")
+                + "multiple of "
+                + String(block_size)
+            )
         self.kind = kind
         self.N = N
         self.K = K
-        var nsb = K // QK
+        self.block_size = block_size
+        var nsb = K // block_size
         var sb_bytes = P4_SB if kind == GGML_Q4_K else P6_SB
+        if block_size == 32:
+            sb_bytes = P32_SB
         self.group_bytes = nsb * sb_bytes
         # Every byte is written by the repack below, so skip zeroing 5 GB.
         self.data = Bytes((N // 8) * self.group_bytes, zero=False)
@@ -93,10 +120,26 @@ struct PackedMatrix(Movable):
                     )
                     if is_q4:
                         _pack_q4k_row(src, dst, r)
-                    else:
+                    elif kind == GGML_Q6_K:
                         _pack_q6k_row(src, dst, r)
+                    else:
+                        _pack_32_row(src, dst, r, kind)
 
         parallelize(work, N // 8)
+
+
+def _pack_32_row(blk: U8Ptr, dst: U8Ptr, r: Int, kind: Int):
+    dst.unsafe_bitcast[Float32]().unsafe_store(r, load_f16(blk, 0))
+    for j in range(32):
+        var u: UInt8
+        if kind == GGML_Q5_0:
+            var nib = (blk.unsafe_load(6 + j % 16) >> UInt8(4 * (j // 16))) & 15
+            var high = (blk.unsafe_load(2 + j // 8) >> UInt8(j % 8)) & 1
+            u = nib | (high << 4)
+        else:
+            # Signed Q8 bytes become unsigned with zero point 128.
+            u = blk.unsafe_load(2 + j) ^ 128
+        dst.unsafe_store(32 + (j // 4) * 32 + r * 4 + j % 4, u)
 
 
 def _pack_q4k_row(blk: U8Ptr, dst: U8Ptr, r: Int):
@@ -168,6 +211,63 @@ def _dpbusd(
         return acc + llvm_intrinsic[
             "llvm.x86.avx2.pmadd.wd", SIMD[DType.int32, 8]
         ](p, SIMD[DType.int16, 16](1))
+
+
+@always_inline
+def _dpbusd_q8(
+    acc: SIMD[DType.int32, 8],
+    w: SIMD[DType.uint8, 32],
+    a: SIMD[DType.uint8, 32],
+) -> SIMD[DType.int32, 8]:
+    comptime if CompilationTarget.has_vnni():
+        return _dpbusd(acc, w, a)
+    else:
+        # pmaddubsw saturates pairs when full-range Q8 bytes multiply int8
+        # activations. Splitting bit 7 keeps each pair within signed int16.
+        var hi = _dpbusd(SIMD[DType.int32, 8](0), w >> 7, a)
+        return _dpbusd(acc, w & 127, a) + hi * 128
+
+
+@always_inline
+def _p32_tile[
+    kind: Int, T: Int
+](
+    wg: U8Ptr,
+    nsb: Int,
+    qq: I8Ptr,
+    qd: F32Ptr,
+    qs: F32Ptr,
+    K: Int,
+    tok0: Int,
+    dst: F32Ptr,
+    ldo: Int,
+    row0: Int,
+):
+    var facc = Array[SIMD[DType.float32, 8], T](fill=SIMD[DType.float32, 8](0))
+    for sb in range(nsb):
+        var base = wg.unsafe_offset(sb * P32_SB)
+        var dw = base.unsafe_bitcast[Float32]().unsafe_load[width=8]()
+        var iacc = Array[SIMD[DType.int32, 8], T](fill=SIMD[DType.int32, 8](0))
+        comptime for step in range(8):
+            var w = base.unsafe_load[width=32](32 + step * 32)
+            comptime for t in range(T):
+                var a = _bcast4(
+                    qq.unsafe_offset((tok0 + t) * K + sb * 32 + step * 4)
+                )
+                comptime if kind == GGML_Q8_0:
+                    iacc[t] = _dpbusd_q8(iacc[t], w, a)
+                else:
+                    iacc[t] = _dpbusd(iacc[t], w, a)
+        comptime for t in range(T):
+            var da = qd.unsafe_load((tok0 + t) * nsb + sb)
+            var si = (tok0 + t) * (K // 16) + sb * 2
+            var sum_a = qs.unsafe_load(si) + qs.unsafe_load(si + 1)
+            comptime ZERO = 128 if kind == GGML_Q8_0 else 16
+            facc[t] = facc[t] + dw * (
+                iacc[t].cast[DType.float32]() * da - Float32(ZERO) * sum_a
+            )
+    comptime for t in range(T):
+        dst.unsafe_offset((tok0 + t) * ldo + row0).unsafe_store(facc[t])
 
 
 @always_inline
@@ -295,8 +395,10 @@ def _group_tokens[
     var wg = U8Ptr(unsafe_from_address=pm_addr + grp * gb)
     comptime if kind == GGML_Q4_K:
         _p4_tile[T](wg, nsb, qq, qd, qs, K, tok0, dst, ldo, grp * 8)
-    else:
+    elif kind == GGML_Q6_K:
         _p6_tile[T](wg, nsb, qq, qd, qs, K, tok0, dst, ldo, grp * 8)
+    else:
+        _p32_tile[kind, T](wg, nsb, qq, qd, qs, K, tok0, dst, ldo, grp * 8)
 
 
 def _run[
@@ -313,7 +415,7 @@ def _run[
     var items = (n_groups + GROUPS_PER_ITEM - 1) // GROUPS_PER_ITEM
     var addr = pm.data.addr
     var gb = pm.group_bytes
-    var nsb = pm.K // QK
+    var nsb = pm.K // pm.block_size
     var K = pm.K
     var qq = qa.q.i8()
     var qd = qa.d.ptr()
@@ -350,6 +452,17 @@ def pgemm(
 ) raises:
     """dst[m * ldo + n] = sum_k W[n, k] * x[m, k] for every row n, m < n_tokens.
     """
+    if qa.block_size != pm.block_size:
+        raise Error(
+            "activation block size "
+            + String(qa.block_size)
+            + " does not match "
+            + ggml_type_name(pm.kind)
+            + " block size "
+            + String(pm.block_size)
+        )
+    if n_tokens < 0 or n_tokens > qa.n_tokens or ldo < pm.N:
+        raise Error("pgemm activation rows or output stride are too small")
     if qa.K != pm.K:
         raise Error(
             "activation length "
@@ -359,5 +472,9 @@ def pgemm(
         )
     if pm.kind == GGML_Q4_K:
         _run[GGML_Q4_K](pm, qa, n_tokens, dst, ldo, threads)
-    else:
+    elif pm.kind == GGML_Q6_K:
         _run[GGML_Q6_K](pm, qa, n_tokens, dst, ldo, threads)
+    elif pm.kind == GGML_Q5_0:
+        _run[GGML_Q5_0](pm, qa, n_tokens, dst, ldo, threads)
+    else:
+        _run[GGML_Q8_0](pm, qa, n_tokens, dst, ldo, threads)
