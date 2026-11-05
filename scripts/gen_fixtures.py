@@ -24,6 +24,10 @@ Outputs (deterministic, seed 1234 unless noted):
   tests/fixtures/tiny-diffusion-gemma.gguf
                                    2-layer diffusion-gemma model (one sliding, one global, 4 experts), seed 610061
   tests/fixtures/diffusion-gemma/  that model's metadata and tensor directory with one thing wrong per file
+  tests/fixtures/tiny-diffusion-gemma.*.case
+                                   tokens and the numpy logits of scripts/dg_numpy.py for the forward pass
+  tests/fixtures/gemma4-tiny/      a 279-token gemma4 vocabulary and variants with one thing wrong each (issue #62)
+  tests/fixtures/gpt2-tiny/        a six-token byte-level BPE vocabulary with the ids a real one leaves out (issue #62)
 """
 
 from __future__ import annotations
@@ -776,6 +780,35 @@ def diffusion_gemma() -> None:
     }
     for name, case in tensor_cases.items():
         write_gemma(out / f"{name}.gguf", **case)
+    dg_cases()
+
+
+# Cases the Mojo forward pass is checked on: the numpy pass of scripts/dg_numpy.py over the tiny model.
+# File layout, little-endian 4-byte words: n_tokens, n_prompt, self-conditioning (0 or 1), 1 / previous
+# temperature (f32), the number of traced layers, the tokens (i32), the previous canvas logits
+# [C, vocab] (f32, only when self-conditioning is on), the expected canvas logits [C, vocab] (f32) and
+# each traced layer's output rows [n_tokens, hidden] (f32).
+DG_CASES = {
+    # Prompt of 9: the sliding window (128) covers it. Prompt of 150: it does not, so the window clips
+    # prompt rows and the canvas reaches only the last 127 prompt tokens in the sliding layer.
+    "p9": dict(prompt=9, seed=7),
+    "p150": dict(prompt=150, seed=8),
+}
+
+
+def dg_cases() -> None:
+    import dg_numpy
+
+    model = dg_numpy.Model(OUT / "tiny-diffusion-gemma.gguf")
+    for name, case in DG_CASES.items():
+        tokens = dg_numpy.tiny_tokens(model, case["prompt"], case["seed"])
+        trace: list = []
+        expected = dg_numpy.forward(model, tokens, case["prompt"], quant=True, trace=trace)
+        keep = trace if case["prompt"] < model.window else []  # the long case checks the logits only
+        blob = [np.array([len(tokens), case["prompt"], 0], np.int32).tobytes(), np.float32(1.0).tobytes(),
+                np.array([len(keep)], np.int32).tobytes(), np.array(tokens, np.int32).tobytes(),
+                expected.astype("<f4").tobytes()] + [layer.astype("<f4").tobytes() for layer in keep]
+        (OUT / f"tiny-diffusion-gemma.{name}.case").write_bytes(b"".join(blob))
 
 
 def main() -> None:
@@ -789,8 +822,154 @@ def main() -> None:
     metadata_cases()
     entropy_rows()
     diffusion_gemma()
+    gemma4_tiny()
+    gpt2_tiny()
     for p in sorted(OUT.iterdir()):
         print(f"{p.stat().st_size:>9}  {p.relative_to(ROOT)}")
+
+
+GEMMA4_TINY_BYTE0 = 9
+"""Id of <0x00> in the tiny gemma4 vocabulary: <0xNN> is GEMMA4_TINY_BYTE0 + NN."""
+
+
+def gemma4_tiny() -> None:
+    """A small gemma4 vocabulary whose every encoding is derivable by hand (see tests/test_gemma4_tiny.mojo).
+
+    It differs from the real one in ids only: `add_bos_token` is false, so a test can see the BOS forced on, and the
+    merges are chosen so that a wrong rank order, a missing newline split and a missing whole-run rule each change
+    the ids. Four variants break one thing each.
+    """
+    block = "\u2581"
+    controls = ["<pad>", "<eos>", "<bos>", "<unk>", "<mask>", "<|turn>", "<turn|>"]
+    tokens = controls + ["<|channel>", "<|tool_response>"]
+    types = [3] * len(controls) + [4, 4]
+    assert len(tokens) == GEMMA4_TINY_BYTE0
+    tokens += [f"<0x{b:02X}>" for b in range(256)]
+    types += [6] * 256
+    plain = [block, "a", "b", "c", "ab", "bc", "abc", block + "a", "\n", "\n\n", "\n\n\n", "a\n", block * 2, "\u00e9"]
+    plain_start = len(tokens)
+    tokens += plain
+    types += [1] * len(plain)
+    merges = [
+        "a b",  # 0: ab
+        "b c",  # 1: bc
+        "ab c",  # 2: abc
+        f"{block} a",  # 3: ▁a
+        "\n \n",  # 4: a run of two newlines
+        "a \n",  # 5: would join a letter to a newline if the pre-split did not stop it
+        f"{block} {block}",  # 6: ▁▁
+        "a b",  # 7: the same pair again; llama.cpp keeps the first rank, so this one is never used
+    ]
+
+    def write(
+        name: str,
+        add_bos: bool,
+        *,
+        add_eos: bool | None = None,
+        tokens=tokens,
+        types=types,
+        merges=merges,
+        omit: tuple[str, ...] = (),
+        ids: dict[str, int] | None = None,
+        scheme: str | None = None,
+    ):
+        w = GGUFWriter(str(OUT / "gemma4-tiny" / name), "gemma4")
+        w.add_string("tokenizer.ggml.model", "gemma4")
+        w.add_array("tokenizer.ggml.tokens", list(tokens))
+        w.add_array("tokenizer.ggml.token_type", list(types))
+        w.add_array("tokenizer.ggml.merges", list(merges))
+        special = {"bos": 2, "eos": 1, "unknown": 3, "padding": 0, "mask": 4, **(ids or {})}
+        for key, value in special.items():
+            if key not in omit:
+                w.add_uint32(f"tokenizer.ggml.{key}_token_id", value)
+        w.add_bool("tokenizer.ggml.add_space_prefix", False)
+        w.add_bool("tokenizer.ggml.add_bos_token", add_bos)
+        if add_eos is not None:
+            w.add_bool("tokenizer.ggml.add_eos_token", add_eos)
+        if scheme is not None:
+            w.add_string("tokenizer.ggml.metaspace.prepend_scheme", scheme)
+        w.write_header_to_file()
+        w.write_kv_data_to_file()
+        w.write_tensors_to_file()
+        w.close()
+
+    (OUT / "gemma4-tiny").mkdir(exist_ok=True)
+    write("base.gguf", add_bos=False)
+    write("eos.gguf", add_bos=True, add_eos=True)
+    no_byte = list(tokens)
+    no_byte[GEMMA4_TINY_BYTE0 + 0x78] = "[0x78]"
+    no_byte_types = list(types)
+    no_byte_types[GEMMA4_TINY_BYTE0 + 0x78] = 1
+    write("no-byte-token.gguf", add_bos=False, tokens=no_byte, types=no_byte_types)
+    write("bad-byte-text.gguf", add_bos=False, tokens=no_byte)
+    write("merge-without-space.gguf", add_bos=False, merges=merges[:3] + ["ab"] + merges[3:])
+    write("short-types.gguf", add_bos=False, types=types[:-1])
+    write("no-bos-id.gguf", add_bos=True, omit=("bos",))
+    write("bos-out-of-range.gguf", add_bos=True, ids={"bos": len(tokens) + 14})
+    write("eos-flag-without-id.gguf", add_bos=True, add_eos=True, omit=("eos",))
+    write("metaspace-first.gguf", add_bos=True, scheme="first")
+    write("metaspace-never.gguf", add_bos=True, scheme="never")
+    duplicate = list(tokens)
+    duplicate[plain_start + 2] = duplicate[plain_start + 1]
+    write("duplicate-token.gguf", add_bos=True, tokens=duplicate)
+    empty = list(tokens)
+    empty[-1] = ""
+    write("empty-token.gguf", add_bos=True, tokens=empty)
+
+    def with_entries(*changes: tuple[int, str | None, int | None]):
+        """The tokens and types with some entries replaced: (index, new text or None, new type or None)."""
+        changed_tokens, changed_types = list(tokens), list(types)
+        for index, text, kind in changes:
+            if text is not None:
+                changed_tokens[index] = text
+            if kind is not None:
+                changed_types[index] = kind
+        return changed_tokens, changed_types
+
+    # Unusual rather than wrong, each read by a test in tests/test_gemma4_tiny.mojo.
+    for byte in (0x00, 0xFF):
+        # The ends of the byte range: a loop that starts at 1 or stops at 254 would not see them missing.
+        t, k = with_entries((GEMMA4_TINY_BYTE0 + byte, f"[0x{byte:02X}]", 1))
+        write(f"no-byte-{byte:02x}.gguf", add_bos=False, tokens=t, types=k)
+    # llama.cpp splits a merge at the first space after its first byte, so " ab" has no space to split at.
+    write("merge-space-first.gguf", add_bos=False, merges=merges[:3] + [" ab"] + merges[3:])
+    # An id equal to the vocabulary size is one past the last token.
+    write("bos-at-vocab-size.gguf", add_bos=True, ids={"bos": len(tokens)})
+    # A user-defined token whose text holds two other special tokens: only the longest-first order finds it.
+    write("nested-special.gguf", add_bos=False, tokens=tokens + ["<|turn><turn|>"], types=types + [4])
+    # <unk> typed unknown (2) instead of control (3).
+    t, k = with_entries((3, None, 2))
+    write("unknown-type.gguf", add_bos=False, tokens=t, types=k)
+    # <eos> and <turn|> typed normal (1): llama.cpp overrides them to control because they end generation.
+    t, k = with_entries((1, None, 1), (6, None, 1))
+    write("forced-control.gguf", add_bos=False, tokens=t, types=k)
+    # EOS is the end-of-turn token itself: the end-of-generation list must hold its id once.
+    write("eos-is-end-of-turn.gguf", add_bos=False, ids={"eos": 6})
+    # No <turn|> and no <|tool_response>: nothing for the end-of-generation list to add beyond EOS.
+    t, k = with_entries((6, "<end>", None), (8, "<tool_result>", None))
+    write("no-end-of-turn.gguf", add_bos=False, tokens=t, types=k)
+
+
+def gpt2_tiny() -> None:
+    """A byte-level BPE vocabulary with the ids that LLaDA's and Dream's files leave out (see tests/test_tokenizer.mojo).
+
+    Tokenizer keys only: padding and unknown ids, an EOS id, and neither `<|eot_id|>` nor `<|im_end|>`, so the
+    end-of-turn id is -1. The loader maps bytes to code points itself and needs no byte tokens, so six tokens do.
+    """
+    (OUT / "gpt2-tiny").mkdir(exist_ok=True)
+    w = GGUFWriter(str(OUT / "gpt2-tiny" / "ids.gguf"), "llada")
+    w.add_string("tokenizer.ggml.model", "gpt2")
+    w.add_string("tokenizer.ggml.pre", "qwen2")
+    w.add_array("tokenizer.ggml.tokens", ["a", "b", "<pad>", "<unk>", "<eos>", "ab"])
+    w.add_array("tokenizer.ggml.token_type", [1, 1, 3, 2, 3, 1])
+    w.add_array("tokenizer.ggml.merges", ["a b"])
+    w.add_uint32("tokenizer.ggml.padding_token_id", 2)
+    w.add_uint32("tokenizer.ggml.unknown_token_id", 3)
+    w.add_uint32("tokenizer.ggml.eos_token_id", 4)
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()
 
 
 def entropy_rows() -> None:

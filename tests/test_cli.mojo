@@ -1,10 +1,14 @@
 from std.os import remove
+from std.os.path import exists
 from std.testing import assert_equal, assert_true, assert_raises, TestSuite
 
 from cli.args import Args
 from mojo_dllm.diffusion.sampler import GenResult
 from mojo_dllm.formats.gguf import GGUFFile
+from mojo_dllm.models.diffusion_gemma import DiffusionGemma
+from mojo_dllm.sys.mem import F32Ptr, Floats
 from mojo_dllm.sys.mmap import Mapping
+from mojo_dllm.tokenizer.bpe import Tokenizer
 from main import (
     Decision,
     boolean_flags,
@@ -13,10 +17,12 @@ from main import (
     check_arch_flags,
     command_spec,
     decide,
+    encode_prompt,
     execute,
     inspect_text,
     json_str,
     _csv,
+    _logits_gemma,
     is_top_level_help,
     model_error,
     version_line,
@@ -63,6 +69,42 @@ def test_chat_templates_strip_user_text() raises:
     assert_equal(chat_prompt("llada", " \thi\n"), llada)
     assert_equal(chat_prompt("dream", " \thi\n"), dream)
     assert_equal(chat_prompt("unknown", "hi"), llada)
+
+
+def test_chat_template_for_diffusion_gemma() raises:
+    # tokenizer.chat_template: <bos>, a user turn, then an open model turn.
+    assert_equal(
+        chat_prompt("diffusion-gemma", " \thi\n"),
+        "<bos><|turn>user\nhi<turn|>\n<|turn>model\n",
+    )
+
+
+def test_run_prompt_for_diffusion_gemma_has_one_bos() raises:
+    var tok = Tokenizer(GGUFFile("tests/fixtures/gemma4-tokenizer.gguf"))
+    var spec = command_spec("run")
+    var chat = Args(["x", "run", "--prompt", "Hi"], spec.values, spec.booleans)
+    var ids = encode_prompt(tok, "diffusion-gemma", chat)
+    # <bos> from the template is the only BOS; <|turn> opens the user turn
+    # and the model turn, and <turn|> closes the user turn.
+    assert_equal(ids[0], 2)
+    assert_equal(ids[1], 105)
+    var bos = 0
+    var opens = 0
+    var closes = 0
+    for t in ids:
+        bos += 1 if t == 2 else 0
+        opens += 1 if t == 105 else 0
+        closes += 1 if t == 106 else 0
+    assert_equal(bos, 1)
+    assert_equal(opens, 2)
+    assert_equal(closes, 1)
+    var raw = Args(
+        ["x", "run", "--prompt", "Hi", "--no-chat"], spec.values, spec.booleans
+    )
+    var plain = encode_prompt(tok, "diffusion-gemma", raw)
+    assert_equal(len(plain), 2)
+    assert_equal(plain[0], 2)
+    assert_equal(tok.decode([plain[1]], skip_special=False), "Hi")
 
 
 def test_json_escapes_and_preserves_unicode() raises:
@@ -819,6 +861,108 @@ def test_other_errors_pass_through_unchanged() raises:
         model_error("file is empty or unreadable: m.gguf"),
         "file is empty or unreadable: m.gguf",
     )
+
+
+comptime DG_TINY = "tests/fixtures/tiny-diffusion-gemma.gguf"
+
+
+def _gemma_tokens(n: Int) -> List[Int]:
+    var tokens = List[Int]()
+    for i in range(n):
+        tokens.append((i * 37) % 500 + 5)
+    return tokens^
+
+
+def test_logits_runs_diffusion_gemma_over_prompt_and_canvas() raises:
+    # 25 tokens: a prompt of 9 and the canvas of 16 the tiny model declares.
+    var tokens = _gemma_tokens(25)
+    var rows = List[Int]()
+    for r in range(9, 25):
+        rows.append(r)
+    var path = String("build/tests/dg-logits-cli.f32")
+    _logits_gemma(DG_TINY, 2, tokens, rows, path)
+    var m = DiffusionGemma(DG_TINY, threads=2, max_tokens=25)
+    var want = Floats(16 * 512)
+    m.forward(tokens, want.ptr())
+    var mm = Mapping(path)
+    var got = F32Ptr(unsafe_from_address=mm.addr)
+    var differ = 0
+    for i in range(16 * 512):
+        if got.unsafe_load(i) != want[i]:
+            differ += 1
+    remove(path)
+    assert_equal(differ, 0)
+
+
+def test_logits_refuses_rows_that_are_not_the_canvas() raises:
+    var tokens = _gemma_tokens(25)
+    var path = String("build/tests/dg-logits-refused.f32")
+    var rows = List[Int]()
+    for r in range(8, 24):
+        rows.append(r)
+    with assert_raises(
+        contains=(
+            "scores the 16 canvas positions, the last of the tokens: --rows"
+            " must be 9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24, got 8,"
+        )
+    ):
+        _logits_gemma(DG_TINY, 1, tokens, rows, path)
+    var all_rows = List[Int]()
+    for r in range(25):
+        all_rows.append(r)
+    with assert_raises(contains="--rows must be 9,10"):
+        _logits_gemma(DG_TINY, 1, tokens, all_rows, path)
+    with assert_raises(contains="below the canvas length 16"):
+        _logits_gemma(DG_TINY, 1, _gemma_tokens(15), List[Int](), path)
+
+
+def _logits_args(rows: String, path: String, device: String) -> List[String]:
+    return [
+        "mojo-dllm",
+        "logits",
+        "--model",
+        DG_TINY,
+        "--tokens",
+        _csv(_gemma_tokens(25)),
+        "--rows",
+        rows,
+        "--out",
+        path,
+        "--threads",
+        "1",
+        "--device",
+        device,
+    ]
+
+
+def test_the_logits_command_runs_diffusion_gemma_on_the_cpu() raises:
+    var rows = List[Int]()
+    for r in range(9, 25):
+        rows.append(r)
+    var path = String("build/tests/dg-logits-command.f32")
+    assert_equal(execute(_logits_args(_csv(rows), path, "cpu")), 0)
+    var m = DiffusionGemma(DG_TINY, threads=1, max_tokens=25)
+    var want = Floats(16 * 512)
+    m.forward(_gemma_tokens(25), want.ptr())
+    var mm = Mapping(path)
+    var got = F32Ptr(unsafe_from_address=mm.addr)
+    var differ = 0
+    for i in range(16 * 512):
+        if got.unsafe_load(i) != want[i]:
+            differ += 1
+    remove(path)
+    assert_equal(differ, 0)
+
+
+def test_the_logits_command_refuses_the_gpu_for_diffusion_gemma() raises:
+    var rows = List[Int]()
+    for r in range(9, 25):
+        rows.append(r)
+    var path = String("build/tests/dg-logits-command-gpu.f32")
+    if exists(path):
+        remove(path)
+    assert_equal(execute(_logits_args(_csv(rows), path, "gpu")), 1)
+    assert_true(not exists(path))
 
 
 def main() raises:

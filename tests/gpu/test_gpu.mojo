@@ -926,7 +926,7 @@ def test_dual_cache_generation_on_the_host_logits_path() raises:
 
 
 def test_the_gpu_model_reads_but_does_not_run_diffusion_gemma() raises:
-    with assert_raises(contains="diffusion-gemma has no forward pass yet"):
+    with assert_raises(contains="diffusion-gemma does not run on this model"):
         _ = GpuDiffusionLM(FIX + "tiny-diffusion-gemma.gguf", max_tokens=16)
 
 

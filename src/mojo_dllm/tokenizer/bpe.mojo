@@ -1,4 +1,7 @@
-"""Byte-level BPE tokenizer read from GGUF metadata (`tokenizer.ggml.model = gpt2`).
+"""Tokenizers read from GGUF metadata: byte-level BPE (`tokenizer.ggml.model = gpt2`)
+and DiffusionGemma's `gemma4` (see `gemma4.mojo`; `Tokenizer` picks one from the model key).
+
+Byte-level BPE, which LLaDA and Dream use:
 
 Encoding, in llama.cpp's order:
 
@@ -26,6 +29,7 @@ The regex (llama.cpp `LLAMA_VOCAB_PRE_TYPE_BAILINGMOE`, ECMAScript semantics):
 from std.collections import Dict
 
 from mojo_dllm.formats.gguf import GGUFFile
+from mojo_dllm.tokenizer.gemma4 import Gemma4Vocab
 from mojo_dllm.tokenizer.unicode_tables import (
     LETTER_RANGES,
     NUMBER_RANGES,
@@ -246,6 +250,12 @@ def _match_at(cps: List[Int], cls: List[Int], i: Int) -> Int:
 
 
 struct Tokenizer(Movable):
+    """The tokenizer of a GGUF file: `gpt2` (byte-level BPE) or `gemma4`.
+
+    The fields below `g4` belong to the byte-level BPE and stay empty for a
+    gemma4 file, whose vocabulary lives in `g4`. The id fields are filled for both.
+    """
+
     var tokens: List[String]
     var types: List[Int]
     var ids: Dict[String, Int]
@@ -258,17 +268,46 @@ struct Tokenizer(Movable):
     var eos_id: Int
     var eot_id: Int
     var mask_id: Int
+    var pad_id: Int
+    var unk_id: Int
     var add_bos: Bool
+    """Whether to add the BOS token when encoding a prompt that has none of its own.
+    Always true for gemma4: llama.cpp forces it, whatever the file says."""
     var cache: Dict[String, List[Int]]
     var uc: UnicodeClasses
+    var is_gemma4: Bool
+    var g4: Gemma4Vocab
 
     def __init__(out self, g: GGUFFile) raises:
         var model = g.get_str("tokenizer.ggml.model")
+        self.is_gemma4 = model == "gemma4"
+        self.g4 = Gemma4Vocab()
+        self.tokens = List[String]()
+        self.types = List[Int]()
+        self.ids = Dict[String, Int]()
+        self.ranks = Dict[String, Int]()
+        self.specials = List[Int]()
+        self.byte_to_cp = List[Int]()
+        self.cp_to_byte = Dict[Int, Int]()
+        self.cache = Dict[String, List[Int]]()
+        self.uc = UnicodeClasses()
+        self.pad_id = -1
+        self.unk_id = -1
+        if self.is_gemma4:
+            self.g4 = Gemma4Vocab(g)
+            self.bos_id = self.g4.bos_id
+            self.eos_id = self.g4.eos_id
+            self.eot_id = self.g4.eot_id
+            self.mask_id = self.g4.mask_id
+            self.pad_id = self.g4.pad_id
+            self.unk_id = self.g4.unk_id
+            self.add_bos = self.g4.add_bos
+            return
         if model != "gpt2":
             raise Error(
                 "unsupported tokenizer model: "
                 + model
-                + " (only byte-level BPE is supported)"
+                + " (supported: gpt2, gemma4)"
             )
         # LLaDA ships `bailingmoe`, Dream (Qwen2) ships `qwen2`. llama.cpp's
         # regexes for the two split text identically: the same contraction
@@ -323,6 +362,8 @@ struct Tokenizer(Movable):
         self.bos_id = g.get_int_or("tokenizer.ggml.bos_token_id", -1)
         self.eos_id = g.get_int_or("tokenizer.ggml.eos_token_id", -1)
         self.mask_id = g.get_int_or("tokenizer.ggml.mask_token_id", -1)
+        self.pad_id = g.get_int_or("tokenizer.ggml.padding_token_id", -1)
+        self.unk_id = g.get_int_or("tokenizer.ggml.unknown_token_id", -1)
         self.eot_id = self.ids.get("<|eot_id|>", self.ids.get("<|im_end|>", -1))
         self.add_bos = g.get_bool("tokenizer.ggml.add_bos_token") if g.has_key(
             "tokenizer.ggml.add_bos_token"
@@ -331,11 +372,48 @@ struct Tokenizer(Movable):
         self.uc = UnicodeClasses()
 
     def vocab_size(self) -> Int:
+        if self.is_gemma4:
+            return self.g4.vocab_size()
         return len(self.tokens)
+
+    def token_id(self, text: String) -> Int:
+        """The id of the token with exactly this text, or -1."""
+        if self.is_gemma4:
+            return self.g4.token_id(text)
+        return self.ids.get(text, -1)
+
+    def pair_rank(self, left: String, right: String) -> Int:
+        """The rank of the merge of two symbols (gemma4 only), or -1."""
+        return self.g4.pair_rank(left, right)
+
+    def is_eog(self, id: Int) -> Bool:
+        """Whether generation ends at this token: EOS and the end-of-turn token.
+        """
+        if self.is_gemma4:
+            return self.g4.is_eog(id)
+        return id >= 0 and (id == self.eos_id or id == self.eot_id)
+
+    def eog_ids(self) -> List[Int]:
+        """The ids that end generation, in the order `is_eog` tests them."""
+        if self.is_gemma4:
+            return self.g4.eog.copy()
+        var out = List[Int]()
+        if self.eos_id >= 0:
+            out.append(self.eos_id)
+        if self.eot_id >= 0:
+            out.append(self.eot_id)
+        return out^
 
     def encode(
         mut self, text: String, add_bos: Bool = False
     ) raises -> List[Int]:
+        """Token ids of `text`, special-token text parsed into its ids.
+
+        `add_bos` adds what llama.cpp adds for a prompt: the BOS token, and
+        for a gemma4 file whose `add_eos_token` is true the EOS token too.
+        """
+        if self.is_gemma4:
+            return self.g4.encode(text, add_bos)
         var out = List[Int]()
         if add_bos and self.bos_id >= 0:
             out.append(self.bos_id)
@@ -429,6 +507,11 @@ struct Tokenizer(Movable):
     def decode(
         self, ids: List[Int], skip_special: Bool = True
     ) raises -> String:
+        """Text of `ids`. Special tokens are dropped when `skip_special`; which
+        tokens count as special differs by tokenizer (see `Gemma4Vocab.decode`).
+        """
+        if self.is_gemma4:
+            return self.g4.decode(ids, skip_special)
         var out = List[UInt8]()
         for id in ids:
             if id < 0 or id >= len(self.tokens):

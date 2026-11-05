@@ -58,8 +58,10 @@ decision.
 
 A `diffusion-gemma` file is read into a `ModelConfig`, and `mojo-dllm inspect`
 prints the result, or the refusal and its key. `DiffusionLM` and the GPU model
-stop on it with `diffusion-gemma has no forward pass yet`, so a clean `inspect`
-does not mean the file runs. The names come from the unmerged
+stop on it with `diffusion-gemma does not run on this model`. `DiffusionGemma`
+runs it on the CPU through `logits`, and `tokenize` prints the ids of its chat
+prompt; `run` still waits for the generation loop (#64), so a clean `inspect`
+does not mean `run` works. The names come from the unmerged
 ggml-org/llama.cpp#24423 and appear once each, as the `GEMMA_*` constants at the
 top of `models/transformer.mojo`. Keys carry the `diffusion-gemma.` prefix
 except `diffusion.canvas_length` and `tokenizer.ggml.mask_token_id`.
@@ -75,7 +77,7 @@ except `diffusion.canvas_length` and `tokenizer.ggml.mask_token_id`.
 | `attention.layer_norm_rms_epsilon`, `tokenizer.ggml.mask_token_id` | required | RMSNorm epsilon, mask token |
 | `attention.value_length`, `attention.value_length_swa`, `rope.dimension_count`, `rope.dimension_count_swa` | required, equal to the key length of their kind | other widths are refused |
 | `context_length` | optional, 4096 | stored in config |
-| `final_logit_softcapping` | optional, 0 (off) | a negative value is refused |
+| `final_logit_softcapping` | optional, 30 when absent (llama.cpp's default); 0 turns it off | a negative value is refused |
 | `attention.shared_kv_layers`, `embedding_length_per_layer_input` | optional, 0 | any other value is refused: no forward pass handles it |
 | `attention.causal` | optional, false | true is refused; the canvas attends in both directions |
 
@@ -153,7 +155,9 @@ input. Shape agreement does not establish matching weights or logits.
 
 If `tokenizer.ggml.pre` is new, add its pre-tokenizer to
 `tokenizer/bpe.mojo` and golden cases to `scripts/gen_tokenizer_fixture.py`.
-llama.cpp's regex for each pre-tokenizer is in `src/llama-vocab.cpp`.
+llama.cpp's regex for each pre-tokenizer is in `src/llama-vocab.cpp`. A model
+whose `tokenizer.ggml.model` is not `gpt2` needs its own module, as `gemma4`
+has in `tokenizer/gemma4.mojo`; `Tokenizer` picks it from that key.
 
 ## 5. Sampler
 

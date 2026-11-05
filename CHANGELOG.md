@@ -49,8 +49,17 @@ semantic versioning (0.y: minor bumps may break things).
   expert tensors and the rope table. A wrong key or tensor is refused by name,
   as are non-zero `attention.shared_kv_layers` and
   `embedding_length_per_layer_input`. `inspect` prints the config. `DiffusionLM`
-  and the GPU model stop on these files: there is no forward pass yet (#61).
-  The key names come from the unmerged ggml-org/llama.cpp#24423.
+  and the GPU model stop on these files (#61). The key names come from the
+  unmerged ggml-org/llama.cpp#24423.
+- `DiffusionGemma`, the CPU forward pass of DiffusionGemma, in
+  `models/diffusion_gemma.mojo` (#64): one unified pass over [prompt | canvas]
+  with sliding and global layers, the region masks, RoPE with `rope_freqs`,
+  attention scale 1, the dense MLP plus 128-expert MoE, the two embedding and
+  layer-scalar regions, the tied Q6_K head and the soft cap. `mojo-dllm logits`
+  runs it. A numpy forward pass written from the llama.cpp branch
+  (`scripts/dg_numpy.py`) checks it on a tiny fixture: most rows agree to 2e-7,
+  a few to 7e-3 where an int8 rounding step lands on a tie. The prompt K/V cache
+  path, self-conditioning and the real-file parity record follow in #64.
 - Fused elementwise kernels on the GPU: the residual add, the RMSNorm and the
   activation quantization run as one launch (three per layer boundary plus
   the first norm), and `silu(g) * u` is quantized in the same launch as the

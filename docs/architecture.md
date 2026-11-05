@@ -28,7 +28,8 @@
 | `src/mojo_dllm/models/transformer.mojo` | config from GGUF metadata, weight loading, the CPU forward pass, and the `DenoisingModel` trait the samplers drive |
 | `src/mojo_dllm/gpu/kernels.mojo` | GPU kernels: int8 tensor-core GEMM over Q4_K / Q6_K blocks, flash-style attention, RMSNorm, RoPE, SwiGLU |
 | `src/mojo_dllm/gpu/model.mojo` | the forward pass on the GPU: weights uploaded once, activations kept on the device |
-| `src/mojo_dllm/tokenizer/bpe.mojo` | byte-level BPE with the `bailingmoe` and `qwen2` pre-tokenizers |
+| `src/mojo_dllm/tokenizer/bpe.mojo` | byte-level BPE with the `bailingmoe` and `qwen2` pre-tokenizers, and the `Tokenizer` that picks it or `gemma4` from `tokenizer.ggml.model` |
+| `src/mojo_dllm/tokenizer/gemma4.mojo` | DiffusionGemma's tokenizer (U+2581 spaces, newline-run split, merges by rank, `<0xNN>` byte fallback) and its chat template |
 | `src/mojo_dllm/diffusion/sampler.mojo` | LLaDA's and Dream's denoising loops and the PRNG |
 | `src/mojo_dllm/sys/` | aligned buffers, mmap, a dynamically scheduled parallel-for |
 

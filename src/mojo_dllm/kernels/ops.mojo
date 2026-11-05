@@ -11,7 +11,7 @@ for every position, because any position may have changed. `--dual-cache`
 
 from std.math import exp, sqrt, cos, sin
 
-from mojo_dllm.sys.mem import F32Ptr, Floats
+from mojo_dllm.sys.mem import F32Ptr, I32Ptr, Floats
 from mojo_dllm.sys.parallel import parallel_for
 
 comptime W = 8
@@ -277,3 +277,117 @@ def add_bias(x: F32Ptr, b: F32Ptr, rows: Int, dim: Int):
         while i < dim:
             row.unsafe_store(i, row.unsafe_load(i) + b.unsafe_load(i))
             i += 1
+
+
+def rope_table_factors(
+    n_tokens: Int,
+    head_dim: Int,
+    theta: Float32,
+    pos0: Int,
+    factors: F32Ptr,
+    use_factors: Bool,
+    cos_t: F32Ptr,
+    sin_t: F32Ptr,
+):
+    """`rope_table` with a per-pair divisor: angle = p * theta^(-2i/d) / factors[i].
+
+    This is llama.cpp's `rope_freqs` (freq_factors): a factor of 1e30 leaves a
+    pair unrotated. `factors` holds head_dim / 2 values and is read only when
+    `use_factors` is set. Built in f64 like `rope_table`; the branch accumulates
+    the angle in f32, which differs by under 1e-4 rad at position 300.
+    """
+    var half = head_dim // 2
+    for t in range(n_tokens):
+        var p = Float64(pos0 + t)
+        for i in range(half):
+            var ang = p * (
+                Float64(theta) ** (-2.0 * Float64(i) / Float64(head_dim))
+            )
+            if use_factors:
+                ang = ang / Float64(factors.unsafe_load(i))
+            cos_t.unsafe_store(t * half + i, Float32(cos(ang)))
+            sin_t.unsafe_store(t * half + i, Float32(sin(ang)))
+
+
+def attention_ranges(
+    q: F32Ptr,
+    k: F32Ptr,
+    v: F32Ptr,
+    o: F32Ptr,
+    lo: I32Ptr,
+    hi: I32Ptr,
+    n_q: Int,
+    n_keys: Int,
+    n_heads: Int,
+    n_kv_heads: Int,
+    head_dim: Int,
+    scale: Float32,
+    threads: Int,
+) raises:
+    """o = softmax(scale * q k^T) v per head, over keys [lo[i], hi[i]) of query i.
+
+    q and o rows are [n_q, n_heads * head_dim]; k and v rows are
+    [n_keys, n_kv_heads * head_dim]. Query head h reads KV head
+    h // (n_heads / n_kv_heads). `scale` is the argument, not 1/sqrt(d):
+    DiffusionGemma passes 1.0. Every query needs at least one key, so the
+    softmax is never over nothing; the head size is a multiple of 8.
+    """
+    if head_dim % W != 0 or n_heads % n_kv_heads != 0:
+        raise Error("attention needs a head size that is a multiple of 8")
+    for i in range(n_q):
+        var a = Int(lo.unsafe_load(i))
+        var b = Int(hi.unsafe_load(i))
+        if a < 0 or b > n_keys or a >= b:
+            raise Error(
+                "attention key range ["
+                + String(a)
+                + ", "
+                + String(b)
+                + ") of query "
+                + String(i)
+                + " is empty or outside "
+                + String(n_keys)
+                + " keys"
+            )
+    var stride = n_heads * head_dim
+    var kv_stride = n_kv_heads * head_dim
+    var group = n_heads // n_kv_heads
+    var scores = Floats(n_heads * n_q * n_keys)
+    var sp = scores.ptr()
+
+    def work(item: Int) {imm}:
+        var h = item // n_q
+        var i = item % n_q
+        var kvh = h // group
+        var a = Int(lo.unsafe_load(i))
+        var b = Int(hi.unsafe_load(i))
+        var qi = q.unsafe_offset(i * stride + h * head_dim)
+        var row = sp.unsafe_offset(item * n_keys)
+        var mx = Float32(-3.4028234663852886e38)
+        for j in range(a, b):
+            var kj = k.unsafe_offset(j * kv_stride + kvh * head_dim)
+            var acc = SIMD[DType.float32, W](0)
+            for d in range(0, head_dim, W):
+                acc += qi.unsafe_load[width=W](d) * kj.unsafe_load[width=W](d)
+            var sc = acc.reduce_add() * scale
+            row.unsafe_store(j, sc)
+            mx = max(mx, sc)
+        var z = Float32(0)
+        for j in range(a, b):
+            var e = exp(row.unsafe_load(j) - mx)
+            row.unsafe_store(j, e)
+            z += e
+        var inv = 1.0 / z
+        var oi = o.unsafe_offset(i * stride + h * head_dim)
+        for d in range(0, head_dim, W):
+            var acc = SIMD[DType.float32, W](0)
+            for j in range(a, b):
+                acc += (
+                    row.unsafe_load(j)
+                    * inv
+                    * v.unsafe_load[width=W](j * kv_stride + kvh * head_dim + d)
+                )
+            oi.unsafe_store(d, acc)
+
+    parallel_for(work, n_heads * n_q, threads)
+    _ = scores^

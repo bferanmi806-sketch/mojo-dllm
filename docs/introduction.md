@@ -28,7 +28,8 @@ minutes](diffusion.md) walks through it with a picture.
   present.
 - `--device gpu` runs both models on NVIDIA GPUs with compute capability 8.0
   or newer. It has been measured on an RTX 3050 Laptop GPU only.
-- Both tokenizers match llama.cpp id for id on a 36-case multilingual corpus.
+- The LLaDA and Dream tokenizers match llama.cpp id for id on a 36-case
+  multilingual corpus, and DiffusionGemma's `gemma4` tokenizer on 54 cases.
 - Logits match llama.cpp's implementation of both models; the measured
   agreement is in [Correctness](correctness.md).
 - [Benchmarks](benchmarks.md) against llama.cpp and diffuse-cpp on the same
@@ -40,16 +41,19 @@ minutes](diffusion.md) walks through it with a picture.
 - The GPU path is measured on one laptop part, an RTX 3050 held to 30 W,
   against llama.cpp's CUDA build; [Benchmarks](benchmarks.md) has the numbers.
   It supports NVIDIA only.
-- Two architectures run: LLaDA and Dream. A `diffusion-gemma` file is read, and
-  `inspect` prints its config, but `run` stops on it at the tokenizer with
-  `unsupported tokenizer model: gemma4` (#62), on the CPU and the GPU. `logits`
-  reaches the model and stops with `diffusion-gemma has no forward pass yet`.
+- Two architectures run: LLaDA and Dream. A `diffusion-gemma` file is read,
+  `inspect` prints its config, `tokenize` prints the ids of its chat prompt,
+  and `logits` runs it on the CPU: one unified pass over the prompt and the
+  canvas, checked against a numpy forward pass on a tiny fixture (#64). `run`
+  stops on it with `diffusion-gemma does not run on this model` until the
+  generation loop is wired (#64), on the CPU and the GPU.
   Other architectures stop with
   `unsupported model architecture: <name> (runs: llada, dream; read only: diffusion-gemma)`.
 - One quantization mix: Q4_K and Q6_K projection matrices, as in a Q4_K_M
   file, with an embedding table and norm vectors that the reference decoders
   read (F32, F16, BF16, Q8_0, Q4_K, Q5_K, Q6_K). A matrix of any other type
-  stops the load with an error that names it.
+  stops the load with an error that names it. DiffusionGemma's `logits` also
+  reads Q5_0 and Q8_0 matrices for the down projections.
 
 ## Where to go next
 

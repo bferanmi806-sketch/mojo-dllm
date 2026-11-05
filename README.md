@@ -188,8 +188,8 @@ mojo-dllm checks itself against code it does not share:
 
 - decoders and GEMMs against the `gguf` package's dequantization;
 - a 2-layer model's forward pass against numpy;
-- both tokenizers against `llama-tokenize` on 36 multilingual cases each, id
-  for id;
+- the LLaDA and Dream tokenizers against `llama-tokenize` on 36 multilingual
+  cases each, and DiffusionGemma's on 54, id for id;
 - logits and generated tokens on both real models against llama.cpp;
 - every GPU kernel against the CPU function it replaces, and GPU logits
   against llama.cpp.

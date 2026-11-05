@@ -90,9 +90,17 @@ def test_yes_downloads_and_finishes(hub: FakeHub, store: VerifiedStore) -> None:
 
 
 def test_smoke_test_uses_cpu_without_a_gpu(hub: FakeHub, store: VerifiedStore) -> None:
-    e = Env(hub, store, gpu_text=None)
+    e = Env(hub, store, gpu_text="")
     assert e.run(["--yes"]) == 0 and e.calls[-1] == "smoke:cpu"
     assert "device: cpu (no NVIDIA GPU found)" in e.out.getvalue()
+
+
+def test_an_unreadable_nvidia_smi_is_not_reported_as_no_gpu(hub: FakeHub, store: VerifiedStore) -> None:
+    e = Env(hub, store, gpu_text=None)
+    assert e.run(["--yes"]) == 0 and e.calls[-1] == "smoke:cpu"
+    text = e.out.getvalue()
+    assert "device: cpu (nvidia-smi missing or could not be read; GPU not checked)" in text
+    assert "no NVIDIA GPU found" not in text
 
 
 def test_tty_asks_and_empty_answer_means_yes(hub: FakeHub, store: VerifiedStore) -> None:

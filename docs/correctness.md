@@ -31,6 +31,16 @@ code, and LLaDA's chat-template special tokens. Every id matches
 `llama-tokenize` on the real LLaDA GGUF and on the real Dream GGUF, and decoding
 restores the input byte for byte.
 
+DiffusionGemma's `gemma4` tokenizer has its own 54 cases (runs of spaces and
+newlines, CJK, emoji, byte-fallback characters, a literal U+2581, and the chat
+template's markers), with ids from `llama-tokenize` on the real model file
+(`tests/fixtures/gemma4-tokenizer-golden.tsv`, and `tests/fixtures/gemma4-tokenizer.gguf` holds
+the vocabulary they are encoded with). Each case is also checked with the BOS the
+model adds, and decoded back; 53 of the 54 restore the input, and the one that
+holds U+2581 comes back with spaces, as llama.cpp decodes it.
+`tests/test_gemma4_tiny.mojo` pins each rule on a vocabulary small enough to work
+out by hand.
+
 ## 3. Logits on the real model
 
 `tools/ref/llada_ref.cpp` links libllama and dumps llama.cpp's logits for a
@@ -310,6 +320,7 @@ hypothesis. A failed comparison prints these distances beside the verdict. No
 DiffusionGemma result is recorded yet, so the tables above hold none.
 
 The tokenizer goldens in `tests/fixtures/gemma4-tokenizer-golden.tsv` fix the
-encoding only. Decoding the ids through the GGUF vocabulary restores 53 of the
+encoding, and `tests/test_tokenizer_gemma4.mojo` checks the Mojo tokenizer against
+them. Decoding the ids through the GGUF vocabulary restores 53 of the
 54 strings; the string holding a literal U+2581 does not come back, because
 decoding turns every U+2581 into a space.

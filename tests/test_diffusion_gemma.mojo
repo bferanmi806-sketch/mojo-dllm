@@ -182,8 +182,9 @@ def test_the_smallest_values_and_the_absent_optional_keys_pass() raises:
     assert_equal(c.expert_ffn, 1)
     assert_equal(c.canvas, 1)
     # context_length, final_logit_softcapping and attention.causal are optional.
+    # A missing soft cap is llama.cpp's default of 30, not "off" (llama-hparams.h).
     assert_equal(c.ctx, 4096)
-    assert_equal(c.softcap, Float32(0.0))
+    assert_equal(c.softcap, Float32(30.0))
 
 
 def test_a_file_with_one_kind_of_layer_passes() raises:
@@ -377,8 +378,8 @@ def test_refuses_an_embedding_that_is_not_hidden_wide() raises:
 # ---- the model does not run ---------------------------------------------------
 
 
-def test_the_cpu_model_reads_but_does_not_run_diffusion_gemma() raises:
-    with assert_raises(contains="diffusion-gemma has no forward pass yet"):
+def test_the_llada_model_does_not_run_diffusion_gemma() raises:
+    with assert_raises(contains="diffusion-gemma does not run on this model"):
         _ = DiffusionLM(
             FIX + "tiny-diffusion-gemma.gguf", threads=1, max_tokens=4
         )

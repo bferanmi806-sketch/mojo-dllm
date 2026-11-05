@@ -39,7 +39,7 @@ def render_frame(
         if t == mask_id:
             out += esc + "[38;5;30m░" + esc + "[0m" if color else String("░")
             continue
-        if t == tok.eos_id or t == tok.eot_id:
+        if tok.is_eog(t):
             out += esc + "[38;5;240m·" + esc + "[0m" if color else String("·")
             continue
         var piece = tok.decode([t])

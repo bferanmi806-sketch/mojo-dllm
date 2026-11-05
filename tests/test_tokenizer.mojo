@@ -132,5 +132,52 @@ def test_rejects_other_tokenizers() raises:
         _ = Tokenizer(g)
 
 
+def test_byte_level_pad_and_unknown_ids_come_from_the_file() raises:
+    var llada = Tokenizer(GGUFFile(FIX + "llada-tokenizer.gguf"))
+    assert_equal(llada.pad_id, 126081)
+    assert_equal(llada.unk_id, -1)  # the file has no unknown_token_id
+    var dream = Tokenizer(GGUFFile(FIX + "dream-tokenizer.gguf"))
+    assert_equal(dream.pad_id, 151643)
+    assert_equal(dream.unk_id, -1)
+    # gpt2-tiny/ids.gguf names both: padding 2, unknown 3.
+    var tiny = Tokenizer(GGUFFile(FIX + "gpt2-tiny/ids.gguf"))
+    assert_equal(tiny.pad_id, 2)
+    assert_equal(tiny.unk_id, 3)
+
+
+def test_byte_level_end_of_generation_ignores_a_token_the_file_lacks() raises:
+    # gpt2-tiny/ids.gguf has EOS (id 4) and neither <|eot_id|> nor <|im_end|>.
+    var tiny = Tokenizer(GGUFFile(FIX + "gpt2-tiny/ids.gguf"))
+    assert_equal(tiny.eos_id, 4)
+    assert_equal(tiny.eot_id, -1)
+    var eog = tiny.eog_ids()
+    assert_equal(len(eog), 1)
+    assert_equal(eog[0], 4)
+    assert_true(tiny.is_eog(4))
+    assert_true(not tiny.is_eog(-1))
+    assert_true(not tiny.is_eog(2))
+
+
+def _old_stop_rule(tok: Tokenizer, id: Int) -> Bool:
+    """What `main.mojo` tested before gemma4: the id is EOS or end-of-turn."""
+    return id == tok.eos_id or id == tok.eot_id
+
+
+def test_byte_level_end_of_generation_is_the_rule_llada_and_dream_always_had() raises:
+    for name in ["llada", "dream"]:
+        var tok = Tokenizer(GGUFFile(FIX + name + "-tokenizer.gguf"))
+        var old = List[Int]()
+        for s in [tok.eos_id, tok.eot_id]:
+            if s >= 0:
+                old.append(s)
+        var eog = tok.eog_ids()
+        assert_equal(len(eog), len(old))
+        for i in range(len(old)):
+            assert_equal(eog[i], old[i])
+        for id in [-1, 0, tok.bos_id, tok.eos_id, tok.eot_id, tok.mask_id]:
+            assert_equal(tok.is_eog(id), _old_stop_rule(tok, id))
+        assert_true(tok.is_eog(tok.eos_id) and tok.is_eog(tok.eot_id))
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

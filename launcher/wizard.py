@@ -14,7 +14,7 @@ from typing import TextIO
 from launcher import build
 from launcher.doctor import preflight, render
 from launcher.errors import LauncherError, UsageError
-from launcher.gpu import choose_device, parse_nvidia_smi
+from launcher.gpu import Device, choose_device, parse_nvidia_smi
 from launcher.models import DEFAULT_MODEL, Hub, fetch_model, parse_model_ref, plan_model, use_cached
 from launcher.probes import Probes
 from launcher.ui import Style, human_size
@@ -133,8 +133,11 @@ def _setup(args: SetupArgs, env: SetupEnv) -> int:
     if model is None:
         print("skipped: needs a model", file=out)
     else:
-        gpus = parse_nvidia_smi(env.probes.gpu_text or "")
-        device = choose_device("auto", gpus)
+        if env.probes.gpu_text is None:
+            # Missing, failed or timed out: no GPU was checked, which is not the same as no GPU.
+            device = Device("cpu", "nvidia-smi missing or could not be read; GPU not checked")
+        else:
+            device = choose_device("auto", parse_nvidia_smi(env.probes.gpu_text))
         print(device.line, file=out, flush=True)
         seconds = env.smoke(model, device.kind)
         print(f"smoke test ok in {seconds:.1f} s", file=out)
