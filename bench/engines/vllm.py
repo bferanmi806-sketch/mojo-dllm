@@ -38,6 +38,7 @@ import time
 
 from . import EngineError, GenConfig, register
 from ._http import HttpClient, HttpError, clean
+from ._openai import model_cards, parse_chat
 
 STEPS_METRIC = "vllm:diffusion_num_denoising_steps_total"
 STEPS_METRIC_SOURCE = "vllm:diffusion_num_denoising_steps"
@@ -135,7 +136,7 @@ class VLLM:
                              "and it is part of the arm's model so compare sees different weights")
         self.client = HttpClient(self.base_url, timeout_s=cfg.timeout_s, max_bytes=MAX_RESPONSE_BYTES,
                                 use_env_proxy=self.use_env_proxy)
-        cards = self._model_cards()
+        cards = model_cards(self.client)
         ids = [c["id"] for c in cards]
         if self.served_model not in ids:
             raise EngineError(f"the server reports the models {clean(', '.join(ids))}; --served-model is "
@@ -162,17 +163,6 @@ class VLLM:
                               "is only that request's when the server runs one sequence at a time. Start it with "
                               "`--max-num-seqs 1` and pass `--max-num-seqs 1` here (declared "
                               f"{self.max_num_seqs!r})")
-
-    def _model_cards(self) -> list[dict]:
-        doc = self.client.get_json("/v1/models")                     # type: ignore[union-attr]
-        data = doc.get("data") if isinstance(doc, dict) else None
-        if not isinstance(data, list):
-            raise EngineError(f"GET /v1/models answered a malformed model list: {clean(repr(doc))}")
-        if not data:
-            raise EngineError("the server reports no models")
-        if not all(isinstance(c, dict) and isinstance(c.get("id"), str) for c in data):
-            raise EngineError(f"GET /v1/models answered a malformed model list: {clean(repr(doc))}")
-        return data
 
     def _read_steps(self) -> int | None:
         """The denoising-step counter, or None when the server has no /metrics or no such counter. Any other
@@ -212,7 +202,7 @@ class VLLM:
         start = time.perf_counter()
         out = self.client.post_json("/v1/chat/completions", body)    # type: ignore[union-attr]
         generate_s = time.perf_counter() - start
-        text, prompt_tokens, completion_tokens, finish = self._parse(out)
+        text, prompt_tokens, completion_tokens, finish = parse_chat(out, self.served_model)
         steps = None
         if self._steps_measured:
             after = self._read_steps()
@@ -223,21 +213,3 @@ class VLLM:
             steps = after - before
         return dict(text=text, generate_s=generate_s, forward_passes=steps, steps=steps,
                     prompt_tokens=prompt_tokens, completion_tokens=completion_tokens, finish_reason=finish)
-
-    def _parse(self, out: object) -> tuple[str, int, int, object]:
-        if not isinstance(out, dict):
-            raise EngineError(f"the completion is not a JSON object: {clean(repr(out))}")
-        if out.get("model") != self.served_model:
-            raise EngineError(f"the response names the model {clean(repr(out.get('model')))}, not {self.served_model!r}")
-        choices = out.get("choices")
-        if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
-            raise EngineError(f"the completion has no choices: {clean(repr(out))}")
-        message = choices[0].get("message")
-        content = message.get("content") if isinstance(message, dict) else None
-        if not isinstance(content, str) or not content.strip():
-            raise EngineError(f"the server returned an empty completion (finish_reason {clean(repr(choices[0].get('finish_reason')))})")
-        usage = out.get("usage")
-        counts = [usage.get(k) if isinstance(usage, dict) else None for k in ("prompt_tokens", "completion_tokens")]
-        if not all(isinstance(n, int) and not isinstance(n, bool) for n in counts) or counts[1] <= 0:
-            raise EngineError(f"the completion carries no usable token counts: {clean(repr(usage))}")
-        return content, counts[0], counts[1], choices[0].get("finish_reason")

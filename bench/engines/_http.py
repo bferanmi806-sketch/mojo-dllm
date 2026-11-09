@@ -1,4 +1,4 @@
-"""A small HTTP client for engines that talk to a server someone else started (vLLM now, SGLang next).
+"""A small HTTP client for engines that talk to a server someone else started (the vLLM and SGLang engines).
 
 Standard library only (`urllib`), so the frozen environment needs nothing new. What it decides, and why:
 
@@ -15,7 +15,9 @@ Standard library only (`urllib`), so the frozen environment needs nothing new. W
   cannot stall the run or fill the memory.
 - Errors carry what the server said: the status and its message (`error.message` of an OpenAI-style body, else the
   start of the text), so a run that stops says why. Server text reaches the terminal only through `clean`: control
-  characters are dropped (a terminal escape cannot ride in an error) and the length is capped.
+  characters are dropped (a terminal escape cannot ride in an error) and the length is capped. The text of a
+  connection or transport error (a refused connection, a reset, a proxy's tunnel failure) goes through `clean` as well:
+  a proxy in the path writes the status text of its own reply.
 """
 
 from __future__ import annotations
@@ -156,11 +158,11 @@ class HttpClient:
         except urllib.error.URLError as e:
             if isinstance(e.reason, TimeoutError):
                 raise EngineError(timed_out) from None
-            raise EngineError(f"cannot reach {url}: {e.reason}") from None
+            raise EngineError(f"cannot reach {url}: {clean(str(e.reason))}") from None
         except TimeoutError:
             raise EngineError(timed_out) from None
         except (OSError, HTTPException) as e:
-            raise EngineError(f"{method} {url} failed: {type(e).__name__}: {e}") from None
+            raise EngineError(f"{method} {url} failed: {type(e).__name__}: {clean(str(e))}") from None
         result["resp"] = resp
         with resp:
             declared = resp.headers.get("Content-Length")
@@ -181,5 +183,5 @@ class HttpClient:
             except TimeoutError:
                 raise EngineError(timed_out) from None
             except (OSError, HTTPException) as e:
-                raise EngineError(f"{method} {url} failed while reading the body: {type(e).__name__}: {e}") from None
+                raise EngineError(f"{method} {url} failed while reading the body: {type(e).__name__}: {clean(str(e))}") from None
         return b"".join(chunks)

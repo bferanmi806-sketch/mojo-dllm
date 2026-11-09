@@ -417,7 +417,7 @@ is the CPU step time. There are no Transformers rows in this document until the 
 server that is already running. vLLM serves one diffusion model, DiffusionGemma (issue #179). The engine is a client:
 it never starts or stops a server, loads no weights and installs nothing. Rent the GPU, start the server there,
 point the client at it, and destroy the instance after. The shared client is `bench/engines/_http.py` (standard
-library only); the SGLang engine will reuse it.
+library only); the SGLang engine reuses it.
 
 What the client sends: `POST /v1/chat/completions` with one user message holding the prompt text every engine uses,
 `temperature` 0 and `max_tokens` equal to `--gen-length`. The server applies the model's chat template. The client
@@ -478,19 +478,33 @@ total cost in the pull request that adds the arm.
 (`recipes/models/Google/diffusiongemma-26B-A4B-it.yaml` in vllm-project/recipes, read 2026-11-09), and vLLM 0.24.0 or
 newer. An RTX A6000 is not a verified target. The FP8-dynamic checkpoint is 25.33 GiB (Hugging Face API, 2026-11-09).
 
-1. **One time on your machine.** Install the Vast.ai CLI, store your API key and create a throwaway SSH key. The key
-   prompt reads without echo; cancel with Ctrl-C and nothing is written.
+1. **One time on your machine.** Install the Vast.ai CLI, read your API key into an environment variable and create a
+   throwaway SSH key. The key prompt reads without echo and the key never appears in a command line; cancel with
+   Ctrl-C and nothing is written.
 
    ```bash
    uv tool install vastai
    ssh-keygen -t ed25519 -N '' -C vast-dgemma-throwaway -f ~/.ssh/vast_dgemma
    echo "== Vast.ai API key (console.vast.ai, Account, API Keys) =="
-   read -rs -p "key: " K; echo; vastai set api-key "$K"; unset K
+   read -rs -p "key: " VAST_API_KEY; echo; export VAST_API_KEY
    vastai create ssh-key "$(cat ~/.ssh/vast_dgemma.pub)"
    ```
 
-   This touches `~/.config/vastai`, `~/.ssh/vast_dgemma*` and your account's key list. To undo it, delete those
-   paths and remove both keys in the Vast.ai console. I have not run `vastai create ssh-key` here; check it with
+   Run every later `vastai` command in this same shell, and close it when you are done: the key lives in that shell's
+   environment, and every program you start from it inherits the variable. This runbook does not use
+   `vastai set api-key KEY` or `--api-key KEY`, because both put the key in the command's argument list, which every user
+   of the machine can read through `/proc/PID/cmdline` (mode 0444 on this machine, checked with
+   `ls -l /proc/self/cmdline`) while the command runs. A process's environment file, `/proc/PID/environ`, is mode 0400
+   here, readable by its owner and root. The CLI reads `VAST_API_KEY` when no `--api-key` is given: I read the default of
+   `--api-key` in `vast.py` of vast-ai/vast-cli at commit `4727235e75470ab26b231c1bdb1415f6ca815d1d`
+   (`os.getenv("VAST_API_KEY", ...)`), and the Context7 documentation of `/vast-ai/vast-cli` gives the same order
+   (explicit argument, then `VAST_API_KEY`, then the key file), both on 2026-11-09. I have not run the CLI, and I did not
+   check which version `uv tool install vastai` installs. If your version ignores the variable, the first call fails
+   with an authentication error and nothing is stored.
+
+   This touches `~/.ssh/vast_dgemma*` and your account's key list (the CLI also creates `~/.config/vastai`). To undo it,
+   close the shell, delete `~/.ssh/vast_dgemma*` and remove the SSH key in the Vast.ai console, and revoke the API key
+   there if you made it for this run. I have not run `vastai create ssh-key` here; check it with
    `vastai create ssh-key --help`.
 
 2. **Find an offer.** Filter by card, reliability, disk, download speed and driver. The field names come from the
@@ -612,6 +626,211 @@ server (`/version`, `/v1/models`, `/metrics`, the counter's per-request meaning)
 item 6: batch size 1, the same 200 problems, a 256-token canvas, on a rented card) has not run, so there are no vLLM
 rows in this document. If the harness's number differs from vLLM's published figures by more than 25 percent on the
 same card class, explain it here (prompt length, canvas, checkpoint) when the arm lands.
+
+### A running SGLang server (DiffusionGemma)
+
+`bench/eval_engine.py run --engine sglang` answers the same 200 problems through the OpenAI-compatible endpoint of an
+SGLang server that is already running (issue #180). SGLang serves DiffusionGemma with its dLLM framework and the
+`Gemma4Renoise` algorithm, and its cookbook says the model is "Not benchmarked for speed". The engine is a client in
+the same way as the vLLM one: it never starts or stops a server, loads no weights and installs nothing. It uses
+the shared `bench/engines/_http.py` (no credentials, no cookies, no redirects, no retries, one deadline per request,
+a 4 MiB bound, server text stripped of control characters and capped at 400 characters; see the vLLM section above)
+and `bench/engines/_openai.py` (the model-list and completion checks the two engines share).
+
+Every field name below comes from SGLang's source, read on 2026-11-09 at `main` commit
+`dfaca5681ddc20e31d50f2dfe5dfada269f12bbd`, plus the cookbook page
+`https://docs.sglang.io/cookbook/autoregressive/Google/DiffusionGemma.md` read the same day. The routes `/v1/models`,
+`/model_info` and `/server_info` and the `Gemma4Renoise` algorithm were also compared with the release tag `v0.5.23`
+(2026-11-02) and give the same field names and the same request rules; the other files were read at `main` only. The issue text and
+the source differ in two places, and the engine follows the source: SGLang has no `GET /version` (the version is a
+field of `GET /server_info`), and the issue's pull request #23722 for sequence-level forward counts was closed
+without a merge. **No field was seen on a live server.**
+
+**What the client sends.** `POST /v1/chat/completions` with four fields: `model`, one user message holding the prompt
+text every engine uses, `max_completion_tokens` equal to `--gen-length`, and `stream` false (the cookbook says
+streaming is block-level, one denoised canvas per chunk, and the tokenizer manager's `_wait_one_response` yields an
+unfinished output only for a streaming request). `Gemma4Renoise.validate_request` returns an error for a request that
+carries logprobs, a grammar (`json_schema`, `regex`, `ebnf`, `structural_tag`), a penalty, `min_new_tokens`, `min_p`, a
+seed, a logit bias, a custom logit processor or a sampling mask, and the cookbook says such a request is rejected with
+a 400. The engine sends none of them, and a test scans every request body for them.
+`temperature`, `top_p` and `top_k` are accepted and have no effect, because the renoise schedule governs sampling;
+the engine sends none of them either, and `flags.sampling` says so. A rejected request stops the run with the
+server's own message. The server applies the chat template; `flags.chat_template` says `applied_by: server`,
+`verified: false`, and holds the `chat_template` that `GET /server_info` reports (null means the checkpoint's own
+template) and what you declare with `--chat-template`.
+
+SGLang's own measurement, `benchmark/dllm/bench_diffusion_gemma.py`, sends pretokenized prompts to `/v1/completions`
+with EOS stopping off and a fixed output length, and its README says the token rate it reports includes canvas
+positions after EOS. This engine sends chat messages and lets the model stop, and it times a whole answer. The two
+numbers are not the same measurement and should not be compared.
+
+**This arm runs bf16 weights.** `Gemma4Renoise.configure_server_args` refuses a quantized checkpoint ("DiffusionGemma
+does not support quantized loading"), and the engine refuses a server whose `/server_info` reports a `quantization`.
+The arm's `model` is `<name>|<dtype>`, for example `diffusiongemma-26B-A4B-it|bfloat16`, so `eval_gsm8k.py compare`
+refuses the pair with a Q4_K_M GGUF arm or the vLLM FP8 arm unless you pass `--across-weights`, and a difference in
+accuracy or speed includes the precision.
+
+**What a row records, and where each value comes from.** `version` is JSON with the SGLang release, the diffusion
+algorithm, the checkpoint and the dtype.
+
+| Value | Read from | If the server cannot say |
+|---|---|---|
+| release (`version`) | `GET /server_info`, field `version` | the run is refused; so is an empty string and the development fallback `0.0.0.dev0`, which names no release or commit |
+| checkpoint | `GET /model_info`, field `model_path` | `--checkpoint` is recorded as declared and the label stays unconfirmed |
+| algorithm | `GET /server_info`, field `dllm_algorithm` | `--algorithm` is needed; a null field means the server runs no diffusion model and the run is refused |
+| dtype | `GET /server_info`, field `dtype` | `auto` and a missing field mean "cannot say": `--dtype` is needed (`half` and `float16` are one dtype, as are `float` and `float32`) |
+| batch size | `GET /server_info`, field `max_running_requests` | null means "cannot say": `--max-running-requests 1` is needed |
+
+A value the server reports is the value. A declared value that differs from a reported one is refused, and a declared
+value the server could not confirm is listed in `flags.declared_not_verified`. `--model` must equal the reported
+`model_path` or the served name (SGLang's `/v1/models` puts the served name in both `id` and `root`, so unlike vLLM
+`root` cannot confirm the checkpoint). `flags.model_matches_server` is true when `--model` is the reported `model_path`,
+false when it matches only the served name (an alias, so the label may name other weights than the checkpoint recorded
+in `flags.checkpoint_reported_by_server`), and null when the server reports no `model_path`. The server's own text is never
+copied beyond these named fields: `/server_info` also holds a `launch_command` and the scheduler's internal state, and
+neither reaches an arm file. `flags.algorithm_config_set` says whether the server was started with a
+`--dllm-algorithm-config` file (its content is not readable from the client). The server's address is in neither
+`version` nor `flags`.
+
+**Batch size 1 is required.** `generate_s` is the wall time of one request, and a second client would add its queue time
+to it, so the run is refused unless the batch size is 1, reported by the server or declared with
+`--max-running-requests 1`. SGLang's own LLaDA 2.1 cookbook serves with `--max-running-requests 1`
+(`https://docs.sglang.io/cookbook/autoregressive/InclusionAI/LLaDA-2.1.md`, read 2026-11-09). Run one client at a time.
+
+**Steps are not recorded.** SGLang exposes no per-request step or forward-pass count on `main` or in `v0.5.23`. Its
+Prometheus metrics (`python/sglang/srt/observability/metrics_collector.py`) have no dLLM counter, and the only pass
+counter, `sglang:cuda_graph_passes_total`, is server-wide and counts passes by CUDA-graph mode, so a change of it across
+one request is not that request's denoising steps. Pull request sgl-project/sglang#48675 ("Expose cumulative
+request-level forward metrics", which would add `meta_info.dllm_metrics` to `/generate`) was open and unmerged when I
+read it on 2026-11-09, and its description opens with "dLLM responses do not report how many model forwards a request
+uses". SGLang's own benchmark records `--denoising-steps` as metadata only. I read the metrics collector at both `main`
+and `v0.5.23`, and neither has a dLLM metric. So `forward_passes` is
+null in every row, `flags.forward_passes_measured` is false, and the engine never reads `/metrics` and never infers a
+count. `--steps`, `--block-length` and `--schedule` do not reach the server (`--dllm-algorithm-config` sets the step
+rule when the server starts), and a `--steps` different from `--gen-length` is refused.
+
+**The isolation checks see the client only.** `bench/isolation.py` runs on the machine that runs the client, and
+every row says `"server": "remote"` in `flags`. Run the client with `--device cpu` on a machine without a GPU.
+
+#### Runbook: serve, run, destroy
+
+**TODO for the maintainer: the budget.** The issue asks for the price and the hours in a pull request before any
+renting. They are not in this document, and I name no card and no price. State the card (or cards), the hourly price
+from the offer you pick, the hours and the total in the pull request that adds the arm.
+
+**Which hardware.** The bf16 checkpoint `google/diffusiongemma-26B-A4B-it` has 51 647 701 024 bytes of `.safetensors`
+files, 48.1 GiB (Hugging Face API, revision `f7f5b7f5fa82ffc52addd066915886d497f5517b`, read 2026-11-09). That is more
+than a 48 GB card holds before the cache is allocated, so a 48 GB card cannot run this arm alone; the issue's reading
+is two cards or tensor parallelism. The cookbook prints no memory or parallelism figure and no command with tensor
+parallelism. `ServerArgs` has `--tp-size` (alias `--tensor-parallel-size`), and I have not run it with this model.
+Whether one 80 GB card holds the weights and the cache is not settled by any page I read. Settle the hardware with a
+short trial of a few problems before the full run. SGLang's roadmap issue #39499 lists quantized checkpoints
+(FP8 first) for DiffusionGemma as an unchecked item, and the algorithm refuses quantized loading today, so plan for
+bf16.
+
+1. **Rent the machine.** Steps 1 to 3 of the vLLM runbook above apply (Vast.ai CLI, key, offer, instance), with these
+   changes. The install guide (`https://docs.sglang.io/docs/get-started/install.md`, read 2026-11-09) publishes the
+   Docker image `lmsysorg/sglang` on Docker Hub, says `latest` is the newest stable release, and says to use a
+   specific release or dated nightly tag for a reproducible deployment. I did not check which tag matches `v0.5.23`,
+   and I have not run the image on Vast.ai. Size the disk from the 48.1 GiB of weights plus the image; I have no
+   measurement of the image. Billing starts when the instance runs.
+
+2. **Serve.** On the instance, start the server with the command from the cookbook. The page
+   `https://docs.sglang.io/cookbook/autoregressive/Google/DiffusionGemma.md` was read on 2026-11-09. Section 3.1 prints
+   this command, verbatim (the issue quotes the same flags on one line):
+
+   ```bash
+   sglang serve \
+     --model-path google/diffusiongemma-26B-A4B-it \
+     --dllm-algorithm Gemma4Renoise \
+     --trust-remote-code \
+     --host 0.0.0.0 \
+     --port 30000
+   ```
+
+   I compared this block with `curl -s` of the page's markdown source on 2026-11-09 and the bytes are identical.
+   The page says the Triton attention backend, eager mode and unchunked prefill are selected automatically for
+   `Gemma4Renoise`, so none is passed. Three changes to it are mine and are not on the page. Add
+   `--max-running-requests 1`, so the batch size is 1 and the server reports it. Replace `--host 0.0.0.0` with
+   `--host 127.0.0.1`: **the page's command binds every interface, and a server started without `--api-key` has no
+   authentication, so on a rented host that port may be reachable by anyone**; the tunnel in step 3 reaches a loopback
+   bind. Do not add `--api-key`, because the client sends no credential and every request would stop with HTTP 401.
+   Optionally add `--dtype bfloat16`: without it `/server_info` reports `auto`, and you declare `--dtype bfloat16` in
+   step 4 (the argument's help text says `auto` uses BF16 for a BF16 model), which the row then lists as declared and
+   not verified. Write the command you ran, as run, into the pull request.
+
+   Leave `--dllm-algorithm-config` unset for the reference arm, so the checkpoint's defaults apply (the cookbook
+   lists 48 denoising steps, an entropy bound of 0.1 and temperatures from 0.4 to 0.8). The cookbook's example
+   config marks `seed` as optional and as what makes the sampling reproducible, so without one two runs of the same
+   problem can answer differently. The page's command has no `--reasoning-parser`; if you add one, the answer may move
+   to `reasoning_content` and the engine then stops with `the server returned an empty completion`.
+
+3. **Run the arm from your machine.** Open the tunnel in a second terminal and look at what the server reports.
+   Results are written on your machine to `bench/eval/runs/ARM.jsonl`, and the instance never receives a key.
+
+   ```bash
+   ssh -N -L 30000:127.0.0.1:30000 -p PORT -i ~/.ssh/vast_dgemma root@HOST    # terminal 2; Ctrl-C closes it
+   curl -s http://127.0.0.1:30000/v1/models                                   # note the id
+   curl -s http://127.0.0.1:30000/model_info | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("model_path"), d.get("served_model_name"))'
+   curl -s http://127.0.0.1:30000/server_info | python3 -c 'import json,sys; d=json.load(sys.stdin); print({k: d.get(k) for k in ("version", "dllm_algorithm", "dtype", "quantization", "max_running_requests", "chat_template")})'
+   ```
+
+4. **Run.** `--model` is the checkpoint you served.
+
+   ```bash
+   python3 bench/eval_engine.py run --engine sglang --model google/diffusiongemma-26B-A4B-it \
+       --arm sglang-dgemma-bf16 --device cpu --gen-length 256 \
+       --base-url http://127.0.0.1:30000 --dtype bfloat16
+   ```
+
+   Add `--limit 3` first to look at the rows. Add `--served-model NAME` when the server uses `--served-model-name`.
+   After the run, `ss -ltnp 'sport = :30000'` must show no tunnel of yours.
+
+5. **Compare.** `python3 bench/eval_gsm8k.py compare MOJO_OR_LLAMACPP_ARM sglang-dgemma-bf16 --across-weights`.
+
+6. **Destroy the instance.** Step 7 of the vLLM runbook above: `vastai destroy instance INSTANCE_ID`, then
+   `vastai show instances` must list nothing, then read the billing page.
+
+| Symptom | Likely cause | Action |
+|---|---|---|
+| the run refuses with `the server reports the models ...` | the served name differs from `--model` | pass `--served-model` with the id `/v1/models` lists |
+| `GET /server_info ... HTTP 401` | the server was started with `--api-key` | restart it without one and keep the loopback bind |
+| `GET /server_info did not report a version string` or `0.0.0.dev0` | a source install without version metadata | run a release, or a checkout with its git history |
+| `the server reports no diffusion algorithm` | the server runs an autoregressive model, or no `--dllm-algorithm` | serve with the cookbook command |
+| `the server does not report its dtype` | `/server_info` says `auto` | pass `--dtype bfloat16` (declared), or serve with `--dtype bfloat16` |
+| `max_running_requests` refusal | the server was not started with `--max-running-requests 1` | restart it with the flag |
+| `--model ... is neither the model path ...` | the label names other weights than the server runs | pass the served checkpoint as `--model` |
+| `answered HTTP 400 ... does not support request-level ...` | the server rejected a request field | the message names the field; report it, the engine sends none of them |
+| `returned an empty completion` | the answer is in `reasoning_content`, or the model produced nothing | `curl` one chat request by hand and look at `choices[0].message` |
+| out of memory on the server | the weights plus the cache do not fit the card | see Which hardware |
+
+**Not done yet.** No server was run for this engine: the tests use a fake server on 127.0.0.1, and no SGLang, GPU or
+weights were involved. The fields above were read from SGLang's source and cookbook, not observed on a live server
+(`/model_info`, `/server_info`, the `dtype` and `max_running_requests` values a real launch reports, the
+`usage.completion_tokens` of a dLLM answer, the `finish_reason`). The evaluation (issue #180, scope item 5: batch size
+1, the same 200 problems, a 256-token canvas, on a rented machine) has not run, so there are no SGLang rows in this
+document.
+
+### DiffusionGemma across engines
+
+The four engines that can answer DiffusionGemma are meant to run the same 200 problems
+(`bench/eval/gsm8k-200.jsonl`), with the same prompt, the same scoring and the same arm-file format, so
+`eval_gsm8k.py compare --across-weights` pairs any two of them. This table is a skeleton and holds no measured value.
+A row gets a number only from a committed arm file under `bench/eval/runs/`; until then it says `no committed run yet`.
+Weights differ between rows, so every comparison includes the precision as well as the engine.
+
+| Arm | Weights (as the arm's `model` records them) | Algorithm | How it runs | Committed run |
+|---|---|---|---|---|
+| llama.cpp reference (the branch of ggml-org/llama.cpp#24423) | `diffusiongemma-26B-A4B-it-Q4_K_M.gguf`, the file `docs/correctness.md` names | that branch's own loop; I did not read it for this table | the build is `scripts/build_dg_ref.sh`; the GSM8K runner for llama.cpp's diffusion CLI is issue #177 (open), and I have not checked that `bench/engines/llamacpp.py` drives this build | no committed run yet |
+| vLLM | `diffusiongemma-26B-A4B-it\|fp8-dynamic`, or the bf16 checkpoint (the choice is the maintainer's, see the vLLM runbook) | vLLM's entropy-bound sampler, as the recipe page describes it | `--engine vllm` (issue #179), runbook above | no committed run yet |
+| SGLang | `diffusiongemma-26B-A4B-it\|bfloat16` | `Gemma4Renoise` | `--engine sglang` (issue #180), runbook above | no committed run yet |
+| mojo-dllm | the Q4_K_M GGUF of the llama.cpp row | its own entropy-bound loop, `docs/diffusion.md` ("DiffusionGemma's loop") | `mojo-dllm run` does not run DiffusionGemma yet: the generation loop is issue #64 (open), see `docs/introduction.md` | no committed run yet |
+
+The six defaults in `docs/cli.md` (`--eb-steps` 48, `--eb-t-min` 0.4, `--eb-t-max` 0.8, `--eb-bound` 0.1,
+`--eb-stability` 1, `--eb-confidence` 0.005) are the values the SGLang cookbook lists for `Gemma4Renoise`
+(`max_denoising_steps`, `temperature_schedule`, `entropy_bound`, `stability_threshold`, `confidence_threshold`; read
+2026-11-09). I did not check that the two loops agree step for step. When the arms exist, name each one's commit,
+server release and algorithm settings next to its row, from the arm's own `version` and `flags`.
 
 ## Limits of this evidence
 
