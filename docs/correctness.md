@@ -153,6 +153,11 @@ activations that magnify int8 rounding. Masked positions, the ones the
 sampler reads, agree closely. Which of the two runtimes is nearer an f32
 reference at those outlier rows is not measured yet.
 
+Agreement with llama.cpp shows that two int8 implementations land near each
+other. It does not show that either is right. The only f32 forward-pass reference in this
+repository is the numpy pass on the tiny models (section 1), and the
+GPU tests compare against it too.
+
 ## 4. Generated tokens on the real model
 
 llama.cpp's own diffusion example cannot serve as a token-level reference. On
@@ -170,6 +175,17 @@ step then sees a different canvas. The table's first difference is a position
 in the final output; it does not identify the denoising step or the cause of
 the mismatch. Exact token agreement is specific to the measured prompt and
 configuration.
+
+What this section covers: two prompts, 32 and 64 generated tokens (the
+benchmarks use 128), temperature 0, 32 steps, with low-confidence remasking for
+LLaDA and entropy ranking for Dream. The tables below give the count of equal
+tokens and the first difference for each model; on the speculative-decoding
+prompt several are well short of a full match, and Dream-v0's code prompt
+diverges within its first few tokens. Not covered: Gumbel noise (temperature
+above 0), random remasking, Dream's other remasking algorithms, classifier-free
+guidance (`cfg_scale`), `alg_temp`, and generation at 128 tokens. `--threshold`
+and `--dual-cache` have a paired GSM8K comparison instead
+([Benchmarks](benchmarks.md#accuracy-of---threshold-and---dual-cache)).
 
 <!-- genparity:start -->
 **LLaDA-1.5.Q4_K_M.gguf**

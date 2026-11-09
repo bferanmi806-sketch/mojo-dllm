@@ -5,6 +5,7 @@ mojo-dllm run      --model PATH --prompt TEXT [options]
 mojo-dllm tokenize --model PATH --prompt TEXT [--no-chat]
 mojo-dllm inspect  PATH
 mojo-dllm logits   --model PATH --tokens IDS --rows POSITIONS --out FILE [--threads N] [--device D]
+                   [--path unified|cached] [--prev FILE --prev-temp-inv X]
 ```
 
 This page describes the binary, `build/mojo-dllm`. The `./mojo-dllm run` launcher
@@ -127,8 +128,16 @@ On a `diffusion-gemma` file the tokens are the prompt followed by the canvas,
 whose length the file declares (`diffusion.canvas_length`, 256 in the real
 model). The model scores only the canvas, so `--rows` must list exactly those
 positions, the last canvas-length ones, and the file holds `[canvas, vocab]`.
-The pass is the unified `[prompt | canvas]` one, with no self-conditioning. It
-runs on the CPU only; `--device gpu` is refused.
+It runs on the CPU only; `--device gpu` is refused. Three flags apply to this
+architecture alone and are refused on the others:
+
+- `--path unified` (the default) runs the prompt and the canvas in one pass.
+  `--path cached` prefills the prompt, keeps its keys and values, and steps the
+  canvas against them. The two agree bit for bit.
+- `--prev FILE` names the previous denoising step's canvas logits, `[canvas,
+  vocab]` f32 as this command writes them, and turns self-conditioning on.
+  `--prev-temp-inv X`, which must come with it, is 1 divided by the temperature
+  of that previous step (1.25 for the first step's 0.8).
 
 ## Errors
 

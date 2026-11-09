@@ -1,7 +1,7 @@
 """scripts/capped.sh runs a command in its own memory-capped systemd scope, or refuses to run it.
 
 The first tests never start systemd: they source the script's functions, or run it with `--dry-run`, or put a
-stub `systemd-run` first on PATH. The last two tests start a real scope and run only where the user manager
+stub `systemd-run` first on PATH. The tests marked `REAL` start a real scope and run only where the user manager
 can enforce memory limits.
 """
 
@@ -313,7 +313,47 @@ REAL = pytest.mark.skipif(
 HOG = "b=[]\nfor _ in range(64):\n    x=bytearray(16*1024*1024)\n    for i in range(0,len(x),4096): x[i]=1\n    b.append(x)\n"
 
 
+# The kernel kills a process that reaches its cap, and the desktop (gsd-housekeeping) answers every such kill
+# with an "Application Stopped" notification. Running that on every test run teaches nobody anything, so the
+# default tests read the limits the kernel enforces and the kill itself runs only on request.
+KILL = pytest.mark.skipif(
+    os.environ.get("CAPPED_TEST_KILL") != "1",
+    reason="set CAPPED_TEST_KILL=1 to kill a process in a real scope (raises a desktop 'Application Stopped' notification)",
+)
+
+# Prints memory.max, memory.swap.max and memory.oom.group of the scope this process runs in, one per line.
+LIMITS = (
+    "import pathlib\n"
+    "rel = [l for l in pathlib.Path('/proc/self/cgroup').read_text().splitlines() if l.startswith('0::')][0][3:]\n"
+    "d = pathlib.Path('/sys/fs/cgroup') / rel.lstrip('/')\n"
+    "for n in ('memory.max', 'memory.swap.max', 'memory.oom.group'):\n"
+    "    print(n, (d / n).read_text().strip())\n"
+    "print('scope', d.name)\n"
+)
+
+
 @REAL
+def test_the_scope_carries_the_cap_the_swap_limit_and_the_group_kill(tmp_path: Path) -> None:
+    out = subprocess.run([BASH, str(SCRIPT), "--mem", "256M", "--", sys.executable, "-I", "-c", LIMITS],
+                         capture_output=True, text=True, timeout=120, check=False)
+    assert out.returncode == 0, out.stderr
+    got = dict(line.split(" ", 1) for line in out.stdout.strip().splitlines())
+    assert got["scope"].startswith("capped-") and got["scope"].endswith(".scope"), got
+    assert got["memory.max"] == str(256 * 1024**2), got
+    assert got["memory.swap.max"] == "0", got
+    assert got["memory.oom.group"] == "1", got
+
+
+@REAL
+def test_a_cap_given_in_gigabytes_reaches_the_kernel(tmp_path: Path) -> None:
+    out = subprocess.run([BASH, str(SCRIPT), "--mem", "3G", "--need", "64M", "--", sys.executable, "-I", "-c", LIMITS],
+                         capture_output=True, text=True, timeout=120, check=False)
+    assert out.returncode == 0, out.stderr
+    assert dict(line.split(" ", 1) for line in out.stdout.strip().splitlines())["memory.max"] == str(3 * 1024**3)
+
+
+@REAL
+@KILL
 def test_a_process_over_the_cap_is_killed_and_the_caller_survives(tmp_path: Path) -> None:
     out = subprocess.run([BASH, str(SCRIPT), "--mem", "256M", "--", sys.executable, "-I", "-c", HOG],
                          capture_output=True, text=True, timeout=120, check=False)

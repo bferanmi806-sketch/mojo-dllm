@@ -2,7 +2,7 @@ from std.os import remove
 from std.os.path import exists
 from std.testing import assert_equal, assert_true, assert_raises, TestSuite
 
-from cli.args import Args
+from cli.args import Args, env_flags
 from mojo_dllm.diffusion.sampler import GenResult
 from mojo_dllm.formats.gguf import GGUFFile
 from mojo_dllm.models.diffusion_gemma import DiffusionGemma
@@ -23,6 +23,7 @@ from main import (
     json_str,
     _csv,
     _logits_gemma,
+    gemma_only_flags,
     is_top_level_help,
     model_error,
     version_line,
@@ -160,7 +161,7 @@ def test_every_command_declares_its_flags() raises:
     assert_equal(len(inspect.booleans), 0)
     assert_true(inspect.takes_path)
     var logits = command_spec("logits")
-    assert_equal(len(logits.values), 6)
+    assert_equal(len(logits.values), 9)
     assert_equal(len(logits.booleans), 0)
     with assert_raises(contains="unknown command: frobnicate"):
         _ = command_spec("frobnicate")
@@ -175,6 +176,22 @@ def test_declared_booleans_come_from_the_single_list() raises:
                 if candidate == flag:
                     found = True
             assert_true(found, command + " declares a boolean not in the list")
+
+
+def test_env_flags_are_value_flags_of_run() raises:
+    # Every name the environment can fill must be a declared value flag of
+    # `run` and must not be a boolean: a boolean takes no value, so an
+    # inserted `--flag value` pair would leave the value as a stray
+    # positional, and `run` refuses stray positionals.
+    var run = command_spec("run")
+    for name in env_flags():
+        var in_values = False
+        for flag in run.values:
+            if flag == name:
+                in_values = True
+        assert_true(in_values, name + " is not a value flag of run")
+        for flag in run.booleans:
+            assert_true(flag != name, name + " is a boolean flag of run")
 
 
 def test_a_flag_of_another_command_is_unknown() raises:
@@ -914,6 +931,108 @@ def test_logits_refuses_rows_that_are_not_the_canvas() raises:
         _logits_gemma(DG_TINY, 1, tokens, all_rows, path)
     with assert_raises(contains="below the canvas length 16"):
         _logits_gemma(DG_TINY, 1, _gemma_tokens(15), List[Int](), path)
+
+
+def _read_all(path: String) raises -> List[Float32]:
+    var mm = Mapping(path)
+    var p = F32Ptr(unsafe_from_address=mm.addr)
+    var out = List[Float32]()
+    for i in range(mm.size // 4):
+        out.append(p.unsafe_load(i))
+    return out^
+
+
+def _rows(first: Int) -> List[Int]:
+    var rows = List[Int]()
+    for r in range(first, first + 16):
+        rows.append(r)
+    return rows^
+
+
+def test_logits_cached_path_writes_the_unified_logits() raises:
+    var tokens = _gemma_tokens(25)
+    var a = String("build/tests/dg-cli-unified.f32")
+    var b = String("build/tests/dg-cli-cached.f32")
+    _logits_gemma(DG_TINY, 2, tokens, _rows(9), a)
+    _logits_gemma(DG_TINY, 2, tokens, _rows(9), b, "cached")
+    var x = _read_all(a)
+    var y = _read_all(b)
+    remove(a)
+    remove(b)
+    assert_equal(len(x), 16 * 512)
+    var differ = 0
+    for i in range(len(x)):
+        if x[i] != y[i]:
+            differ += 1
+    assert_equal(differ, 0)
+
+
+def test_logits_prev_conditions_on_the_previous_logits() raises:
+    var tokens = _gemma_tokens(25)
+    var prev = String("build/tests/dg-cli-prev.f32")
+    var plain = String("build/tests/dg-cli-plain.f32")
+    var sc = String("build/tests/dg-cli-sc.f32")
+    var sc_cached = String("build/tests/dg-cli-sc-cached.f32")
+    _logits_gemma(DG_TINY, 2, tokens, _rows(9), prev)
+    var other = _gemma_tokens(25)
+    for i in range(9, 25):
+        other[i] = (i * 53 + 7) % 500 + 5
+    _logits_gemma(DG_TINY, 2, other, _rows(9), plain)
+    _logits_gemma(DG_TINY, 2, other, _rows(9), sc, "unified", prev, 1.25)
+    _logits_gemma(DG_TINY, 2, other, _rows(9), sc_cached, "cached", prev, 1.25)
+    var m = DiffusionGemma(DG_TINY, threads=2, max_tokens=25)
+    var want = Floats(16 * 512)
+    var src = _read_all(prev)
+    for i in range(16 * 512):
+        want[i] = src[i]
+    m.forward_sc(other, want.ptr(), 1.25)
+    var got = _read_all(sc)
+    var cached = _read_all(sc_cached)
+    var base = _read_all(plain)
+    remove(prev)
+    remove(plain)
+    remove(sc)
+    remove(sc_cached)
+    var differ = 0
+    var moved = 0
+    for i in range(16 * 512):
+        if got[i] != want[i] or cached[i] != want[i]:
+            differ += 1
+        if got[i] != base[i]:
+            moved += 1
+    assert_equal(differ, 0)
+    assert_true(moved > 16 * 512 // 2, "--prev changed only " + String(moved))
+
+
+def test_logits_flag_errors() raises:
+    var tokens = _gemma_tokens(25)
+    var path = String("build/tests/dg-cli-never.f32")
+    with assert_raises(contains="--path is unified or cached, got 'warm'"):
+        _logits_gemma(DG_TINY, 1, tokens, _rows(9), path, "warm")
+    with assert_raises(contains="--prev and --prev-temp-inv go together"):
+        _logits_gemma(DG_TINY, 1, tokens, _rows(9), path, "unified", "x.f32")
+    with assert_raises(contains="--prev and --prev-temp-inv go together"):
+        _logits_gemma(DG_TINY, 1, tokens, _rows(9), path, "unified", "", 1.25)
+    var short = String("build/tests/dg-cli-short.f32")
+    with open(short, "w") as f:
+        f.write("0123")
+    with assert_raises(contains="holds 4 bytes, expected 32768"):
+        _logits_gemma(
+            DG_TINY, 1, tokens, _rows(9), path, "unified", short, 1.25
+        )
+    remove(short)
+
+
+def test_the_gemma_only_flags_are_named_for_other_models() raises:
+    var spec = command_spec("logits")
+    var none = Args(["x", "logits", "--model", "m"], spec.values, spec.booleans)
+    assert_equal(gemma_only_flags(none), "")
+    var some = Args(
+        ["x", "logits", "--path", "cached", "--prev-temp-inv", "1"],
+        spec.values,
+        spec.booleans,
+    )
+    assert_equal(gemma_only_flags(some), "--path, --prev-temp-inv")
 
 
 def _logits_args(rows: String, path: String, device: String) -> List[String]:

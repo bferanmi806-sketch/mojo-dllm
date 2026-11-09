@@ -94,7 +94,9 @@ around its generate call.
 
 llama.cpp runs its timestep schedule because its block mode needs the prompt
 length to be a multiple of the block size. The schedules commit tokens in a
-different order, which changes the text but not the cost of a step.
+different order, which changes the text but not, we expect, the cost of a step.
+That is an argument. The measurement that does not depend on the schedule is the
+"forward pass alone" table below, which times one pass at the same token count.
 
 † diffuse-cpp's recommended mode reuses K/V between steps and stops early when
 the canvas has settled. It does less work, so it is not a like-for-like row.
@@ -152,13 +154,136 @@ llama.cpp's `llama-bench` at the same token count).
 - peak RSS comes from `/usr/bin/time`.
 
 The table above is generated from `bench/results/*.json` by
-`scripts/bench_table.py`, and CI fails if the two disagree.
+`scripts/bench_table.py`, and CI fails if a table differs from the evidence file
+it names. Two gaps are open: `--check` passes when a table marker is missing, a
+target file is missing, or the quality or eval evidence is deleted ([#141](https://github.com/vladimirrott/mojo-dllm/issues/141)), and an
+unknown mode exits 0 ([#142](https://github.com/vladimirrott/mojo-dllm/issues/142)).
+
+## Benchmark environment
+
+A timed run reports whether it had the machine to itself. `bench/isolation.py` does the checking for
+`bench/run_bench.py`, `bench/eval_gsm8k.py run` and `bench/eval_engine.py run`; `bench/power.py` still owns the
+mains-power check. Each check below is a constant in `bench/isolation.py`, and an arm can change one only by
+passing a `Thresholds` object, which is recorded in the arm's environment file.
+
+**Before an arm starts** (`preflight`, one 5 second sample). A FAIL stops the arm and names the offenders; `--allow-noisy`
+continues and records that it did. A source that cannot be read is a WARN that names the file, never a pass.
+
+| Check | FAIL when | Source |
+|---|---|---|
+| power | on battery (`--allow-battery` turns it into a WARN) | `bench/power.py` |
+| profile | `powerprofilesctl get` or `/sys/firmware/acpi/platform_profile` is not `performance` | LLVM "Benchmarking tips", pyperf "Tune the system for benchmarks" |
+| governor | a CPU is not on `performance`, unless it is `powersave` under `intel_pstate` active with preference `performance` | kernel `admin-guide/pm/intel_pstate` |
+| CPU busy | more than 10% of all CPUs busy over the sample | `/proc/stat` |
+| CPU pressure | PSI CPU `some` avg10 above 5% | kernel `accounting/psi` |
+| swap movement | any page swapped in or out over the sample | `/proc/vmstat` `pswpin`, `pswpout` |
+| memory | `MemAvailable` below 1.25 times the model file, or the model file's size cannot be read | `/proc/meminfo` |
+| thermal | a core or package throttle counter rose over the sample | kernel `admin-guide/thermal/intel_thermal_throttle` |
+| GPU processes (GPU arm) | any compute process on the GPU | `nvidia-smi --query-compute-apps` |
+| GPU memory (GPU arm) | more than 300 MiB used | `nvidia-smi --query-gpu=memory.used` |
+| GPU utilization (GPU arm) | mean of three samples above 5% | `nvidia-smi --query-gpu=utilization.gpu` |
+| GPU clock reasons (GPU arm) | any event reason other than idle (0x1), a software power cap (0x4) and the display clock setting (0x100) | NVML clocks event reasons, `clocks_event_reasons.active` (`clocks_throttle_reasons.active` on older drivers) |
+
+Swap in use is a WARN, because a run that touches swapped pages measures the disk. The preflight also records the
+CPU governor and frequency, `intel_pstate` status and `no_turbo`, the energy performance preference, the load
+average, PSI for CPU and memory, `MemAvailable`, the top CPU processes, the GPU's state (persistence mode,
+compute mode, power draw, temperature, SM clock, maximum SM clock), the systemd timers due within the next hour
+(names only) and the number of lines in the user crontab.
+
+**Around every problem** (`Window`, sampled every 0.5 s). The window subtracts the CPU time of the benchmark's own
+process tree, read from `/proc/PID/stat`, from the busy time in `/proc/stat`, so a benchmark that uses every core is
+not contention. A problem is noisy when:
+
+| Check | Noisy when | Per-window value recorded |
+|---|---|---|
+| other CPU, mean | processes outside the tree use more than 5% of the machine's CPU capacity | `other_cpu_share_mean` |
+| other CPU, peak | the same share exceeds 25% in any 0.5 s sample | `other_cpu_share_max` |
+| swap | any page moved | `swap_pages` |
+| thermal | a throttle counter rose | `thermal_events` |
+| GPU clock reasons (GPU arm) | hardware slowdown (0x8), software or hardware thermal (0x20, 0x40), hardware power brake (0x80), applications clocks (0x2) or sync boost (0x10) was active | `gpu_reasons_seen` |
+| GPU processes (GPU arm) | a compute process outside the benchmark tree appeared | `gpu_foreign_pids` |
+| sampler | the sampler thread died or did not stop | reason `sampler-failed` |
+| unmeasured | a source that exists on this machine could not be read during the window | reason `unmeasured:SOURCE` |
+
+Recorded in every window and never judged: PSI CPU and memory `some` stall time (`psi_cpu_stall_ms`,
+`psi_memory_stall_ms`), because a 12-thread run on 12 CPUs stalls 9% of the time by itself (measured on the
+reference laptop: 24 ms in 10 s idle, 908 ms with 12 busy threads), so no limit separates the run from a neighbour;
+a software power cap (0x4, `gpu_power_capped`), which the laptop's 30 W GPU hits under any compute load; the display
+clock setting (0x100); the SM clock minimum and maximum; the window length; and the processes outside the tree that
+used the most CPU (`other_top_processes`, percent of one core).
+
+A source that does not exist on the host (no NVIDIA GPU on a CPU arm, no `thermal_throttle` files on an AMD CPU) is
+not checked.
+
+The child that exits inside the window is handled: a tree member's ticks are its own `utime + stime` plus the
+`cutime + cstime` of the children it has waited for, and the window compares the sum over the tree between two
+samples. When a child exits and is reaped, its ticks move from the child to its parent and the sum does not drop.
+The Window's `pid` must outlive the window (the runner's own pid does).
+
+The GPU is read every 2 s inside a window (two `nvidia-smi` processes per read, about 0.2 s of wall time and 0.1 s of
+CPU time per read, so about 5% of one core of 12 while a GPU arm runs; they are children of the runner, so they sit in
+the tree and are not counted as other). A GPU event reason that starts and ends between two reads is missed.
+
+**What the checks cannot see.** Kernel threads and interrupt time are inside `busy` and are flagged as other CPU, but
+they cannot be named. Hypervisor and firmware (SMM) time, fan and embedded-controller policy and thermal paste are
+invisible. GPU use by the display server is not a compute app and counts only through the 300 MiB memory limit and
+the utilization sample. Other users' processes are seen, but only at the 0.5 s resolution, and a burst shorter than
+that, or shorter than the 10 ms tick, can fall between samples. A foreign GPU process that starts and ends between
+two GPU reads is missed. Processes in another pid namespace (containers) can differ from the pids `nvidia-smi`
+prints, so a GPU arm inside a container cannot match its own pid. A window can also miss one stolen core for a part
+of a long problem; the numbers are in the next paragraph.
+
+**Sensitivity.** The limits (5% of capacity as a mean, 25% in any sample) were kept after measuring the baseline on
+the reference laptop with the shared machine in its normal state: 60 windows of 10 s around a child that burns one
+core, other-process share of total capacity: mean of the window means 9.0%, median 8.0%, 95th percentile 20.6%,
+maximum 25.3%; peak share mean 19.5%, 95th percentile 39.7%, maximum 47.5%. Only 14 of the 60 windows came out clean at
+these limits, because other sessions were using the machine; the windows named them (`claude`, `python3`, `qemu`).
+Since the baseline is far above 1%, the limits are not tightened. The consequence is a blind spot: one stolen
+core for 30 s of a 90 s problem is 2.8% mean and 8.3% peak of 12 CPUs, and the CPU rules do not flag it. On a quiet
+machine (`scripts/bench-quiet.sh`, no other session) rerun the baseline and lower the limits by passing a `Thresholds`.
+
+Before a problem the runner waits up to 60 seconds for a quiet moment (CPU busy, swap movement and, for a GPU arm, GPU
+processes), then runs it inside a window. A noisy problem is run again, up to `--isolation-retries`
+times (default 2); after that the row is kept with its reasons. `bench/run_bench.py` keeps its own `busy_threshold`
+and `max_quiet_wait_s` config keys for this wait, and records `cpu_busy_before` as before.
+
+**Reading `ARM.env.json`.** The eval runners write `bench/eval/runs/ARM.env.json` and `run_bench.py` writes
+`bench/results/env/NAME.env.json`. It holds one entry per start of the arm under `sessions`: the preflight report
+(each check with its status and detail), `snapshot_start` and `snapshot_end`, the `thresholds` used, `tuned` (the
+profile before and after `--tune`), `bench_quiet` (true when the run was started under `scripts/bench-quiet.sh`),
+`preflight_failed_allowed` (true when `--allow-noisy` continued past a FAIL), a `session_id`, the retry limit and tool
+versions. Each row of an arm file carries `isolation`: the window values above, `clean`, `reasons`, `retries` (how
+many repeats this problem took), `noisy`, `cpu_busy_before`, `waited_s`, `session` (the `session_id` of the start
+that wrote the row), `allow_noisy` and `preflight_failed_allowed`.
+
+`eval_gsm8k.py compare` adds `generate_s_mean_clean` (the mean over the problems whose window was clean in both
+arms, `null` when there is none), `clean_rows`, `noisy_rows` per arm and `unchecked_rows` per arm (rows written
+before windows existed). Accuracy is still computed over every row.
+
+**Quieting the machine.** `--tune` sets the power profile to `performance` through `powerprofilesctl`, reads it back,
+and restores the previous profile on exit, on an exception, on Ctrl-C and on SIGTERM. `sudo scripts/bench-quiet.sh --
+COMMAND` additionally stops the system timers `sysstat-collect`, `apt-daily`, `apt-daily-upgrade`, `fwupd-refresh`,
+`anacron`, `man-db` and `motd-news`, turns on NVIDIA persistence mode and locks the GPU clocks where the driver
+allows it, runs the command, and puts everything back; it never edits cron files. After a SIGKILL or a power loss no
+trap can run: `sudo scripts/bench-quiet.sh --restore` undoes the script's changes from its state file, and `--tune`
+(which keeps no state file) leaves the profile at `performance`, so run `powerprofilesctl set PREVIOUS` with the
+profile in `tuned.previous` of the arm's environment file. The one-minute user cron job is not
+stopped: a window that sees it is noisy and the problem is repeated. Not covered: kernel boot parameters (`isolcpus`,
+`nohz_full`) and BIOS settings. The rows keep the 12 threads they were measured with, so no core is left to pin.
+
+**Rows measured before this change.** The published rows above (and the arms under `bench/eval/` written before
+`isolation` existed) were not checked this way. They have `cpu_busy_before` for the CPU rows and no window. Do
+not read a ratio from them closer than their recorded spread.
 
 ## Steps and quality
 
 A diffusion model commits `tokens / steps` tokens per step. The table above
 uses 4 tokens per step, which is fast and shows in the text as repeated or
-dropped words. More steps cost proportionally more time:
+dropped words. More steps cost proportionally more time, so the headline
+tokens / s above is not a quality-matched figure. In the first prompt below,
+the repeated words disappear at 64 steps, which takes about twice the time of
+32 steps, so by that count mojo-dllm's quality-matched speed on that prompt is
+about half the headline rate. Other runtimes use other schedules. The code prompt shows no such damage at 32 steps.
 
 <!-- quality:start -->
 **LLaDA-8B-Instruct.Q4_K_M.gguf**, 128 generated tokens.
@@ -198,6 +323,316 @@ Discordant counts problems only the baseline solved / only the arm solved. Time 
 
 Evidence: `bench/eval/2026-10-29-baseline-vs-dualcache.json`, `bench/eval/2026-10-29-baseline-vs-threshold09.json`, `bench/eval/2026-10-29-baseline-vs-dualcache-first50.json`, `bench/eval/2026-10-29-baseline-vs-threshold09-first50.json`.
 <!-- eval:end -->
+
+### The authors' own code (Transformers arm)
+
+`bench/eval_engine.py run --engine hf` answers the same 200 problems through the sampling code the model authors
+publish: `generate` from `generate.py` in a checkout of [ML-GSAI/LLaDA](https://github.com/ML-GSAI/LLaDA) for
+LLaDA, and `diffusion_generate` from the remote code of
+[Dream-org/Dream-v0-Instruct-7B](https://huggingface.co/Dream-org/Dream-v0-Instruct-7B) for Dream. The adapter
+imports the LLaDA file from your checkout and never copies it (the repository has no license file).
+
+**This arm runs different weights.** The llama.cpp and mojo-dllm arms load the Q4_K_M GGUF. The Transformers arm
+loads the authors' bf16 safetensors, or a bitsandbytes 4-bit (nf4) copy of them with `--quant 4bit`. An accuracy
+difference between the arms therefore includes quantization as well as any difference between the
+implementations, and `eval_gsm8k.py compare` refuses such a pair unless you pass `--across-weights`. The output
+then holds both model names and `"weights_differ": true`.
+
+Like-for-like settings: temperature 0, steps equal to the generation length, block length 32 and low-confidence
+remasking for LLaDA, entropy remasking for Dream (which has no blocks). The Dream README example uses temperature
+0.2, top_p 0.95 and 512 steps, and the library default algorithm is `origin`; the arm departs from that, and the
+`flags` of every row say so. `version` records the model repository's commit sha (`--model-revision`, a full
+40-character sha; `null` when you give none, and then the weights and the remote code are unpinned), the LLaDA
+checkout's commit, and the `transformers`, `torch` and `bitsandbytes` versions. The Python sampling loop is not a
+speed baseline; read accuracy from this arm, not seconds.
+
+The two READMEs pin different environments (LLaDA: `transformers==4.38.2`; Dream: `transformers==4.46.2` and
+`torch==2.5.1`), so each model gets its own virtual environment. The repository's frozen environment never
+installs them. The runner needs only the standard library besides the model libraries, so run it with the
+environment's own interpreter. The LLaDA README pins no `torch`; I pin 2.5.1 as for Dream, because an unpinned
+install resolves a CUDA 13 build that may not match the laptop's driver. Both lines also pin `numpy<2`; that numpy 1.x
+works with these `transformers` versions is an assumption I did not test. I checked each install line below with `uv pip install --dry-run` only (it resolves: `torch==2.5.1` with the
+CUDA 12.4 libraries, `numpy==1.26.4`, and `bitsandbytes==0.50.2` for the GPU lines); nothing was installed and
+nothing was run.
+
+```bash
+# LLaDA, GPU (4-bit). For the CPU path replace the install line with:
+#   uv pip install --python "$V/bin/python" --extra-index-url https://download.pytorch.org/whl/cpu \
+#       --index-strategy unsafe-best-match "torch==2.5.1+cpu" transformers==4.38.2 accelerate "numpy<2"
+V=~/.cache/mojo-dllm-hf/llada
+uv venv $V --python 3.12
+uv pip install --python "$V/bin/python" torch==2.5.1 transformers==4.38.2 accelerate bitsandbytes "numpy<2"
+git clone https://github.com/ML-GSAI/LLaDA ~/src/LLaDA
+REV=$(curl -s https://huggingface.co/api/models/GSAI-ML/LLaDA-8B-Instruct | jq -r .sha)
+scripts/capped.sh --mem 26G -- "$V/bin/python" bench/eval_engine.py run --engine hf --model GSAI-ML/LLaDA-8B-Instruct \
+    --model-revision "$REV" --llada-repo ~/src/LLaDA --quant 4bit --device gpu --arm hf-llada-4bit --limit 50
+
+# Dream, GPU (4-bit); the CPU line is the same with the CPU install line above and transformers==4.46.2
+V=~/.cache/mojo-dllm-hf/dream
+uv venv $V --python 3.12
+uv pip install --python "$V/bin/python" torch==2.5.1 transformers==4.46.2 accelerate bitsandbytes "numpy<2"
+REV=$(curl -s https://huggingface.co/api/models/Dream-org/Dream-v0-Instruct-7B | jq -r .sha)
+scripts/capped.sh --mem 26G -- "$V/bin/python" bench/eval_engine.py run --engine hf --model Dream-org/Dream-v0-Instruct-7B \
+    --model-revision "$REV" --quant 4bit --device gpu --arm hf-dream-4bit --limit 50
+
+python3 bench/eval_gsm8k.py compare baseline hf-llada-4bit --across-weights
+```
+
+**The repository's code runs on your machine.** The adapter loads with `trust_remote_code=True`, which executes
+the Python files of the model repository (for Dream, `modeling_dream.py` and `generation_utils.py`) at load. Only a
+commit sha says which code that is, so `--model-revision` is required for a Hugging Face repository, and the run
+refuses without it unless you pass `--allow-unpinned` (the rows then say `unpinned`). Look up the sha when you start
+the arm and keep it: the `curl` lines above print the current one. A local directory is not on the hub, so it needs
+no revision; its path is recorded and the sha is marked unverified, because nothing ties the directory to a
+commit. `version` also records the LLaDA checkout's commit with `-dirty` when a tracked file differs from it.
+
+**Which arms count as different weights.** `compare --across-weights` reads each arm's `model`. A 4-bit arm records
+`LLaDA-8B-Instruct|4bit`, so it differs from a bf16 arm of the same repository. Two revisions of one repository
+record the same `model`; they differ in `version.model_revision`, which `compare` does not read.
+
+**Memory.** Two figures, both estimates and not measurements. Before it loads, the adapter reads `MemAvailable`
+from `/proc/meminfo` and refuses to start the load when it is below the load need: bf16 is 1.25 times the weights
+plus 3 GB of working memory (LLaDA's float64 Gumbel noise on the CPU is about 0.5 GB per tensor), 4-bit is the
+weights over 3.5 plus 3 GB. After the load the isolation preflight asks for the 3 GB of working memory only,
+because the weights are resident by then and `MemAvailable` already excludes them. The weights' size comes from a
+table for the two repositories, else from the `*.safetensors` of a local directory; for any other model the size is
+unknown and the run refuses before loading, as it does when `/proc/meminfo` cannot be read. The guard does not
+replace a cap: run the commands above under `scripts/capped.sh` (see [Development](development.md)). The loader
+also passes `low_cpu_mem_usage=True`.
+
+The weights are 14.93 GiB (LLaDA) and 14.19 GiB (Dream) of safetensors, so one model fits a nearly full disk and
+both do not. The adapter loads the model before the preflight and the first problem, and refuses a model that is
+not on the requested device (a model that fell back to the CPU would still answer, slowly).
+
+**Not done yet.** The generation timeout leaves the generation thread running until the stopped process exits. The tests run against stubs: no weights were downloaded and no GPU was used for this arm. The
+memory-fit spike (issue #178, scope item 1: peak RAM, peak VRAM and seconds per step for bf16 on the CPU and for
+4-bit on the GPU) and the GSM8K arm itself (scope item 4) have not run, because the laptop had 4 GB of disk free
+and has to stay quiet for the timed benchmark runs. Whether 4-bit LLaDA fits 6 GB of VRAM is unmeasured, and so
+is the CPU step time. There are no Transformers rows in this document until the arm is committed under
+`bench/eval/`.
+
+### A running vLLM server (DiffusionGemma)
+
+`bench/eval_engine.py run --engine vllm` answers the same 200 problems through the OpenAI-compatible endpoint of a vLLM
+server that is already running. vLLM serves one diffusion model, DiffusionGemma (issue #179). The engine is a client:
+it never starts or stops a server, loads no weights and installs nothing. Rent the GPU, start the server there,
+point the client at it, and destroy the instance after. The shared client is `bench/engines/_http.py` (standard
+library only); the SGLang engine will reuse it.
+
+What the client sends: `POST /v1/chat/completions` with one user message holding the prompt text every engine uses,
+`temperature` 0 and `max_tokens` equal to `--gen-length`. The server applies the model's chat template. The client
+sends no credentials and no cookies, follows no redirects, never retries, ignores `http_proxy` and its siblings unless
+you pass `--use-env-proxy`, refuses a response over 4 MiB, and gives each request one deadline (`--timeout-s`) that
+covers connect, headers and body. Text the server sends back (an error message, a model id) is stripped of control
+characters and capped at 400 characters before it reaches your terminal, so a server cannot write escape sequences
+into it.
+
+**This arm runs different weights.** The recipe's FP8 checkpoint is not the Q4_K_M GGUF of the llama.cpp arm. The
+server does not report its quantization, so `--quantization` is required and goes into the arm's `model` (for example
+`diffusiongemma-26B-A4B-it|fp8-dynamic`). `eval_gsm8k.py compare` then refuses the pair unless you pass
+`--across-weights`, and an accuracy or speed difference includes the quantization.
+
+**What a row records.** `version` is JSON with the release `GET /version` reports (`{"version": ...}`), and the
+checkpoint, quantization and attention backend. Only the release comes from the server. `--quantization` and
+`--attention-backend` are declared, and `flags.declared_not_verified` lists them. `--checkpoint` is compared with the
+`root` that `GET /v1/models` reports for the served name, and a difference is refused; with no `--checkpoint`, the
+reported `root` is the checkpoint. `--model` is the arm's label, and it must equal that `root` or the served name:
+a label for other weights is refused, so pass the checkpoint you served (for the FP8 run,
+`RedHatAI/diffusiongemma-26B-A4B-it-FP8-dynamic`), not the base model's name. `flags.model_matches_server` records it. The chat template is the server's: `flags.chat_template` says
+`applied_by: server`, `verified: false`, and keeps what you declare with `--chat-template`. The run is refused
+before the first problem when the server does not list `--served-model`, when `/version` answers no version, and
+for an HTTP error, an empty completion, a response that names another model, or a response without token counts.
+The server's address is in neither `version` nor `flags`.
+
+**Steps.** The response carries no denoising steps. vLLM's source defines the counter
+`vllm:diffusion_num_denoising_steps` for diffusion models (`vllm/v1/spec_decode/metrics.py`, read 2026-11-09). The
+source has no `_total`; prometheus_client adds that suffix when it exposes a counter, so `/metrics` should show
+`vllm:diffusion_num_denoising_steps_total`. **That `_total` name is inferred from prometheus_client, not seen on a
+live `/metrics`**, and the engine accepts both names. The counter is server-wide and sums every request the server
+runs. The engine reads it before and after each generation and records the change, which is this request's steps only
+when nothing else runs on the server. So the run is **refused** when the server exposes the counter and you have
+not declared `--max-num-seqs 1`, the value you started the server with (the client cannot read it; the recipe's own
+command sets 4). Run one client at a time even then. When `/metrics` or the counter is missing, `forward_passes` is
+null and `flags.forward_passes_measured` is false, and `--max-num-seqs` is not needed; the engine never fills in a
+number. Any other error from `/metrics` (403, 500) stops the run: only a 404 means "no such endpoint". A counter that
+does not move across a request also stops it. **I have not checked this counter against a running server.** Steps per
+canvas vary from request to request, because the recipe describes an entropy-bound sampler; the recipe guide's "up to
+48 steps per block" is the figure it prints, not an expected value for this server, so read the first rows for their
+spread and do not check them against a constant. `--steps`, `--block-length` and `--schedule` do not reach the
+server: the step rule is set when the server starts (`--diffusion-config`), and a `--steps` different from
+`--gen-length` is refused.
+
+**The isolation checks see the client only.** `bench/isolation.py` runs on the machine that runs the client. It does
+not observe the server's GPU, clocks, power or neighbours, so a clean preflight says nothing about the rented card.
+Every row says `"server": "remote"` in `flags`. `--device cpu|gpu` selects which local checks apply; run the client
+with `--device cpu` on a machine without a GPU. `generate_s` is the wall time of one request, which includes the
+network round trip and the server's queue.
+
+#### Runbook: rent, serve, run, pull, destroy
+
+**TODO for the maintainer: the budget.** The issue asks for the price and the hours in a pull request before any
+renting. They are not in this document. Name the card, the hourly price from the offer you pick, the hours and the
+total cost in the pull request that adds the arm.
+
+**Which card.** The recipe lists FP8 as verified on H100, H200 and DGX Spark GB10, with a 32 GB minimum
+(`recipes/models/Google/diffusiongemma-26B-A4B-it.yaml` in vllm-project/recipes, read 2026-11-09), and vLLM 0.24.0 or
+newer. An RTX A6000 is not a verified target. The FP8-dynamic checkpoint is 25.33 GiB (Hugging Face API, 2026-11-09).
+
+1. **One time on your machine.** Install the Vast.ai CLI, store your API key and create a throwaway SSH key. The key
+   prompt reads without echo; cancel with Ctrl-C and nothing is written.
+
+   ```bash
+   uv tool install vastai
+   ssh-keygen -t ed25519 -N '' -C vast-dgemma-throwaway -f ~/.ssh/vast_dgemma
+   echo "== Vast.ai API key (console.vast.ai, Account, API Keys) =="
+   read -rs -p "key: " K; echo; vastai set api-key "$K"; unset K
+   vastai create ssh-key "$(cat ~/.ssh/vast_dgemma.pub)"
+   ```
+
+   This touches `~/.config/vastai`, `~/.ssh/vast_dgemma*` and your account's key list. To undo it, delete those
+   paths and remove both keys in the Vast.ai console. I have not run `vastai create ssh-key` here; check it with
+   `vastai create ssh-key --help`.
+
+2. **Find an offer.** Filter by card, reliability, disk, download speed and driver. The field names come from the
+   Vast.ai CLI reference (`docs.vast.ai/cli/reference/search-offers`); fill in the card name from its listing.
+
+   ```bash
+   vastai search offers 'gpu_name=<CARD> num_gpus=1 reliability>0.98 disk_space>=100 inet_down>500 rented=False' -o 'dph'
+   ```
+
+   Pick by the total, not the hourly price: the hourly price times your hours, plus the download (`inet_down_cost`
+   per GB for about 26 GB of weights and the image). Add `--raw` to see the cost fields.
+
+3. **Rent it.** The recipe's image is `vllm/vllm-openai:gemma`. Billing starts when the instance runs.
+
+   ```bash
+   vastai create instance OFFER_ID --image vllm/vllm-openai:gemma --disk 100 --ssh --direct --label dgemma-vllm
+   vastai show instances          # wait for "running"; note the instance ID
+   vastai ssh-url INSTANCE_ID     # prints ssh://root@HOST:PORT
+   ```
+
+   `--disk 100` is my estimate (25.33 GiB of weights, the image and the cache), not a measurement. I have not run
+   these lines on Vast.ai, and I do not know whether its `--ssh` mode keeps the image's `vllm` entry point out of
+   the way. Run `vastai create instance --help` first; if the server starts by itself, read the instance's logs
+   before you start a second one.
+
+4. **Serve.** On the instance (`ssh -p PORT -i ~/.ssh/vast_dgemma root@HOST`), start the server with the command from
+   the recipe page. The page `https://recipes.vllm.ai/Google/diffusiongemma-26B-A4B-it` was read on 2026-11-09. It
+   prints this `vllm serve` command for its default configuration, verbatim:
+
+   ```
+   vllm serve google/diffusiongemma-26B-A4B-it \
+     --max-num-seqs 4 \
+     --tensor-parallel-size 1 \
+     --enable-auto-tool-choice \
+     --tool-call-parser gemma4 \
+     --chat-template examples/tool_chat_template_gemma4.jinja \
+     --reasoning-parser gemma4
+   ```
+
+   and this `docker run` for "Single GPU (H100/H200, BF16)", verbatim:
+
+   ```
+   docker run -itd --name diffusiongemma \
+       --ipc=host --network host --gpus all \
+       -v ~/.cache/huggingface:/root/.cache/huggingface \
+       vllm/vllm-openai:gemma \
+           --model google/diffusiongemma-26B-A4B-it \
+           --max-model-len 262144 \
+           --max-num-seqs 4 \
+           --gpu-memory-utilization 0.85 \
+           --host 0.0.0.0 --port 8000
+   ```
+
+   The page prints no command for the FP8 checkpoint. Its deployment-notes table also lists
+   `--generation-config vllm` (the checkpoint's `generation_config.json` sets `max_tokens` 256 and would override the
+   per-request limit), `--gpu-memory-utilization 0.85` and `--diffusion-config '{"canvas_length": 256}'` as flags
+   DiffusionGemma needs, and neither command above has them all. Which exact command to run for this arm is the
+   maintainer's decision. The FP8 recipe variant names the model `RedHatAI/diffusiongemma-26B-A4B-it-FP8-dynamic`;
+   using that id in place of `google/diffusiongemma-26B-A4B-it` is my substitution, not the page's, and is not
+   verified on hardware. To record steps the server must also run with `--max-num-seqs 1` (the recipe's value is 4;
+   see Steps above). Write the command you ran, as run, into the pull request. Without Docker on the instance
+   (Vast.ai runs the image as the container), take the arguments after the image name and run them as
+   `vllm serve MODEL ...`. If you pass `--served-model-name`, give that name to `--served-model` below.
+   **The `docker run` block binds `--host 0.0.0.0`**, and a vLLM server started without `--api-key` has no
+   authentication. On a rented host that port may be reachable by anyone. Replace it with `--host 127.0.0.1` (the
+   tunnel in step 5 reaches it) or close the port with the host's firewall, and never leave an unauthenticated server
+   exposed. **The recipe's `--reasoning-parser gemma4` and the Gemma 4 chat template can put the answer in the
+   response's `reasoning_content` and leave `message.content` empty.** The engine then stops with `the server
+   returned an empty completion`. To see it, `curl` one chat request by hand against the tunnel and look at
+   `choices[0].message`. What to change on the server is a question for the recipe: check the recipe page for how
+   it turns thinking on and off, and do not guess a flag. The `--generation-config vllm` line in the page's
+   deployment notes is mentioned above: the checkpoint's `generation_config.json` sets `max_tokens` 256, which would
+   override the per-request limit.
+
+5. **Run the arm from your machine.** Open the tunnel in a second terminal, check that the server answers, then run.
+   Results are written on your machine, to `bench/eval/runs/ARM.jsonl`, so nothing needs pulling off the instance.
+   The client holds no key, and the instance never receives one.
+
+   ```bash
+   ssh -N -L 8000:127.0.0.1:8000 -p PORT -i ~/.ssh/vast_dgemma root@HOST      # terminal 2; Ctrl-C closes it
+   curl -s http://127.0.0.1:8000/version                                      # {"version":"0.24.0"} or newer
+   curl -s http://127.0.0.1:8000/v1/models                                    # note the id and root
+   python3 bench/eval_engine.py run --engine vllm --model RedHatAI/diffusiongemma-26B-A4B-it-FP8-dynamic \
+       --arm vllm-dgemma-fp8 --device cpu --gen-length 256 --max-num-seqs 1 \
+       --base-url http://127.0.0.1:8000 --served-model SERVED_NAME \
+       --quantization fp8-dynamic --checkpoint CHECKPOINT_AS_SERVED --attention-backend ATTENTION_BACKEND_AS_SERVED
+   ```
+
+   Add `--limit 3` first to look at the rows. Run one client at a time: the step counter is server-wide. After the
+   run, `ss -ltnp 'sport = :8000'` must show no tunnel of yours.
+
+6. **Compare.** `python3 bench/eval_gsm8k.py compare MOJO_OR_LLAMACPP_ARM vllm-dgemma-fp8 --across-weights`.
+
+7. **Destroy the instance.** A stopped instance keeps billing for its disk.
+
+   ```bash
+   vastai destroy instance INSTANCE_ID
+   vastai show instances          # must list nothing
+   ```
+
+   Then read the billing page in the console: the final charge should be within the total you computed in step 2.
+   Delete the throwaway SSH key from the account, and remove `~/.ssh/vast_dgemma*`.
+
+| Symptom | Likely cause | Action |
+|---|---|---|
+| the run refuses with `the server reports the models ...` | `--served-model` differs from `--served-model-name` | pass the id `/v1/models` lists |
+| `--checkpoint is ... but the server reports root ...` | the label does not match what was served | fix the label, or the command |
+| `forward_passes` is null | the server exposes no `vllm:diffusion_num_denoising_steps` counter | none: the column stays null |
+| the run refuses with `--max-num-seqs 1` | the server exposes the counter and you did not declare 1 | restart the server with `--max-num-seqs 1`, declare it |
+| the run stops on a counter that did not move | another client, or `/metrics` is not this model's | stop other clients; read `/metrics` by hand |
+| `--model ... is neither the root ... nor the id` | the label names other weights than the server runs | pass the served checkpoint as `--model` |
+| `returned an empty completion` | the answer is in `reasoning_content` | `curl` one request; check the recipe |
+| `answered HTTP 4xx` | for example `max_tokens` over the server's limit | the message is the server's own |
+| out of memory on the server | `--max-num-seqs` above 4 | the recipe sets 4 because diffusion state buffers are large (1 uses less) |
+
+**Not done yet.** No server was run for this engine: the tests use a fake server on 127.0.0.1, and no vLLM, GPU or
+weights were involved. The fields above were read from vLLM's source and the recipe page, not observed on a live
+server (`/version`, `/v1/models`, `/metrics`, the counter's per-request meaning). The evaluation (issue #179, scope
+item 6: batch size 1, the same 200 problems, a 256-token canvas, on a rented card) has not run, so there are no vLLM
+rows in this document. If the harness's number differs from vLLM's published figures by more than 25 percent on the
+same card class, explain it here (prompt length, canvas, checkpoint) when the arm lands.
+
+## Limits of this evidence
+
+- One machine: a 13th Gen Intel i5-13420H laptop for the CPU tables, with an
+  RTX 3050 6 GB laptop GPU for the GPU tables. Another CPU, memory speed or
+  GPU can change the ratios.
+- The four main tables use the median of 3 runs on each of 3 prompts (9 runs);
+  the forward-pass tables use 2 or 3 runs on one prompt; the quality table is a
+  single run per cell. Each table has one model file and one quantization
+  (Q4_K_M).
+- The schedules differ between runtimes (see above), so tokens / s compares
+  runtimes at one step count, not at one output quality.
+- Each table names its commit in a `Versions` or `Evidence` line, except the two
+  forward-pass tables, whose commits are in their evidence files. They differ,
+  because the evidence was recorded as the work went on; no single commit holds
+  all of it, and the release tag is not one of them.
+- The quality column counts immediate repeated words on two prompts. It is not
+  a perplexity or a task score. The only task evidence is the GSM8K run for
+  `--threshold` and `--dual-cache` on LLaDA.
+- diffuse-cpp loads its own conversion of the model, so its rows are indicative.
+- No binary is published yet ([#105](https://github.com/vladimirrott/mojo-dllm/issues/105)): you build from source.
 
 ## Reading the numbers
 

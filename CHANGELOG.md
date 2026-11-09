@@ -8,6 +8,38 @@ semantic versioning (0.y: minor bumps may break things).
 
 ### Added
 
+- `bench/engines/vllm.py`, an engine for `bench/eval_engine.py` that answers GSM8K through the OpenAI-compatible
+  endpoint of a running vLLM server (issue #179): `--engine vllm --base-url URL --served-model NAME --quantization Q`
+  (and the declared `--checkpoint`, `--attention-backend`, `--chat-template`). It sends one chat message at
+  temperature 0 and never starts or stops a server. `version` records the release `GET /version` reports plus the
+  declared checkpoint, quantization and attention backend, and the arm's `model` carries the quantization so
+  `compare --across-weights` sees different weights. `forward_passes` is the change of vLLM's
+  `vllm:diffusion_num_denoising_steps` counter (read under that name and under its `_total` exposition name) across
+  one request, null when the server has none, and refused unless `--max-num-seqs 1` is declared, because the counter
+  is server-wide. Server text in errors is stripped of control characters and capped, and the arm's `--model` must
+  equal the server's reported `root` or served name. The
+  run is refused for a served model the server does not list, an HTTP error, an empty completion or a response
+  with no token counts. `flags` says `"server": "remote"`: the isolation checks see only the client machine.
+  `bench/engines/_http.py` is the shared standard-library client (no credentials, no cookies, no redirects, no
+  retries, no environment proxy unless asked, a size bound and one deadline per request). `docs/benchmarks.md` has
+  the runbook (rent, serve, run, destroy) with the recipe page's serve commands as read on 2026-11-09. No server
+  was run and the evaluation on a rented GPU has not happened.
+- `bench/engines/hf.py`, an engine for `bench/eval_engine.py` that runs GSM8K through the authors' own sampling
+  code (issue #178): `generate` from a checkout of ML-GSAI/LLaDA (`--llada-repo`, imported and never copied) and
+  `diffusion_generate` from Dream's remote code, at temperature 0 with steps equal to the generation length.
+  Options: `--hf-model`, `--quant none|4bit`, `--model-revision` and the shared `--device`. Each row's `version`
+  records the model repository's commit sha (`null` when none was given), the LLaDA checkout's commit and the
+  `transformers`, `torch` and `bitsandbytes` versions; `flags` records where a Dream run departs from its README.
+  The adapter imports `torch` and `transformers` only when it loads a model, so the frozen environment and CI
+  never need them. `eval_gsm8k.py compare --across-weights` compares arms that ran different model files and writes
+  both names and `weights_differ` (`compare` writes `models` and `weights_differ` on every run now, and still
+  refuses different models without the flag). `docs/benchmarks.md` explains why the arm's accuracy includes
+  quantization and how to set up one environment per model. A Hugging Face repository now needs
+  `--model-revision` (or `--allow-unpinned`), because the loader runs the repository's Python; the arm's `model`
+  includes `|4bit` so `compare` sees quantization; the load is refused before `from_pretrained` when `MemAvailable` is below an estimate from the weights'
+  size (and when that size or `/proc/meminfo` is unknown), and the preflight after the load asks for the 3 GB of
+  working memory only. The memory-fit spike and the GSM8K arm of #178 have
+  not run.
 - `scripts/capped.sh` runs a command in its own memory-capped systemd scope: a hard cap, no swap and a
   whole-scope kill on an OOM, so a job that outgrows the machine dies alone instead of taking its terminal with
   it. It refuses to start when less memory is available than the job needs or when the user manager cannot
@@ -58,8 +90,14 @@ semantic versioning (0.y: minor bumps may break things).
   layer-scalar regions, the tied Q6_K head and the soft cap. `mojo-dllm logits`
   runs it. A numpy forward pass written from the llama.cpp branch
   (`scripts/dg_numpy.py`) checks it on a tiny fixture: most rows agree to 2e-7,
-  a few to 7e-3 where an int8 rounding step lands on a tie. The prompt K/V cache
-  path, self-conditioning and the real-file parity record follow in #64.
+  a few to 7e-3 where an int8 rounding step lands on a tie. `prefill` and `step`
+  run the prompt once and then the canvas against its cached K and V; they agree
+  with the unified pass bit for bit on the tiny model. `forward_sc` and `step_sc`
+  add self-conditioning: the previous step's logits, softmaxed at the previous
+  temperature, go through the transposed embedding table and the `self_cond`
+  MLP into the canvas embedding. `logits --path cached --prev FILE
+  --prev-temp-inv X` reaches all four. The real-file parity record follows in
+  #64.
 - Fused elementwise kernels on the GPU: the residual add, the RMSNorm and the
   activation quantization run as one launch (three per layer boundary plus
   the first norm), and `silu(g) * u` is quantized in the same launch as the

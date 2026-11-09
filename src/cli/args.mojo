@@ -134,6 +134,90 @@ def unknown_flag_error(
     return text + "\nsee: mojo-dllm " + command + " --help"
 
 
+def env_name(flag: String) -> String:
+    """The environment variable a flag reads its value from.
+
+    `MOJO_DLLM_` plus the flag name upper-cased with `-` turned into `_`, so
+    `max-tokens` gives `MOJO_DLLM_MAX_TOKENS`. Flag names are ASCII (they are
+    literals in `command_spec`), so the case map walks bytes rather than
+    relying on a Unicode-aware upper.
+    """
+    var out = "MOJO_DLLM_"
+    for b in flag.as_bytes():
+        var c = Int(b)
+        if c >= 97 and c <= 122:  # a-z -> A-Z
+            c -= 32
+        elif c == 45:  # '-' -> '_'
+            c = 95
+        out += chr(c)
+    return out^
+
+
+def env_flags() -> List[String]:
+    """The ten value flags of `run` the environment may fill, in order.
+
+    Booleans (`--json`, `--visual`, …), `--prompt` and `--visual-interval`
+    get no variable: the first take no value to read and the other two are
+    the request itself, not a run setting. Each flag here is a declared
+    value flag of `run`, which `test_env_flags_are_value_flags_of_run`
+    cross-checks against `command_spec`.
+    """
+    return List[String](
+        [
+            "model",
+            "max-tokens",
+            "steps",
+            "block-length",
+            "seed",
+            "temperature",
+            "threads",
+            "device",
+            "remasking",
+            "threshold",
+        ]
+    )
+
+
+def with_env(
+    raw: List[String],
+    value_flags: List[String],
+    boolean_flags: List[String],
+    env: Dict[String, String],
+) raises -> Tuple[List[String], List[String]]:
+    """Fill absent `env_flags()` from `env`, returning the new argv and names.
+
+    Builds `Args(raw, …)` and, for each flag in `env_flags()` that the parse
+    reports absent and whose `env[env_name(flag)]` is non-empty, collects the
+    pair `--flag value`. The pairs go right after the command word
+    (`raw[0]`, `raw[1]`, the pairs, then `raw[2:]`), so a value flag that was
+    last on the command line still trips its `needs a value` error.
+
+    "Absent" comes from `Args`, not a text scan of `raw`: in
+    `run --prompt --steps`, `--steps` is the *value* of `--prompt`, and a scan
+    would mistake it for the flag being present. An empty value counts as
+    unset, as `NO_COLOR` does. The second element names the flags that came
+    from the environment, so a caller can report them.
+    """
+    var a = Args(raw, value_flags, boolean_flags)
+    var argv = List[String]()
+    var names = List[String]()
+    argv.append(raw[0])
+    if len(raw) > 1:
+        argv.append(raw[1])
+    for flag in env_flags():
+        if a.has(flag):
+            continue
+        var value = env.get(env_name(flag), "")
+        if value.byte_length() == 0:
+            continue
+        argv.append("--" + flag)
+        argv.append(value)
+        names.append(flag)
+    for i in range(2, len(raw)):
+        argv.append(raw[i])
+    return (argv^, names^)
+
+
 def parse_csv_ints(s: String) raises -> List[Int]:
     var out = List[Int]()
     for part in s.split(","):

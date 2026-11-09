@@ -793,6 +793,9 @@ DG_CASES = {
     # prompt rows and the canvas reaches only the last 127 prompt tokens in the sliding layer.
     "p9": dict(prompt=9, seed=7),
     "p150": dict(prompt=150, seed=8),
+    # Prompt of 9 with self-conditioning: the previous step's logits are those of another canvas over the
+    # same prompt, taken one denoising step back at temperature 0.8.
+    "p9sc": dict(prompt=9, seed=7, prev_seed=99, prev_temp_inv=1.0 / 0.8),
 }
 
 
@@ -802,12 +805,25 @@ def dg_cases() -> None:
     model = dg_numpy.Model(OUT / "tiny-diffusion-gemma.gguf")
     for name, case in DG_CASES.items():
         tokens = dg_numpy.tiny_tokens(model, case["prompt"], case["seed"])
+        prev = None
+        temp_inv = np.float32(1.0)
+        if "prev_seed" in case:
+            earlier = dg_numpy.tiny_tokens(model, case["prompt"], case["prev_seed"])
+            prev = dg_numpy.forward(model, earlier, case["prompt"], quant=True)
+            temp_inv = np.float32(case["prev_temp_inv"])
         trace: list = []
-        expected = dg_numpy.forward(model, tokens, case["prompt"], quant=True, trace=trace)
+        expected = dg_numpy.forward(
+            model, tokens, case["prompt"], quant=True, trace=trace, prev_logits=prev,
+            prev_temp_inv=float(temp_inv),
+        )
         keep = trace if case["prompt"] < model.window else []  # the long case checks the logits only
-        blob = [np.array([len(tokens), case["prompt"], 0], np.int32).tobytes(), np.float32(1.0).tobytes(),
-                np.array([len(keep)], np.int32).tobytes(), np.array(tokens, np.int32).tobytes(),
-                expected.astype("<f4").tobytes()] + [layer.astype("<f4").tobytes() for layer in keep]
+        blob = [np.array([len(tokens), case["prompt"], 0 if prev is None else 1], np.int32).tobytes(),
+                temp_inv.tobytes(), np.array([len(keep)], np.int32).tobytes(),
+                np.array(tokens, np.int32).tobytes()]
+        if prev is not None:
+            blob.append(prev.astype("<f4").tobytes())
+        blob.append(expected.astype("<f4").tobytes())
+        blob += [layer.astype("<f4").tobytes() for layer in keep]
         (OUT / f"tiny-diffusion-gemma.{name}.case").write_bytes(b"".join(blob))
 
 

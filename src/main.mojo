@@ -11,6 +11,7 @@
     mojo-dllm tokenize --model M --prompt TEXT [--no-chat]
     mojo-dllm inspect  MODEL.gguf
     mojo-dllm logits   --model M --tokens 1,2,3 --rows 0,2 --out logits.f32 [--threads N] [--device cpu|gpu]
+                       [--path unified|cached] [--prev FILE --prev-temp-inv X]
 """
 
 from std.ffi import ErrNo, external_call, c_int
@@ -35,7 +36,8 @@ from mojo_dllm.models.transformer import (
     ModelConfig,
     GEMMA_ARCH,
 )
-from mojo_dllm.sys.mem import Bytes, Floats
+from mojo_dllm.sys.mem import Bytes, F32Ptr, Floats
+from mojo_dllm.sys.mmap import Mapping
 from mojo_dllm.tokenizer.bpe import Tokenizer
 from mojo_dllm.tokenizer.gemma4 import gemma4_chat_prompt
 
@@ -105,7 +107,17 @@ def command_spec(command: String) raises -> CommandSpec:
         return CommandSpec([], [], [], takes_path=True)
     if command == "logits":
         return CommandSpec(
-            ["model", "tokens", "rows", "out", "threads", "device"],
+            [
+                "model",
+                "tokens",
+                "rows",
+                "out",
+                "threads",
+                "device",
+                "path",
+                "prev",
+                "prev-temp-inv",
+            ],
             [],
             ["model", "tokens", "rows", "out"],
         )
@@ -135,7 +147,9 @@ def command_usage(command: String) raises -> String:
     if command == "logits":
         return (
             "  mojo-dllm logits --model M --tokens IDS --rows POS --out FILE"
-            " [--threads N] [--device cpu|gpu]"
+            " [--threads N] [--device cpu|gpu]\n"
+            + "                   [--path unified|cached] [--prev FILE"
+            " --prev-temp-inv X]"
         )
     raise Error("unknown command: " + command)
 
@@ -855,7 +869,19 @@ def cmd_logits(a: Args) raises:
                 GEMMA_ARCH
                 + " runs on the CPU only: there is no GPU forward pass yet"
             )
-        _logits_gemma(a.get("model"), threads, tokens, rows, a.get("out"))
+        var inv = Float32(a.float_or("prev-temp-inv", 0.0))
+        _logits_gemma(
+            a.get("model"),
+            threads,
+            tokens,
+            rows,
+            a.get("out"),
+            a.get_or("path", "unified"),
+            a.get_or("prev", ""),
+            inv,
+        )
+    elif gemma_only_flags(a).byte_length() > 0:
+        raise Error(gemma_only_flags(a) + " apply to " + GEMMA_ARCH + " only")
     elif device == "gpu":
         var gm = GpuDiffusionLM(a.get("model"), max_tokens=len(tokens))
         _logits(gm, tokens, rows, a.get("out"))
@@ -868,20 +894,40 @@ def cmd_logits(a: Args) raises:
         raise Error("unknown device: " + device + " (expected cpu or gpu)")
 
 
+def gemma_only_flags(a: Args) -> String:
+    """The `logits` flags that only a diffusion-gemma model takes, as given."""
+    var given = String("")
+    for name in ["path", "prev", "prev-temp-inv"]:
+        if a.has(name):
+            given += ("" if given.byte_length() == 0 else ", ") + "--" + name
+    return given
+
+
 def _logits_gemma(
     path: String,
     threads: Int,
     tokens: List[Int],
     rows: List[Int],
     out_path: String,
+    path_kind: String = "unified",
+    prev_path: String = "",
+    prev_temp_inv: Float32 = 0.0,
 ) raises:
-    """`logits` for diffusion-gemma: one unified pass over [prompt | canvas].
+    """`logits` for diffusion-gemma: one pass over [prompt | canvas].
 
     --tokens is the prompt followed by the canvas, so the canvas is the last
     `diffusion.canvas_length` tokens and the prompt is whatever precedes it.
     The model scores only the canvas rows, so --rows must name exactly those
-    positions, and the file holds [canvas, vocab] f32.
+    positions, and the file holds [canvas, vocab] f32. `--path unified` runs
+    the prompt and canvas in one pass, `cached` prefills the prompt and steps
+    the canvas against its K/V. `--prev` names the previous step's canvas
+    logits (a file of [canvas, vocab] f32) and `--prev-temp-inv` is 1 / the
+    previous temperature: both turn self-conditioning on.
     """
+    if (prev_path.byte_length() > 0) != (prev_temp_inv != 0.0):
+        raise Error("--prev and --prev-temp-inv go together")
+    if path_kind != "unified" and path_kind != "cached":
+        raise Error("--path is unified or cached, got '" + path_kind + "'")
     var m = DiffusionGemma(path, threads=threads, max_tokens=len(tokens))
     var c = m.config()
     var first = len(tokens) - c.canvas
@@ -902,7 +948,43 @@ def _logits_gemma(
             + given
         )
     var out = Floats(c.canvas * c.vocab)
-    m.forward(tokens, out.ptr())
+    var n = c.canvas * c.vocab
+    var conditioned = prev_path.byte_length() > 0
+    if conditioned:
+        var prev = Mapping(prev_path)
+        if prev.size != n * 4:
+            raise Error(
+                prev_path
+                + " holds "
+                + String(prev.size)
+                + " bytes, expected "
+                + String(n * 4)
+                + " (canvas "
+                + String(c.canvas)
+                + " x vocab "
+                + String(c.vocab)
+                + " f32)"
+            )
+        var src = F32Ptr(unsafe_from_address=prev.addr)
+        for i in range(n):
+            out[i] = src.unsafe_load(i)
+    if path_kind == "cached":
+        var prompt = List[Int]()
+        var canvas = List[Int]()
+        for i in range(len(tokens)):
+            if i < first:
+                prompt.append(tokens[i])
+            else:
+                canvas.append(tokens[i])
+        m.prefill(prompt)
+        if conditioned:
+            m.step_sc(canvas, out.ptr(), prev_temp_inv)
+        else:
+            m.step(canvas, out.ptr())
+    elif conditioned:
+        m.forward_sc(tokens, out.ptr(), prev_temp_inv)
+    else:
+        m.forward(tokens, out.ptr())
     with open(out_path, "w") as f:
         var p = out.ptr().unsafe_bitcast[UInt8]()
         f.write_bytes(Span(unsafe_ptr=p, length=c.canvas * c.vocab * 4))

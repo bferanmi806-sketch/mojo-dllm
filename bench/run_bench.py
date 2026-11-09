@@ -13,7 +13,12 @@ Measurement hygiene, all recorded in the output:
   * runs are interleaved (A B C, A B C, ...) so drift hits every runtime;
   * each run starts when a two-second sample shows the CPU under `busy_threshold`
     busy, or after `max_quiet_wait_s` seconds; the busy fraction is recorded as
-    `cpu_busy_before`;
+    `cpu_busy_before`. The check is the shared one in bench/isolation.py, which also looks at pressure
+    stalls, swap and, for a GPU runtime, the GPU's other processes;
+  * each run happens inside an isolation window (bench/isolation.py): other CPU, swap, thermal or GPU
+    activity makes the run `noisy` and it is repeated up to `--isolation-retries` times (default 2); the
+    window is recorded as `isolation`, and the preflight and a system snapshot go to
+    bench/results/env/NAME.env.json. `--allow-noisy` continues after a failed preflight;
   * a watchdog kills any process named exactly `pytest` while the benchmark
     runs (other sessions on this machine launch test suites that would
     otherwise compete for the CPU) and logs every kill. A config can turn it
@@ -45,6 +50,7 @@ import time
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "bench"))
+import isolation  # noqa: E402  (bench/isolation.py)
 import power  # noqa: E402  (bench/power.py)
 
 
@@ -90,32 +96,13 @@ def mojo_version() -> str:
 
 
 def cpu_busy(sample_s: float = 2.0) -> float:
-    """Fraction of all CPU time spent busy over a short sample (0..1).
-
-    The load average is the wrong signal between runs: it is a 1-minute
-    moving average, so it still carries the previous benchmark run and makes
-    every run wait for its own predecessor to decay.
-    """
-
-    def snap() -> tuple[int, int]:
-        f = pathlib.Path("/proc/stat").read_text().splitlines()[0].split()[1:]
-        vals = [int(x) for x in f]
-        idle = vals[3] + vals[4]
-        return sum(vals), idle
-
-    t1, i1 = snap()
-    time.sleep(sample_s)
-    t2, i2 = snap()
-    return 1.0 - (i2 - i1) / max(t2 - t1, 1)
+    """Fraction of all CPU time spent busy over a short sample (0..1); see isolation.cpu_busy."""
+    return isolation.cpu_busy(sample_s)
 
 
 def wait_for_quiet(threshold: float, max_wait: float) -> tuple[float, float]:
-    t0 = time.time()
-    while True:
-        busy = cpu_busy()
-        if busy < threshold or time.time() - t0 > max_wait:
-            return busy, time.time() - t0
-        time.sleep(3)
+    """(busy fraction, seconds waited): start under `threshold`, or after `max_wait`; see isolation.wait_for_quiet."""
+    return isolation.wait_for_quiet(threshold, max_wait)
 
 
 def timed(cmd: list[str]) -> tuple[int, str, str, float, int]:
@@ -151,6 +138,37 @@ def run_mojo(c: dict, prompt: str, threads: int, extra: list[str]) -> dict:
     )
 
 
+def cuda_layer_error(output: str) -> str | None:
+    """Why a CUDA llama.cpp run does not count as one, or None when every layer was on the GPU.
+
+    A CUDA build that fails to find the GPU falls back to the CPU and still prints a timing; that is
+    refused rather than labelled CUDA. With -v, llama.cpp names the device of every layer it loads.
+    """
+    devices = re.findall(r"layer\s+\d+ assigned to device (\w+)", output)
+    if not devices or any(not d.startswith("CUDA") for d in devices):
+        return f"CUDA run did not put every layer on the GPU: {sorted(set(devices))}"
+    return None
+
+
+def parse_llama_output(output: str) -> dict | None:
+    """llama-diffusion-cli's timing line and the text after it, or None when there is no timing line.
+
+    diffusion-cli prints the timing line from inside the generator, then logs the text; its trailing
+    llama_perf/teardown lines are dropped, and so are the timestamped log lines that -v (CUDA runs) adds,
+    such as "0.01.487.312 D load_tensors: ...".
+    """
+    # newer llama.cpp appends ", sampling time per step: Zms" to the line; it is not text
+    m = re.search(r"total time: ([0-9.]+)ms, time per step: ([0-9.]+)ms(?:, sampling time per step: [0-9.]+ms)?",
+                  output)
+    if not m:
+        return None
+    text = "\n".join(
+        l for l in output[m.end():].splitlines()
+        if not l.startswith(("llama_", "common_", "main:")) and not re.match(r"\d+\.\d+\.\d+\.\d+ [DIWE] ", l)
+    ).strip()
+    return dict(total_s=float(m.group(1)) / 1000.0, ms_per_step=float(m.group(2)), text=text)
+
+
 def run_llama(c: dict, prompt: str, threads: int, seq_len: int, cuda: bool = False) -> dict:
     """llama.cpp's diffusion example; with cuda, the build-cuda tree and every layer offloaded."""
     build = "build-cuda" if cuda else "build"
@@ -162,29 +180,17 @@ def run_llama(c: dict, prompt: str, threads: int, seq_len: int, cuda: bool = Fal
     ] + (["-ngl", "99", "-v"] if cuda else [])
     rc, out, err, wall, rss = timed(cmd)
     if cuda:
-        # A CUDA build that fails to find the GPU falls back to the CPU and
-        # still prints a timing; refuse that rather than label it CUDA. With
-        # -v, llama.cpp names the device of every layer it loads.
-        devices = re.findall(r"layer\s+\d+ assigned to device (\w+)", err + out)
-        if not devices or any(not d.startswith("CUDA") for d in devices):
-            return dict(ok=False, rc=rc, error=f"CUDA run did not put every layer on the GPU: {sorted(set(devices))}")
-    m = re.search(r"total time: ([0-9.]+)ms, time per step: ([0-9.]+)ms", err + out)
-    if rc != 0 or not m:
+        bad = cuda_layer_error(err + out)
+        if bad:
+            return dict(ok=False, rc=rc, error=bad)
+    parsed = parse_llama_output(err + out)
+    if rc != 0 or not parsed:
         return dict(ok=False, rc=rc, error=(err or out)[-400:])
-    total = float(m.group(1)) / 1000.0
-    # diffusion-cli prints the timing line from inside the generator, then logs
-    # the text; drop its trailing llama_perf/teardown lines.
-    tail = (err + out)[m.end():]
-    # With -v (CUDA runs) llama.cpp also prints timestamped log lines such as
-    # "0.01.487.312 D load_tensors: ..."; drop those too.
-    text = "\n".join(
-        l for l in tail.splitlines()
-        if not l.startswith(("llama_", "common_", "main:")) and not re.match(r"\d+\.\d+\.\d+\.\d+ [DIWE] ", l)
-    ).strip()
+    total = parsed["total_s"]
     return dict(
         ok=True, wall_s=wall, peak_rss_bytes=rss, generate_s=total,
-        ms_per_step=float(m.group(2)), forward_passes=c["steps"], startup_s=wall - total,
-        seq_len=seq_len, text=text[-600:],
+        ms_per_step=parsed["ms_per_step"], forward_passes=c["steps"], startup_s=wall - total,
+        seq_len=seq_len, text=parsed["text"][-600:],
     )
 
 
@@ -282,6 +288,10 @@ def main() -> int:
     ap.add_argument("--only", default="", help="comma list of runtimes to run")
     ap.add_argument("--allow-battery", action="store_true",
                     help="measure on battery instead of pausing (each run records on_battery)")
+    ap.add_argument("--allow-noisy", action="store_true",
+                    help="continue after a failed isolation preflight (recorded in the env file)")
+    ap.add_argument("--isolation-retries", type=int, default=2,
+                    help="repeat a run whose isolation window was noisy up to this many times (default %(default)s)")
     args = ap.parse_args()
     c = json.loads(pathlib.Path(args.config).read_text())
     # Paths in the config are written with ~ so the committed file names no
@@ -299,6 +309,7 @@ def main() -> int:
     wd = Watchdog("pytest", kills)
     kill_pytest = c.get("kill_pytest", True)
     profile_before = sh("powerprofilesctl get")
+    arm = None
     results: list[dict] = []
     out_path = pathlib.Path(args.out or ROOT / f"bench/results/{dt.date.today().isoformat()}-cpu.json")
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -350,9 +361,8 @@ def main() -> int:
 
     signal.signal(signal.SIGTERM, on_term)
 
-    def one_run(rt: str, p: str, ids: str, n_prompt: int, seq_len: int, threads: int) -> tuple[dict, float, float, str]:
-        """One timed run of one runtime on one prompt, once the CPU is quiet."""
-        load, waited = wait_for_quiet(c["busy_threshold"], c["max_quiet_wait_s"])
+    def one_run(rt: str, p: str, ids: str, n_prompt: int, seq_len: int, threads: int) -> tuple[dict, str]:
+        """One timed run of one runtime on one prompt."""
         t_start = dt.datetime.now().isoformat(timespec="seconds")
         if rt == "mojo-dllm":
             r = run_mojo(c, p, threads, [])
@@ -376,12 +386,19 @@ def main() -> int:
             r = run_diffuse(c, ids, threads, n_prompt, "default")
         else:
             raise SystemExit(f"unknown runtime {rt}")
-        return r, load, waited, t_start
+        return r, t_start
 
     try:
         subprocess.run(["powerprofilesctl", "set", "performance"], check=True)
         if kill_pytest:
             wd.start()
+        device = "gpu" if any("gpu" in r or "cuda" in r for r in runtimes) else "cpu"
+        arm = isolation.begin_arm(
+            out_path.stem, device=device, need_ram_gb=isolation.need_ram_gb(c["models"]["gguf"]),
+            runs_dir=out_path.parent / "env", retries=args.isolation_retries, allow_noisy=args.allow_noisy,
+            allow_battery=args.allow_battery, thresholds=isolation.Thresholds(cpu_busy_max=c["busy_threshold"]),
+            tuned={"previous": profile_before, "set": "performance"}, log=lambda m: print(m, flush=True),
+            versions=versions)
         threads = c["threads"]
         tok_cache: dict[str, tuple[str, int]] = {}
         for p in c["prompts"]:
@@ -398,18 +415,19 @@ def main() -> int:
                 for rt in runtimes:
                     # On battery the run waits for the charger (with the power profile
                     # restored meanwhile), and a run the charger left midway is repeated.
-                    (r, load, waited, t_start), pinfo = power.run_on_mains(
+                    (r, t_start), pinfo = arm.run(
                         lambda: one_run(rt, p, ids, n_prompt, seq_len, threads),
-                        allow_battery=args.allow_battery,
-                        log=lambda m: print(m, flush=True),
+                        max_quiet_wait_s=c["max_quiet_wait_s"], quiet_sample_s=2.0,
                         on_pause=lambda: subprocess.run(["powerprofilesctl", "set", profile_before or "power-saver"]),
                         on_resume=lambda: subprocess.run(["powerprofilesctl", "set", "performance"], check=True),
                     )
+                    load, waited = pinfo["isolation"]["cpu_busy_before"], pinfo["isolation"]["waited_s"]
                     r.update(runtime=rt, prompt_index=pi, rep=rep, started=t_start,
                              cpu_busy_before=round(load, 3), waited_s=round(waited, 1),
                              power_waited_s=round(pinfo["power_waited_s"], 1),
                              power_retries=pinfo["power_retries"], on_battery=pinfo["on_battery"],
                              power_source=pinfo["power_source"], power_supplies=pinfo["power_supplies"],
+                             isolation=pinfo["isolation"],
                              **({"power_root": pinfo["power_root"]} if "power_root" in pinfo else {}))
                     results.append(r)
                     write_doc(partial=True)
@@ -419,8 +437,13 @@ def main() -> int:
                         status = f"{r['ms_per_step']:.0f} ms/step"
                     else:
                         status = f"{r['forward_ms']:.0f} ms/forward"
-                    print(f"rep {rep} prompt {pi} {rt:32s} {status}  busy before {load:.1%}", flush=True)
+                    noisy = "" if pinfo["isolation"]["clean"] else "  NOISY: " + "; ".join(pinfo["isolation"]["reasons"])
+                    print(f"rep {rep} prompt {pi} {rt:32s} {status}  busy before {load:.1%}{noisy}", flush=True)
+    except isolation.IsolationError as e:
+        raise SystemExit(str(e)) from e
     finally:
+        if arm is not None:
+            arm.finish()
         wd.stop.set()
         subprocess.run(["powerprofilesctl", "set", profile_before or "power-saver"])
 

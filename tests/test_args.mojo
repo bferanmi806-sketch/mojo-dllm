@@ -1,11 +1,15 @@
+from std.collections import Dict
 from std.testing import assert_equal, assert_true, assert_raises, TestSuite
 
 from cli.args import (
     Args,
     edit_distance,
+    env_flags,
+    env_name,
     parse_csv_ints,
     suggest_flag,
     unknown_flag_error,
+    with_env,
 )
 
 
@@ -153,6 +157,120 @@ def test_csv_skips_empty_and_strips_whitespace() raises:
     assert_equal(len(parse_csv_ints("")), 0)
     with assert_raises():
         _ = parse_csv_ints("a")
+
+
+def _env_value_flags() -> List[String]:
+    # The value flags of `run` that `env_flags()` covers, plus `prompt` (which
+    # gets no variable) so the parser in the tests matches the real command.
+    return List[String](
+        [
+            "model",
+            "max-tokens",
+            "steps",
+            "block-length",
+            "seed",
+            "temperature",
+            "threads",
+            "device",
+            "remasking",
+            "threshold",
+            "prompt",
+        ]
+    )
+
+
+def test_env_name() raises:
+    assert_equal(env_name("max-tokens"), "MOJO_DLLM_MAX_TOKENS")
+    assert_equal(env_name("model"), "MOJO_DLLM_MODEL")
+
+
+def test_env_fills_an_absent_flag() raises:
+    var env = Dict[String, String]()
+    env["MOJO_DLLM_STEPS"] = "8"
+    var _t = with_env(
+        List[String](["mojo-dllm", "run", "--model", "m"]),
+        _env_value_flags(),
+        List[String](["json"]),
+        env,
+    )
+    var argv = _t[0].copy()
+    var names = _t[1].copy()
+    assert_equal(
+        argv, List[String](["mojo-dllm", "run", "--steps", "8", "--model", "m"])
+    )
+    assert_equal(names, List[String](["steps"]))
+
+
+def test_command_line_beats_env() raises:
+    var env = Dict[String, String]()
+    env["MOJO_DLLM_STEPS"] = "8"
+    var _t = with_env(
+        List[String](["mojo-dllm", "run", "--model", "m", "--steps", "4"]),
+        _env_value_flags(),
+        List[String](["json"]),
+        env,
+    )
+    var argv = _t[0].copy()
+    var names = _t[1].copy()
+    assert_equal(
+        argv,
+        List[String](["mojo-dllm", "run", "--model", "m", "--steps", "4"]),
+    )
+    assert_equal(len(names), 0)
+
+
+def test_empty_env_value_is_unset() raises:
+    var env = Dict[String, String]()
+    env["MOJO_DLLM_STEPS"] = ""
+    var _t = with_env(
+        List[String](["mojo-dllm", "run", "--model", "m"]),
+        _env_value_flags(),
+        List[String](["json"]),
+        env,
+    )
+    var argv = _t[0].copy()
+    var names = _t[1].copy()
+    assert_equal(argv, List[String](["mojo-dllm", "run", "--model", "m"]))
+    assert_equal(len(names), 0)
+
+
+def test_env_never_sets_a_boolean_or_the_prompt() raises:
+    var env = Dict[String, String]()
+    env["MOJO_DLLM_JSON"] = "1"
+    env["MOJO_DLLM_PROMPT"] = "x"
+    env["MOJO_DLLM_VISUAL_INTERVAL"] = "2"
+    var _t = with_env(
+        List[String](["mojo-dllm", "run", "--model", "m"]),
+        _env_value_flags(),
+        List[String](["json"]),
+        env,
+    )
+    var argv = _t[0].copy()
+    var names = _t[1].copy()
+    assert_equal(argv, List[String](["mojo-dllm", "run", "--model", "m"]))
+    assert_equal(len(names), 0)
+
+
+def test_a_flag_like_value_does_not_hide_a_flag() raises:
+    # `--steps` here is the value of `--prompt`; a text scan for "--steps"
+    # would misread it as present and skip the environment fill.
+    var env = Dict[String, String]()
+    env["MOJO_DLLM_STEPS"] = "8"
+    var _t = with_env(
+        List[String](["mojo-dllm", "run", "--prompt", "--steps"]),
+        _env_value_flags(),
+        List[String](["json"]),
+        env,
+    )
+    var argv = _t[0].copy()
+    var names = _t[1].copy()
+    assert_equal(
+        argv,
+        List[String](
+            ["mojo-dllm", "run", "--steps", "8", "--prompt", "--steps"]
+        ),
+    )
+    assert_equal(names, List[String](["steps"]))
 
 
 def main() raises:
