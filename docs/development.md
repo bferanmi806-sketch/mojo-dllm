@@ -21,10 +21,10 @@ machine with a GPU, the GPU tests that CI only builds:
 
 | Step | Command | Fails when |
 |---|---|---|
-| hygiene | `scripts/check_hygiene.sh --tracked` | a credential pattern (a provider token, a private key block, a database URL with a password) or the author's employer name appears in tracked text, or a tracked Markdown file outside `bench/results/` holds an em or en dash (files whose names git quotes are skipped, [#140](https://github.com/vladimirrott/mojo-dllm/issues/140)) |
-| format | `uv run --frozen mojo format -q src tests bench`, then `git diff` | `mojo format` changes any file (Mojo has no check mode) |
+| hygiene | `scripts/check_hygiene.sh --tracked` | a credential pattern (a provider token, a private key block, a database URL with a password) or the author's employer name appears in tracked text, or a tracked Markdown file outside `bench/results/` holds an em or en dash; file names are read NUL separated, so a name with non-ASCII or special characters is scanned too) |
+| format | `scripts/check_format.sh` (`mojo format -q src tests bench`, comparing every file before and after) | `mojo format` changes any file, an untracked one included (Mojo has no check mode) |
 | build | `scripts/build.sh` | any compiler warning (`-Werror`) |
-| tests | `scripts/run-tests.sh` | a test fails, a file runs zero tests, or the total differs from `tests/test-count.txt` |
+| tests | `scripts/run-tests.sh` | a test fails, a file runs zero tests, the total differs from `tests/test-count.txt`, or a file's count differs from `tests/test-counts.txt` |
 | launcher tests | `uv run --locked --only-group test pytest tests/python -q` | a test of the `./mojo-dllm` launcher fails |
 | script lock | `uv lock --script mojo-dllm --check` | `mojo-dllm.lock` is missing, or the `# dependencies` header of `./mojo-dllm` no longer matches it. After you change the pin, run `uv lock --script mojo-dllm` and commit the lock |
 | shellcheck, yamllint, markdownlint | `shellcheck --severity=warning scripts/*.sh .githooks/*`; `uv run --frozen --only-group lint yamllint --strict .github`; `markdownlint-cli2 "*.md" "docs/**/*.md" "assets/*.md" ".github/*.md" "#node_modules"` | any of the three reports a finding |
@@ -36,8 +36,8 @@ machine with a GPU, the GPU tests that CI only builds:
 | no GPU | `scripts/check_no_gpu.sh` | `--device gpu` without a GPU does anything but exit 1 with a message |
 | visual options | `scripts/check_visual.sh` | an invalid `--visual-interval` does not exit 1, or `--json` with `--visual` does not exit 2, with a message naming the flag before model loading |
 | fixtures | `uv run --frozen --only-group fixtures python scripts/check_fixtures.py` | `scripts/gen_fixtures.py` or `scripts/gen_moe_fixture.py` writes a file that differs from the tracked one (they run into a scratch directory), a file that is not tracked, or a tracked fixture that no generator writes and that is not a tokenizer fixture, a tokenizer golden or `golden-generation.tsv` |
-| GPU test count | `scripts/check_gpu_test_count.sh` | the `def test_` functions of `tests/gpu/test_*.mojo` number other than `tests/gpu/test-count.txt` pins, or a file defines none; needs no GPU, runs in CI and `ci-local.sh` |
-| GPU tests | `scripts/run-gpu-tests.sh` (local only) | a GPU kernel or the GPU forward pass disagrees with the CPU or the f32 reference, or the count differs from `tests/gpu/test-count.txt` |
+| GPU test count | `scripts/check_gpu_test_count.sh` | the `def test_` functions of `tests/gpu/test_*.mojo` number other than `tests/gpu/test-count.txt` pins or differ per file from `tests/gpu/test-counts.txt`, or a file defines none; needs no GPU, runs in CI and `ci-local.sh` |
+| GPU tests | `scripts/run-gpu-tests.sh` (local only) | a GPU kernel or the GPU forward pass disagrees with the CPU or the f32 reference, or the count differs from `tests/gpu/test-count.txt` or `tests/gpu/test-counts.txt` |
 
 GitHub's runners have no GPU, so CI builds the GPU suite without running it.
 `ci-local.sh` runs it when `nvidia-smi` lists a GPU and otherwise builds it and
@@ -69,7 +69,7 @@ live in `tests/fixtures/` and come from scripts, never from hand:
 
 | Fixture | Made by | Checks |
 |---|---|---|
-| `kquants.gguf`, `bad-magic.gguf`, `tiny-llada.gguf`, `tiny-llada.expected.f32`, `tiny-dream.gguf`, `tiny-dream.expected.f32`, `malformed/`, `metadata/` | `scripts/gen_fixtures.py` | GGUF parsing and rejection, decoders, `ModelConfig` validation, the forward pass against a numpy reference |
+| `kquants.gguf`, `bad-magic.gguf`, `tiny-llada.gguf`, `tiny-llada.expected.f32`, `tiny-dream.gguf`, `tiny-dream.expected.f32`, `malformed/`, `metadata/`, `gen_fixtures.manifest` | `scripts/gen_fixtures.py` | GGUF parsing and rejection, decoders, `ModelConfig` validation, the forward pass against a numpy reference |
 | `tiny-diffusion-gemma.gguf`, `diffusion-gemma/` | `scripts/gen_fixtures.py` | the `diffusion-gemma` config (seed 610061): a 2-layer model with one sliding and one global layer, 4 experts, the tensor names and types of the real file, and one file per refusal (metadata only, or zero-filled tensors) |
 | `tiny-diffusion-gemma.p0sc.case`, `.p9.case`, `.p9sc.case`, `.p150.case`, `.p150sc.case` (`tiny-diffusion-gemma.*.case`) | `scripts/gen_fixtures.py` (the forward pass is `scripts/dg_numpy.py`) | the tokens and numpy logits that `logits` on the tiny DiffusionGemma file must reproduce, for a prompt of 0, 9 and 150 tokens, with and without self-conditioning (`sc`) |
 | `entropy-rows.tsv` | `scripts/gen_fixtures.py` (seed 65065, so no other fixture changes) | logits rows with the numpy f64 argmax, entropy and inverse-CDF draw that `tests/test_entropy_bound.mojo` pins |
@@ -251,6 +251,18 @@ It excludes a warmup pair per generation length, records every raw run, and
 rejects failures or mismatched forward counts and canvas sizes. It leaves the
 system power profile and other processes alone. Keep each pair on the same
 GPU; another GPU can run a different model's independent comparison.
+
+Both tools, and `scripts/compare_logits.py`, refuse a base and a new that are
+the same checkout, the same clean commit or byte-identical binaries, and record
+the SHA-256 of each `build/mojo-dllm` in the evidence, because a stale build
+carries the label of whatever commit is checked out. `compare_gpu.py` sets
+`CUDA_DEVICE_ORDER=PCI_BUS_ID` so that `--gpu` (an index or a `GPU-` uuid)
+names the same card to CUDA and to `nvidia-smi`, records the index and the
+uuid read back from `nvidia-smi`, and runs the isolation preflight and a
+window around each run of `bench/isolation.py`
+(`--allow-noisy` continues after a failed preflight). `check_gpu_dispatch.py`
+records `CUDA_VISIBLE_DEVICES` and `CUDA_DEVICE_ORDER` as it found them, so
+export `CUDA_DEVICE_ORDER=PCI_BUS_ID` there too.
 
 ```bash
 python3 bench/compare_gpu.py --base ../base --new . --model MODEL.gguf \

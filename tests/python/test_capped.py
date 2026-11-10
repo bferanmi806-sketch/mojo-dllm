@@ -171,7 +171,12 @@ def test_refuses_when_less_memory_is_available_than_the_cap(tmp_path: Path) -> N
     out = dry(["--mem", "27G"], tmp_path, avail_gib=12)
     assert out.returncode == 75
     assert "echo" not in out.stdout
-    assert "12" in out.stderr and "27" in out.stderr
+    assert "refusing to start: 12.0G available, 27G needed." in out.stderr
+
+
+def test_the_refusal_names_the_need_when_it_differs_from_the_cap(tmp_path: Path) -> None:
+    out = dry(["--mem", "27G", "--need", "20G"], tmp_path, avail_gib=12)
+    assert out.returncode == 75 and "refusing to start: 12.0G available, 20G needed." in out.stderr
 
 
 def test_need_replaces_the_cap_in_the_gate(tmp_path: Path) -> None:

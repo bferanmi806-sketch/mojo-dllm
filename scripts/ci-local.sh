@@ -72,18 +72,8 @@ hygiene() {
     fi
 }
 fmt_check() {
-    # Compare the tree before and after formatting, so uncommitted edits that
-    # are already formatted pass and only formatter changes fail.
-    need "${MOJO%% *}" || return 1
-    local before after
-    before="$(git diff -- src tests bench | sha256sum)"
-    $MOJO format -q src tests bench || return 1
-    after="$(git diff -- src tests bench | sha256sum)"
-    if [ "$before" != "$after" ]; then
-        echo "mojo format changed files; review and commit the result" >&2
-        git diff --stat -- src tests bench >&2
-        return 1
-    fi
+    # scripts/check_format.sh compares file contents before and after formatting, so untracked files count.
+    bash scripts/check_format.sh
 }
 build() {
     need "${MOJO%% *}" || return 1
@@ -143,7 +133,8 @@ if [ "$mode" = full ]; then
     step "markdownlint" md_lint
     step "launcher tests" launcher_tests
     step "launcher script lock is current" script_lock
-    step "README numbers match bench/results" claims
+    step "tests that need the fixtures and lint groups" bash scripts/run_extra_group_tests.sh
+    step "published numbers match their evidence (tables, GSM8K and checker self-tests)" claims
     step "fixtures match their generators" fixtures_match
     step "docs build + links" docs_build
     step "action pins match their tags" action_pins

@@ -77,9 +77,8 @@ if [ ! -d "$src/.git" ]; then
     git init -q "$src" || die "git init failed in $src"
 fi
 if ! git -C "$src" cat-file -e "$commit^{commit}" 2>/dev/null; then
-    git -C "$src" remote remove origin 2>/dev/null
-    git -C "$src" remote add origin "$remote" || die "cannot add the remote $remote"
-    git -C "$src" fetch -q --depth 1 origin "$commit" ||
+    # Fetched by URL: DG_LLAMA_SRC may be a clone the user already has, and its remotes are theirs.
+    git -C "$src" fetch -q --depth 1 "$remote" "$commit" ||
         die "could not fetch commit $commit from $remote"
 fi
 git -C "$src" checkout -q --detach "$commit" || die "could not check out $commit in $src"

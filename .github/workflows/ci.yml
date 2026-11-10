@@ -45,6 +45,10 @@ jobs:
         if: ${{ !cancelled() }}
         run: uv lock --script mojo-dllm --check
 
+      - name: Tests that need the fixtures and lint groups (numpy, gguf, PyYAML)
+        if: ${{ !cancelled() }}
+        run: bash scripts/run_extra_group_tests.sh
+
       - name: Install markdownlint at its exact version
         if: ${{ !cancelled() }}
         run: npm install --global markdownlint-cli2@0.23.2
@@ -66,7 +70,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: markdownlint-cli2 "*.md" "docs/**/*.md" "assets/*.md" ".github/*.md" "#node_modules"
 
-      - name: README benchmark numbers come from bench/results
+      - name: Published benchmark tables match their evidence
         if: ${{ !cancelled() }}
         run: uv run --no-project python scripts/bench_table.py --check
 
@@ -105,8 +109,8 @@ jobs:
       - name: Install the pinned Mojo toolchain
         run: uv sync --frozen
 
-      - name: mojo format (no check mode, so format and diff)
-        run: uv run --frozen mojo format -q src tests bench && git diff --exit-code -- src tests bench
+      - name: mojo format (no check mode, so format and compare file contents)
+        run: bash scripts/check_format.sh
 
       - name: Build with -Werror
         run: bash scripts/build.sh

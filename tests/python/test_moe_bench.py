@@ -36,7 +36,9 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(len(result["samples"]), 3)
 
     def test_rejects_missing_duplicate_or_changed_shape(self):
-        for mutation in ("missing", "duplicate", "shape"):
+        for mutation, message in (("missing", "must contain setup, routing and every sample"),
+                                  ("duplicate", "missing, duplicate or reordered"),
+                                  ("shape", "different shape or thread count")):
             with self.subTest(mutation=mutation):
                 rows = copy.deepcopy(self.rows)
                 if mutation == "missing":
@@ -45,24 +47,25 @@ class EvidenceTests(unittest.TestCase):
                     rows[2]["index"] = -1
                 else:
                     rows[0]["tokens"] = 8
-                with self.assertRaises(ValueError):
+                with self.assertRaisesRegex(ValueError, message):
                     self.parse(rows)
 
     def test_rejects_nonfinite_changed_or_empty_outputs(self):
-        for key, value in (("seconds", float("nan")), ("seconds", 0),
-                           ("checksum", 43.0), ("max_abs", 0)):
+        for key, value, message in (("seconds", float("nan"), "non-finite"), ("seconds", 0, "must be positive"),
+                                    ("checksum", 43.0, "different checksums"), ("max_abs", 0, "must be positive")):
             with self.subTest(key=key, value=value):
                 rows = copy.deepcopy(self.rows)
                 rows[2][key] = value
-                with self.assertRaises(ValueError):
+                with self.assertRaisesRegex(ValueError, message):
                     self.parse(rows)
 
     def test_rejects_dropped_pairs_and_overfull_expert(self):
-        for key, value in (("token_expert_pairs", 31), ("max_tokens_per_expert", 17)):
+        for key, value, message in (("token_expert_pairs", 31, "did not preserve all token-expert pairs"),
+                                    ("max_tokens_per_expert", 17, "invalid per-expert token count")):
             with self.subTest(key=key):
                 rows = copy.deepcopy(self.rows)
                 rows[-1][key] = value
-                with self.assertRaises(ValueError):
+                with self.assertRaisesRegex(ValueError, message):
                     self.parse(rows)
 
 

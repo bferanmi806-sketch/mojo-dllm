@@ -209,7 +209,7 @@ def test_every_command_ci_runs_is_in_ci_local() -> None:
 
 def test_ci_local_runs_no_gate_that_ci_lacks() -> None:
     ci = gates(" ".join(ci_commands()))
-    local = gates(CI_LOCAL.read_text())
+    local = gates(re.sub(r'step "[^"]*"', "step", CI_LOCAL.read_text()))      # a step label names no gate
     extra = {g for g in local - ci if not g.startswith(LOCAL_ONLY)}
     assert extra == set()
     assert gates(" ".join(ci_commands())) - local == set()
@@ -227,6 +227,8 @@ exit 0
 STUB_TOOLS = ("uv", "fakemojo", "shellcheck", "markdownlint-cli2", "mdbook", "gh", "nvidia-smi", "python3")
 STUB_SCRIPTS = (
     "check_hygiene.sh",
+    "check_format.sh",
+    "run_extra_group_tests.sh",
     "build.sh",
     "run-tests.sh",
     "check_no_gpu.sh",
@@ -281,7 +283,7 @@ def test_ci_local_passes_when_every_step_passes(tmp_path: Path) -> None:
     result, calls = run_ci_local(tmp_path)
     assert result.returncode == 0, result.stdout + result.stderr
     lines = summary(result)
-    assert lines[-1] == "ci-local: 17 steps passed, 1 skipped"
+    assert lines[-1] == "ci-local: 18 steps passed, 1 skipped"
     assert "  PASS  launcher tests" in lines and not [l for l in lines if "FAIL" in l]
     assert len(calls) >= 17
 
@@ -293,7 +295,7 @@ def test_without_a_gpu_ci_local_builds_the_gpu_suite_and_records_a_skip(tmp_path
     lines = summary(result)
     assert "  PASS  GPU test suite builds" in lines
     assert any(l.startswith("  SKIP  GPU tests") for l in lines)
-    assert lines[-1] == "ci-local: 17 steps passed, 1 skipped"
+    assert lines[-1] == "ci-local: 18 steps passed, 1 skipped"
 
 
 def test_the_gpu_test_count_is_compared_with_its_pin_on_every_machine(tmp_path: Path) -> None:
@@ -309,7 +311,7 @@ def test_with_a_gpu_ci_local_runs_the_gpu_suite_and_does_not_skip(tmp_path: Path
     result, calls = run_ci_local(tmp_path, gpu="GPU 0: NVIDIA GeForce RTX 3050 (UUID: GPU-x)\n")
     assert any(c.startswith("run-gpu-tests.sh") for c in calls)
     lines = summary(result)
-    assert "  PASS  GPU tests (count pinned)" in lines and lines[-1] == "ci-local: 17 steps passed, 0 skipped"
+    assert "  PASS  GPU tests (count pinned)" in lines and lines[-1] == "ci-local: 18 steps passed, 0 skipped"
 
 
 def test_the_fixture_gate_is_a_step_and_its_failure_is_reported(tmp_path: Path) -> None:
@@ -413,3 +415,8 @@ def test_hygiene_refuses_a_database_url_with_a_password_for_each_scheme(tmp_path
     """Each alternative of the pattern is a separate way to miss a secret."""
     result = run_hygiene(tmp_path, f"URL={scheme}://app:" + "s3cretvalue@db.example.com/app\n")
     assert result.returncode == 1 and "database url" in result.stderr.lower(), scheme
+
+
+def test_a_raw_mojo_format_step_counts_as_a_gate() -> None:
+    assert gates("uv run --frozen mojo format -q src tests bench") == {"mojo format"}
+    assert gates("bash scripts/check_format.sh") == {"scripts/check_format.sh"}

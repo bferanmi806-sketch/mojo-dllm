@@ -3,7 +3,7 @@
 
 usage: python3 scripts/gpu_profile.py --model MODEL.gguf --label NAME [--steps 4] [--max-tokens 128]
                                       [--prompt TEXT] [--out bench/profiles/DATE-NAME.json]
-                                      [--runtime mojo-dllm|llama.cpp] [--seq-len N]
+                                      [--runtime mojo-dllm|llama.cpp] [--seq-len N] [--arch llada|dream] [--block-length 32]
 
 The run is traced with `nsys profile --trace=cuda`, which records every kernel's
 device start and end without synchronizing the stream, unlike
@@ -35,6 +35,7 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "bench"))
 import power  # noqa: E402  (bench/power.py)
+import spec  # noqa: E402  (bench/spec.py)
 IMPORTERS = [
     "/usr/lib/nsight-systems/host-linux-x64/QdstrmImporter",
     "/opt/nvidia/nsight-systems/host-linux-x64/QdstrmImporter",
@@ -82,6 +83,15 @@ def group_of(name: str, groups: list[tuple[str, str]] = GROUPS) -> str:
     return "other:" + re.sub(r"_[0-9a-f]{16}$", "", name)[:60]
 
 
+def mojo_command(root: pathlib.Path, model: str, prompt: str, max_tokens: int, steps: int, block_length: int,
+                 arch: str) -> list[str]:
+    """The `mojo-dllm run` this script traces. Dream has no blocks and ignores --block-length: it is left out."""
+    return [str(root / "build/mojo-dllm"), "run", "--model", os.path.expanduser(model), "--prompt", prompt,
+            "--max-tokens", str(max_tokens), "--steps", str(steps),
+            *([] if arch == "dream" else ["--block-length", str(block_length)]),
+            "--device", "gpu", "--json", "--no-early-stop"]
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", required=True)
@@ -89,7 +99,9 @@ def main() -> int:
     ap.add_argument("--steps", type=int, default=4)
     ap.add_argument("--max-tokens", type=int, default=128)
     ap.add_argument("--block-length", type=int, default=32)
-    ap.add_argument("--prompt", default="Explain speculative decoding in two sentences.")
+    ap.add_argument("--arch", choices=["llada", "dream"], default="llada",
+                    help="dream: do not pass --block-length (Dream has no blocks and ignores it)")
+    ap.add_argument("--prompt", default=spec.PROMPTS[0])
     ap.add_argument("--out", default=None)
     ap.add_argument("--root", default=str(ROOT),
                     help="checkout whose build/mojo-dllm runs and whose commit is recorded (for A/B runs)")
@@ -111,13 +123,11 @@ def main() -> int:
             raise SystemExit("gpu_profile: --runtime llama.cpp needs --seq-len (prompt tokens + --max-tokens)")
         cmd = [args.llama_cpp + "/build-cuda/bin/llama-diffusion-cli", "-m", os.path.expanduser(args.model),
                "-p", args.prompt, "-c", str(args.seq_len), "-b", str(args.seq_len), "-ub", str(args.seq_len),
-               "--diffusion-steps", str(args.steps), "--diffusion-eps", "0.001", "--temp", "0",
-               "--seed", "42", "-ngl", "99", "-v"]
+               "--diffusion-steps", str(args.steps), "--diffusion-eps", spec.LLAMA_EPS,
+               "--temp", spec.LLAMA_TEMP, "--seed", spec.LLAMA_SEED, "-ngl", spec.LLAMA_GPU_LAYERS, "-v"]
         graph = ["--cuda-graph-trace=node"]
     else:
-        cmd = [str(root / "build/mojo-dllm"), "run", "--model", os.path.expanduser(args.model), "--prompt", args.prompt,
-               "--max-tokens", str(args.max_tokens), "--steps", str(args.steps), "--block-length",
-               str(args.block_length), "--device", "gpu", "--json", "--no-early-stop"]
+        cmd = mojo_command(root, args.model, args.prompt, args.max_tokens, args.steps, args.block_length, args.arch)
         graph = []
     # On battery the trace waits for the charger; a trace the charger left midway is taken again.
     p, pinfo = power.run_on_mains(

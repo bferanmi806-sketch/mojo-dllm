@@ -28,7 +28,8 @@ from engines import _http  # noqa: E402
 from fake_sglang_server import ANSWER, CHECKPOINT, COUNTER_LOOKALIKE, FakeServer, rejected_fields  # noqa: E402
 
 RECORD_KEYS = {"index", "gold", "pred", "correct", "forward_passes", "generate_s", "stopped_early", "text",
-               "flags", "version", "model", "power_retries", "on_battery", "power_source", "isolation"}
+               "flags", "version", "model", "power_retries", "on_battery", "power_source", "isolation", "schema", "steps",
+               "completion_tokens", "finish_reason"}
 MODEL = CHECKPOINT
 
 # every request-level field the server rejects or ignores for Gemma4Renoise, under the names a chat request and
@@ -779,8 +780,10 @@ def test_extra_engine_flags_are_refused(rig: Rig) -> None:
 
 
 def test_a_device_other_than_cpu_or_gpu_is_refused(rig: Rig) -> None:
+    cfg = rig.cfg()
+    object.__setattr__(cfg, "device", "tpu")   # GenConfig refuses it at construction; the adapter's own guard stays
     with pytest.raises(SystemExit, match="cpu or gpu"):
-        rig.engine().check(rig.cfg(device="tpu"))
+        rig.engine().check(cfg)
 
 
 def test_a_step_count_the_server_cannot_take_is_refused(rig: Rig) -> None:

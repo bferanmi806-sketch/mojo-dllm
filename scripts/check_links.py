@@ -5,7 +5,10 @@ usage: check_links.py
 
 Fails on a relative link whose target file does not exist. External links are
 not fetched (that would make the gate depend on the network); anchors are not
-checked. Refuses to pass when it found nothing to check.
+checked. Refuses to pass when it found nothing to check. Inline links, with or
+without a title (`[a](b.md "title")`), and reference definitions (`[a]: b.md`)
+are read; a link inside a fenced code block is an example, not a link, and is
+not read.
 """
 
 from __future__ import annotations
@@ -15,7 +18,9 @@ import re
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-MD_LINK = re.compile(r"\]\(([^)\s]+)\)")
+MD_LINK = re.compile(r"\]\(\s*<?([^)\s>]+)>?(?:\s+(?:\"[^\"]*\"|'[^']*'))?\s*\)")
+MD_DEFINITION = re.compile(r"^ {0,3}\[[^\]]+\]:\s*<?(\S+?)>?(?:\s+(?:\"[^\"]*\"|'[^']*'|\([^)]*\)))?\s*$", re.M)
+OPEN_FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 HTML_LINK = re.compile(r'(?:href|src)="([^"]+)"')
 
 
@@ -24,12 +29,38 @@ def is_relative(target: str) -> bool:
     return not re.match(r"^[a-z]+:|^#|^/", target)
 
 
+def strip_fences(text: str) -> str:
+    """`text` without its fenced code blocks.
+
+    A fence opens on a line of three or more backticks or tildes and closes on a line of the same character, at
+    least as long, with nothing after it, so a shorter fence inside a longer one belongs to the block. An unclosed
+    fence runs to the end of the text.
+    """
+    kept, fence = [], None
+    for line in text.splitlines(keepends=True):
+        if fence is None:
+            m = OPEN_FENCE.match(line)
+            if m:
+                fence = m.group(1)
+            else:
+                kept.append(line)
+        elif re.match(r"^ {0,3}" + re.escape(fence[0]) + "{" + str(len(fence)) + r",}[ \t]*$", line.rstrip("\r\n")):
+            fence = None
+    return "".join(kept)
+
+
+def markdown_targets(text: str) -> list[str]:
+    """Every link target of a Markdown text outside fenced code blocks."""
+    text = strip_fences(text)
+    return MD_LINK.findall(text) + MD_DEFINITION.findall(text)
+
+
 def main() -> int:
     checked = 0
     broken = []
     md_files = [p for p in ROOT.glob("*.md")] + list((ROOT / "docs").rglob("*.md"))
     for f in md_files:
-        for target in MD_LINK.findall(f.read_text()):
+        for target in markdown_targets(f.read_text()):
             if not is_relative(target):
                 continue
             path = target.split("#", 1)[0]

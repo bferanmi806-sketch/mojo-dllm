@@ -773,6 +773,25 @@ def test_the_env_file_records_whether_bench_quiet_ran(fake_machine: FakeMachine,
         assert json.loads((tmp_path / f"q{want}.env.json").read_text())["sessions"][0]["bench_quiet"] is want
 
 
+def test_the_env_file_records_what_bench_quiet_changed(fake_machine: FakeMachine, tmp_path: Path,
+                                                       monkeypatch: pytest.MonkeyPatch) -> None:
+    cases = {
+        "timers:7,pm:1,clocks:0,refused:2": (True, {"timers_stopped": 7, "gpus_persistence_on": 1,
+                                                    "gpus_clocks_locked": 0, "refused": 2}),
+        "1": (True, None),                                   # an older script: ran, detail unknown, never zero
+        "timers:x": (True, None),
+        "xtimers:1,pm:1,clocks:1,refused:1": (True, None),     # the whole value must have the form
+        "timers:1,pm:1,clocks:1,refused:1;": (True, None),
+        "": (False, None),
+    }
+    for i, (value, (quiet, changes)) in enumerate(cases.items()):
+        monkeypatch.setenv("BENCH_QUIET_ACTIVE", value)
+        isolation.begin_arm(f"d{i}", device="cpu", need_ram_gb=1.0, runs_dir=tmp_path, machine=fake_machine,
+                            sample_s=1.0, log=lambda m: None)
+        s = json.loads((tmp_path / f"d{i}.env.json").read_text())["sessions"][0]
+        assert (s["bench_quiet"], s["bench_quiet_changes"]) == (quiet, changes), value
+
+
 def test_a_failed_preflight_stops_the_arm_but_records_why(fake_machine: FakeMachine, tmp_path: Path) -> None:
     fake_machine.profile = fake_machine.platform_profile = "balanced"
     with pytest.raises(isolation.IsolationError) as e:

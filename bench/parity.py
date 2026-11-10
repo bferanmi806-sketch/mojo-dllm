@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """Logit and generation parity between mojo-dllm and llama.cpp on a real model.
 
-usage: python3 bench/parity.py --model MODEL.gguf [--ref build/llada_ref] [--threads 12] [--device cpu|gpu]
+usage: python3 bench/parity.py --model MODEL.gguf [--arch llada|dream|diffusion-gemma] [--ref build/llada_ref]
+                              [--threads 12] [--device cpu|gpu] [--force]
                               [--ref2 build/llada_ref_cuda --ref2-label "llama.cpp CUDA"]
+                              [--phase ref|compare --llama-src DIR]     (DiffusionGemma only)
 
 --ref2 adds a second reference for the logits only: the result then also
 records mojo-dllm against it and the two references against each other, which
 shows how far two builds of llama.cpp disagree on the same model.
 
-Writes bench/parity/<date>-<arch>-<model-stem>[-gpu].json. scripts/bench_table.py renders it into
+Writes bench/parity/<date>-<arch>-<model-stem>[-gpu].json (the LLaDA evidence the DiffusionGemma bound is taken from,
+2026-10-03-llada.json, predates the model stem in the name and keeps its name). scripts/bench_table.py renders it into
 docs/correctness.md. Requires build/mojo-dllm and build/llada_ref
 (see docs/correctness.md for how to build the latter).
 
@@ -18,10 +21,11 @@ is mapped by whichever process runs, and mojo-dllm keeps its own repacked copy b
   --phase ref      the llama.cpp #24423 branch (scripts/build_dg_ref.sh) writes the canvas logits of a
                    fixed prompt and canvas, four ways, into build/dg-parity/<model>/caseN/.
   --phase compare  reads those files and mojo-dllm's, written by mojo-dllm itself as <variant>.mojo.f32
-                   beside them, and writes bench/parity/ evidence only when every variant is inside the
-                   bound taken from the LLaDA evidence. A missing mojo-dllm file stops the run: there is
-                   nothing to compare until the forward pass (#64) exists, and the reference's own output
-                   is never used in its place.
+                   with a <variant>.mojo.f32.json sidecar (case_sha256, mojo_dllm_commit) beside them,
+                   requires every case of the current prompt set, and writes bench/parity/ evidence only when every variant is inside the
+                   bound taken from the LLaDA evidence. A missing mojo-dllm file stops the run (write it with
+                   `mojo-dllm logits`, one file per variant and case), and the reference's own output is
+                   never used in its place.
 """
 
 from __future__ import annotations
@@ -30,10 +34,13 @@ import argparse
 import datetime as dt
 import hashlib
 import json
+import os
 import pathlib
+import platform
 import random
 import re
 import subprocess
+import sys
 import tempfile
 from typing import TYPE_CHECKING, Callable, NamedTuple
 
@@ -41,7 +48,14 @@ if TYPE_CHECKING:
     import numpy as np
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-SPECS = {"llada": dict(vocab=126464, mask=126336), "dream": dict(vocab=152064, mask=151666)}
+sys.path.insert(0, str(ROOT / "bench"))
+import atomic_write  # noqa: E402  (bench/atomic_write.py)
+import spec  # noqa: E402  (bench/spec.py: the ids, prompts and seeds shared with the other tools)
+from parity_schema import (  # noqa: E402  (bench/parity_schema.py)
+    BOUND_KEYS, VIOLATION_KEYS, Bound, DgMetrics, Metrics, ParityError, require_keys, validate_parity,
+)
+
+SPECS = spec.ARCH_IDS
 
 class LogitCase(NamedTuple):
     prompt: str
@@ -56,12 +70,12 @@ class GenCase(NamedTuple):
 
 
 LOGIT_CASES = [
-    LogitCase("Explain speculative decoding in two sentences.", 44),
-    LogitCase("List three differences between diffusion language models and autoregressive language models.", 100),
+    LogitCase(spec.PROMPTS[0], 44),
+    LogitCase(spec.PROMPTS[2], 100),
 ]
 GEN_CASES = [
-    GenCase("Explain speculative decoding in two sentences.", 32, 32, 32),
-    GenCase("Write a short Python function that checks whether a number is prime.", 64, 32, 32),
+    GenCase(spec.PROMPTS[0], 32, 32, 32),
+    GenCase(spec.PROMPTS[1], 64, 32, 32),
 ]
 
 
@@ -83,9 +97,25 @@ def result_path(model: str, arch: str, device: str, day: dt.date) -> pathlib.Pat
     return ROOT / "bench" / "parity" / f"{day.isoformat()}-{arch}-{pathlib.Path(model).stem}{suffix}.json"
 
 
-def compare(a: np.ndarray, b: np.ndarray, first_mask: int) -> dict:
+def compare(a: np.ndarray, b: np.ndarray, first_mask: int) -> Metrics:
+    """Row-wise agreement of two logit matrices (b is the reference), refusing what would make a number meaningless.
+
+    A NaN or infinity, a row of zeros (its cosine is 0/0), two matrices of different shape, no rows, or a
+    `first_mask` that leaves no masked row (the median of nothing is NaN) is refused by name: a NaN in these
+    metrics would slip past every `>` comparison against the bound and read as a pass.
+    """
     import numpy as np
 
+    if a.ndim != 2 or a.shape != b.shape or a.shape[0] == 0:
+        raise SystemExit(f"compare: the logit matrices must be non-empty with one shape, got {a.shape} and {b.shape}")
+    if not (np.isfinite(a).all() and np.isfinite(b).all()):
+        raise SystemExit("compare: refusing logits with a non-finite value (NaN or infinity)")
+    for name, m in (("first", a), ("second", b)):
+        zero = np.flatnonzero(~m.any(axis=1))
+        if zero.size:
+            raise SystemExit(f"compare: row {int(zero[0])} of the {name} matrix is all zeros, so its cosine is undefined")
+    if not 0 <= first_mask < a.shape[0]:
+        raise SystemExit(f"compare: first_mask {first_mask} leaves no masked row among {a.shape[0]} rows")
     cos = np.array([float(x @ y / (np.linalg.norm(x) * np.linalg.norm(y))) for x, y in zip(a, b)])
     rel = np.array([float(np.sqrt(np.mean((x - y) ** 2)) / np.sqrt(np.mean(y**2))) for x, y in zip(a, b)])
     top5 = [len(set(np.argsort(-x)[:5]) & set(np.argsort(-y)[:5])) for x, y in zip(a, b)]
@@ -102,7 +132,7 @@ def compare(a: np.ndarray, b: np.ndarray, first_mask: int) -> dict:
 DG_ARCH = "diffusion-gemma"
 # The canvas is random token ids (the model starts from noise, not masks), fixed here so that both
 # runtimes see the same one. Seeds are the issue number plus the case index.
-DG_CANVAS_SEED = 66
+DG_CANVAS_SEED = spec.DG_CANVAS_SEED
 # The four forward passes of one canvas. The cached ones run the prompt through a prefill first and then
 # the canvas against the stored K/V; the -sc ones add self-conditioning from the previous step's logits.
 DG_VARIANTS = ("unified", "cached", "unified-sc", "cached-sc")
@@ -111,15 +141,16 @@ DG_VARIANTS = ("unified", "cached", "unified-sc", "cached-sc")
 DG_PREV_FILE = "unified.ref.f32"
 # The first denoising step runs at temperature 0.8 (issue #60), so the second step's self-conditioning
 # divides the previous logits by it.
-DG_PREV_TEMP_INV = 1.0 / 0.8
+DG_PREV_TEMP_INV = 1.0 / spec.DG_FIRST_STEP_TEMP
 LLADA_EVIDENCE = "bench/parity/2026-10-03-llada.json"
-# The reference's own sensitivity: with the previous-step logits changed by this relative L2 amount (about
-# ten times the spacing of float32 values) the output of the reference itself moved by a median relative RMS
-# of 0.18 to 0.26 on the two LLaDA prompts with a random canvas (measured, recorded per case as ref_spread).
-# The cause is untested; expert routing flips spread by bidirectional attention are a hypothesis. It is run on
-# every case so that a comparison is never read without that spread beside it.
+# The DiffusionGemma reference's own sensitivity (not LLaDA's): with the previous-step logits changed by this
+# relative L2 amount (about ten times the spacing of float32 values) the reference's output moved by a median
+# relative RMS of 0.18 to 0.26 on the two prompts of LOGIT_CASES with a random canvas. That was a one-off
+# measurement recorded per case as ref_spread under build/dg-parity/, which is not committed, so no file in
+# this repository holds it. The cause is untested; expert routing flips spread by bidirectional attention are a
+# hypothesis. The noisy run is made for every case so that a comparison is never read without its spread.
 DG_NOISE_REL = 1e-6
-DG_NOISE_SEED = 66
+DG_NOISE_SEED = spec.DG_NOISE_SEED
 DG_NOISY_FILE = "unified-sc-noisy.ref.f32"
 
 
@@ -164,7 +195,7 @@ def dg_require_commit(src: pathlib.Path, pinned: str) -> str:
     return head
 
 
-def llada_bound(root: pathlib.Path) -> dict:
+def llada_bound(root: pathlib.Path) -> Bound:
     """No worse than the worst case of the committed LLaDA comparison, on each metric.
 
     The numbers come from LLADA_EVIDENCE, never typed here: if that file is replaced the bound moves
@@ -189,7 +220,10 @@ def llada_bound(root: pathlib.Path) -> dict:
     )
 
 
-def dg_violations(m: dict, bound: dict) -> list[str]:
+def dg_violations(m: DgMetrics, bound: Bound) -> list[str]:
+    """What is outside the bound. A key either side lacks raises ParityError by name, before any number is read."""
+    require_keys(m, VIOLATION_KEYS, "the metrics")
+    require_keys(bound, BOUND_KEYS, "the bound")
     out = []
     if not m["min_cosine"] >= bound["min_cosine"]:
         out.append(f"min_cosine {m['min_cosine']:.5f} < {bound['min_cosine']:.5f}")
@@ -223,19 +257,81 @@ def dg_top1_error(top_a: list[float], top_b: list[float]) -> float:
     """The worst |a - b| / |b| over rows, from each row's largest logit (b is the reference)."""
     if not top_a or len(top_a) != len(top_b):
         raise SystemExit("refusing: the row maxima are empty or differ in length")
+    if any(y == 0 for y in top_b):
+        raise SystemExit("refusing: a reference row's largest logit is zero, so the relative error is undefined")
     return max(abs(x - y) / abs(y) for x, y in zip(top_a, top_b))
 
 
-def dg_metrics(a: np.ndarray, b: np.ndarray, first_mask: int) -> dict:
+def dg_metrics(a: np.ndarray, b: np.ndarray, first_mask: int) -> DgMetrics:
     """`compare`, plus the worst relative error of a row's largest logit (b is the reference)."""
     m = compare(a, b, first_mask)
-    m["top1_max_rel_err"] = dg_top1_error(a.max(axis=1).tolist(), b.max(axis=1).tolist())
-    return m
+    return DgMetrics(**m, top1_max_rel_err=dg_top1_error(a.max(axis=1).tolist(), b.max(axis=1).tolist()))
+
+
+def dg_case_hash(meta: dict) -> str:
+    """The identity of a case: its prompt, its prompt tokens and its canvas. `ref_spread` is added later and is not part of it."""
+    body = {k: meta[k] for k in ("prompt", "prompt_tokens", "canvas_tokens")}
+    return hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest()
+
+
+def dg_sidecar_path(mojo: pathlib.Path) -> pathlib.Path:
+    return mojo.with_name(mojo.name + ".json")
+
+
+def dg_check_sidecar(case_name: str, mojo: pathlib.Path, meta: dict) -> str:
+    """The commit that built `mojo`, after checking that it was written for this case.
+
+    `mojo-dllm logits` writes `<variant>.mojo.f32.json` beside its dump: {"case_sha256", "mojo_dllm_commit"}.
+    A dump left over from an older prompt set or canvas has a different hash and is refused by name.
+    """
+    side = dg_sidecar_path(mojo)
+    if not side.is_file():
+        raise SystemExit(
+            f"refusing: {case_name}: {side} is missing, so {mojo} cannot be tied to this case or to a build"
+        )
+    try:
+        info = json.loads(side.read_text())
+    except ValueError as e:
+        raise SystemExit(f"refusing: {case_name}: {side} is not JSON ({e})") from None
+    if not isinstance(info, dict):
+        raise SystemExit(f"refusing: {case_name}: {side} is not a JSON object")
+    if info.get("case_sha256") != dg_case_hash(meta):
+        raise SystemExit(
+            f"refusing: {case_name}: {mojo} was written for a different case (hash {info.get('case_sha256')!r}, "
+            f"this case is {dg_case_hash(meta)!r}); run mojo-dllm logits again"
+        )
+    commit = info.get("mojo_dllm_commit")
+    if not isinstance(commit, str) or not commit.strip():
+        raise SystemExit(f"refusing: {case_name}: {side} has no mojo_dllm_commit")
+    return commit
+
+
+def dg_case_files(workdir: pathlib.Path) -> list[pathlib.Path]:
+    """The `case.json` of case0 to case{N-1}, N = len(LOGIT_CASES), each made for the prompt this file asks for.
+
+    A `--phase ref` run that stopped early, or a folder from an older prompt set, is refused by name.
+    """
+    found = {p.parent.name: p for p in workdir.glob("case*/case.json")}
+    if not found:
+        raise SystemExit(f"refusing: no reference cases under {workdir}; run --phase ref first")
+    want = [f"case{i}" for i in range(len(LOGIT_CASES))]
+    if sorted(found) != sorted(want):
+        raise SystemExit(
+            f"refusing: {workdir} holds {sorted(found)} but the case set is {want}; "
+            "run --phase ref again on an empty folder"
+        )
+    for name, case in zip(want, LOGIT_CASES):
+        prompt = json.loads(found[name].read_text()).get("prompt")
+        if prompt != case.prompt:
+            raise SystemExit(
+                f"refusing: {name} was made for the prompt {prompt!r}, not {case.prompt!r}; run --phase ref again"
+            )
+    return [found[n] for n in want]
 
 
 def dg_compare(
     workdir: pathlib.Path,
-    bound: dict,
+    bound: Bound,
     load: Callable[[pathlib.Path], object] | None = None,
     compare_fn: Callable[[object, object, int], dict] | None = None,
 ) -> tuple[list[dict], list[str]]:
@@ -244,9 +340,8 @@ def dg_compare(
     Every file is checked before the first number is computed, so a half-finished set never produces a
     partial table. `load` and `compare_fn` default to numpy; tests pass plain stand-ins.
     """
-    cases = sorted(workdir.glob("case*/case.json"))
-    if not cases:
-        raise SystemExit(f"refusing: no reference cases under {workdir}; run --phase ref first")
+    cases = dg_case_files(workdir)
+    commits: set[str] = set()
     plan = []
     for case_json in cases:
         d = case_json.parent
@@ -256,18 +351,25 @@ def dg_compare(
                 raise SystemExit(f"refusing: the reference output {ref} is missing; run --phase ref again")
             if not mojo.is_file():
                 raise SystemExit(
-                    f"refusing: mojo-dllm's output {mojo} is missing. The DiffusionGemma forward pass is #64 "
-                    "and has to write this file; the reference's own output is never compared with itself."
+                    f"refusing: mojo-dllm's output {mojo} is missing. Write it with `mojo-dllm logits` (see "
+                    "docs/correctness.md); the reference's own output is never compared with itself."
                 )
+            meta = json.loads(case_json.read_text())
+            commits.add(dg_check_sidecar(d.name, mojo, meta))
             if mojo.read_bytes() == ref.read_bytes():
                 raise SystemExit(
                     f"refusing: {mojo} is byte-identical to {ref}. Two runtimes that quantize differently "
                     "do not agree to the last bit, so this is a copy, not a result."
                 )
-            meta = json.loads(case_json.read_text())
             if "ref_spread" not in meta:
                 raise SystemExit(f"refusing: {case_json} has no ref_spread; run --phase ref again")
             plan.append((meta, v, ref, mojo))
+    if len(commits) != 1:
+        raise SystemExit(
+            f"refusing: the mojo-dllm outputs come from {len(commits)} different builds {sorted(commits)}; "
+            "run one build for every case"
+        )
+    (commit,) = commits
     if compare_fn is None:
         compare_fn = dg_metrics
     entries, violations = [], []
@@ -282,7 +384,7 @@ def dg_compare(
         m = compare_fn(a, b, 0)
         entries.append(
             dict(prompt=case["prompt"], variant=v, seq_len=len(case["prompt_tokens"]) + m["rows"],
-                 reference_spread=case["ref_spread"], **m)
+                 reference_spread=case["ref_spread"], mojo_dllm_commit=commit, **m)
         )
         violations += [f"{case['prompt'][:40]!r} {v}: {x}" for x in dg_violations(m, bound)]
     return entries, violations
@@ -341,6 +443,8 @@ def dg_reference(args: argparse.Namespace, workdir: pathlib.Path, llama_src: pat
     for i, case in enumerate(LOGIT_CASES):
         d = workdir / f"case{i}"
         d.mkdir(parents=True, exist_ok=True)
+        for stale in [*d.glob("*.mojo.f32"), *d.glob("*.mojo.f32.json")]:
+            stale.unlink()  # a dump from the previous reference no longer matches this one
         prompt = dg_tokenize(llama_src, args.model, case.prompt)
         canvas = dg_canvas(vocab, canvas_len, DG_CANVAS_SEED + i)
         meta = dict(
@@ -376,7 +480,10 @@ def dgemma_main(args: argparse.Namespace) -> int:
     llama_src = pathlib.Path(args.llama_src).expanduser()
     if args.phase == "ref":
         return dg_reference(args, workdir, llama_src)
+    out = result_path(args.model, DG_ARCH, "cpu", dt.date.today())
+    atomic_write.refuse_existing(out, args.force)   # before the comparison, not after it
     bound = llada_bound(ROOT)
+    require_keys(bound, BOUND_KEYS, "the LLaDA bound")
     entries, violations = dg_compare(workdir, bound)
     for e in entries:
         print("logits", e)
@@ -387,19 +494,34 @@ def dgemma_main(args: argparse.Namespace) -> int:
             "outside the LLaDA bound:\n  " + "\n  ".join(violations)
             + "\nthe reference against itself, for reading these numbers:\n  " + "\n  ".join(context)
         )
-    meta = json.loads(next(iter(sorted(workdir.glob("case*/case.json")))).read_text())
+    meta = json.loads(dg_case_files(workdir)[0].read_text())
     doc = dict(
         date=dt.datetime.now().isoformat(timespec="seconds"), arch=DG_ARCH, device="cpu", model=meta["model"],
-        versions={"mojo-dllm": run(["git", "-C", str(ROOT), "rev-parse", "--short", "HEAD"]).strip(),
+        versions={"mojo-dllm": entries[0]["mojo_dllm_commit"],
                   "llama.cpp": meta["llama_cpp_commit"]},
         reference="llama.cpp libllama (ggml-org/llama.cpp#24423 branch) via tools/ref/dg_ref.cpp",
         model_sha256=meta["model_sha256"], bound=bound, logits=entries, generation=[],
     )
-    out = result_path(args.model, DG_ARCH, "cpu", dt.date.today())
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n")
+    write_doc(out, doc, args.force)
     print(f"wrote {out.relative_to(ROOT)}")
     return 0
+
+
+def machine_info() -> dict:
+    """What the run can read about the machine it ran on (the rest of a hand-written `machine` entry is not known here)."""
+    cpu = next((l.split(":", 1)[1].strip() for l in pathlib.Path("/proc/cpuinfo").read_text().splitlines()
+                if l.startswith("model name")), None) if pathlib.Path("/proc/cpuinfo").is_file() else None
+    return dict(os=platform.platform(), cpu=cpu, logical_cpus=os.cpu_count(),
+                memory_bytes=os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES"))
+
+
+def write_doc(path: pathlib.Path, doc: dict, force: bool) -> None:
+    """Write a parity file only if it is one: a document that breaks the schema is refused before it is written."""
+    try:
+        validate_parity(doc)
+    except ParityError as e:
+        raise SystemExit(f"refusing to write {path}: {e}") from None
+    atomic_write.write_new(path, json.dumps(doc, indent=2, ensure_ascii=False) + "\n", force)
 
 
 def main() -> int:
@@ -412,6 +534,7 @@ def main() -> int:
     ap.add_argument("--ref2", default=None, help="a second reference binary, logits only")
     ap.add_argument("--ref2-label", default="llama.cpp CUDA")
     ap.add_argument("--phase", choices=["ref", "compare"], default=None, help="DiffusionGemma only; see the docstring")
+    ap.add_argument("--force", action="store_true", help="replace an existing result file of the same name")
     ap.add_argument("--llama-src", default="~/src/llama.cpp-diffusion-gemma",
                     help="DiffusionGemma only: the checkout scripts/build_dg_ref.sh built")
     args = ap.parse_args()
@@ -425,6 +548,8 @@ def main() -> int:
         ap.error("--phase applies to --arch diffusion-gemma only")
     if args.ref is None:
         args.ref = str(ROOT / "build/llada_ref")
+    result_file = result_path(args.model, args.arch, args.device, dt.date.today())
+    atomic_write.refuse_existing(result_file, args.force)   # before the model runs: a refusal afterwards discards them
     import numpy as np
 
     VOCAB = SPECS[args.arch]["vocab"]
@@ -462,7 +587,8 @@ def main() -> int:
     for case in GEN_CASES:
         toks = tokenize(args.model, case.prompt)
         out = run([str(ROOT / "build/mojo-dllm"), "run", "--model", args.model, "--prompt", case.prompt,
-                   "--max-tokens", str(case.gen), "--block-length", str(case.block),
+                   "--max-tokens", str(case.gen),
+                   *([] if args.arch == "dream" else ["--block-length", str(case.block)]),   # Dream has no blocks
                    "--steps", str(case.steps), "--threads", args.threads, "--device", args.device, "--json",
                    "--no-early-stop"])
         j = json.loads(next(l for l in out.splitlines() if l.startswith("{")))
@@ -480,18 +606,16 @@ def main() -> int:
         first = next((i for i, (p, q) in enumerate(zip(mine, ref)) if p != q), None)
         gens.append(dict(prompt=case.prompt, gen_length=case.gen, block_length=case.block,
                          steps=case.steps, matching_tokens=same, first_divergence=first,
-                         mojo_text=j["text"]))
+                         mojo_text=j["text"], mojo_generated_tokens=mine, reference_generated_tokens=ref))
         print("generate", gens[-1])
     doc = dict(date=dt.datetime.now().isoformat(timespec="seconds"), arch=args.arch, device=args.device,
-               model=pathlib.Path(args.model).name,
+               model=pathlib.Path(args.model).name, threads=int(args.threads), machine=machine_info(),
                versions={"mojo-dllm": run(["git", "-C", str(ROOT), "rev-parse", "--short", "HEAD"]).strip()},
                reference="llama.cpp libllama via tools/ref/llada_ref.cpp", logits=logits, generation=gens)
     if args.ref2:
         doc["reference2"] = args.ref2_label
-    out = result_path(args.model, args.arch, args.device, dt.date.today())
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n")
-    print(f"wrote {out.relative_to(ROOT)}")
+    write_doc(result_file, doc, args.force)
+    print(f"wrote {result_file.relative_to(ROOT)}")
     return 0
 
 

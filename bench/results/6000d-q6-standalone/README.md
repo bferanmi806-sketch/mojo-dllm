@@ -8,7 +8,7 @@ Other GPU-resident processes were present during the split-branch rerun: the sav
 
 ## Independent real-model forward
 
-Three alternating A/B–B/A process pairs per cell; each process runs four warmups and sixteen measured forwards. Same prompt token IDs and 32 requested raw output rows. Times include logits returned to host, exclude model loading and sampling. Ratios are medians of paired ratios.
+Three alternating A/B and B/A process pairs per cell; each process runs four warmups and sixteen measured forwards. Same prompt token IDs and 32 requested raw output rows. Times include logits returned to host, exclude model loading and sampling. Ratios are medians of paired ratios.
 
 | Model | Masks | Base ms | Candidate ms | Paired speedup |
 |---|---:|---:|---:|---:|

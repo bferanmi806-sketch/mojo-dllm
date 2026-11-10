@@ -9,3 +9,9 @@ tests/python/test_bench_quiet.py::* | the refusal is for non-root users
 tests/python/test_capped.py::* | no systemd user manager with the memory controller delegated
 tests/python/test_capped.py::* | set CAPPED_TEST_KILL=1
 tests/python/test_verified.py::* | root ignores directory permissions
+tests/python/test_parity_compare.py::* | is in the `fixtures` group
+tests/python/test_dg_bound.py::* | is in the `fixtures` group
+tests/python/test_gen_fixtures.py::* | is in the `fixtures` group
+tests/python/test_action_pins.py::* | is in the `lint` group
+tests/python/test_llada_ref.py::* | no C++ compiler
+tests/python/test_check_format.py::* | root reads every file

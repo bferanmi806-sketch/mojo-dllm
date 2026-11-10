@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """End-to-end benchmark: mojo-dllm vs llama.cpp vs diffuse-cpp on LLaDA-8B Q4_K_M.
 
-usage: python3 bench/run_bench.py --config bench/config.json [--reps 3] [--out bench/results/NAME.json]
+usage: python3 bench/run_bench.py --config bench/config.json [--reps 3] [--out bench/results/NAME.json] [--force]
 
 Every runtime does the same work per prompt: a canvas of L = P + G tokens
 (P prompt tokens, G generated), and the same number of full-canvas forward
@@ -18,7 +18,8 @@ Measurement hygiene, all recorded in the output:
   * each run happens inside an isolation window (bench/isolation.py): other CPU, swap, thermal or GPU
     activity makes the run `noisy` and it is repeated up to `--isolation-retries` times (default 2); the
     window is recorded as `isolation`, and the preflight and a system snapshot go to
-    bench/results/env/NAME.env.json. `--allow-noisy` continues after a failed preflight;
+    bench/results/env/NAME.env.json (the run creates that directory; none is committed). `--allow-noisy` continues
+    after a failed preflight;
   * a watchdog kills any process named exactly `pytest` while the benchmark
     runs (other sessions on this machine launch test suites that would
     otherwise compete for the CPU) and logs every kill. A config can turn it
@@ -33,6 +34,7 @@ recorded as failed and excluded, and the summary says how many were.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as dt
 import json
 import os
@@ -47,40 +49,85 @@ import sys
 import tempfile
 import threading
 import time
+from typing import Callable
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "bench"))
+import ab_evidence  # noqa: E402  (bench/ab_evidence.py)
+import atomic_write  # noqa: E402  (bench/atomic_write.py)
 import isolation  # noqa: E402  (bench/isolation.py)
 import power  # noqa: E402  (bench/power.py)
+import spec  # noqa: E402  (bench/spec.py)
 
 
 class Watchdog(threading.Thread):
-    def __init__(self, name: str, log: list[dict]) -> None:
+    """Kills this user's processes named `name` (pytest) while the benchmark runs, and logs every kill.
+
+    Only processes whose owner is `uid` are touched: another user's pytest is not ours to kill. A kill the
+    kernel refuses is reported in `errors` and the loop goes on; it is not counted as a kill.
+    """
+
+    def __init__(self, name: str, log: list[dict], proc: pathlib.Path = pathlib.Path("/proc"),
+                 kill: Callable[[int, int], None] = os.kill, uid: int | None = None) -> None:
         super().__init__(daemon=True)
         self.target = name
         self.log = log
+        self.errors: list[str] = []
+        self.proc, self.kill, self.uid = proc, kill, os.getuid() if uid is None else uid
         self.stop = threading.Event()
 
-    def run(self) -> None:
+    def sweep(self) -> None:
         me = os.getpid()
+        for d in self.proc.iterdir():
+            if not d.name.isdigit() or int(d.name) == me:
+                continue
+            try:
+                comm = (d / "comm").read_text().strip()
+                owner = d.stat().st_uid
+            except OSError:
+                continue
+            if comm != self.target or owner != self.uid:
+                continue
+            pid = int(d.name)
+            try:
+                self.kill(pid, signal.SIGKILL)
+                # Time and pid only: where the process ran is someone else's business.
+                self.log.append(dict(time=dt.datetime.now().isoformat(timespec="seconds"), pid=pid))
+            except ProcessLookupError:
+                pass
+            except PermissionError as e:
+                self.errors.append(f"could not kill {self.target} pid {pid}: {e}")
+                print(f"!! {self.errors[-1]}", flush=True)
+
+    def run(self) -> None:
         while not self.stop.is_set():
-            for d in pathlib.Path("/proc").iterdir():
-                if not d.name.isdigit() or int(d.name) == me:
-                    continue
-                try:
-                    comm = (d / "comm").read_text().strip()
-                except OSError:
-                    continue
-                if comm != self.target:
-                    continue
-                pid = int(d.name)
-                try:
-                    os.kill(pid, signal.SIGKILL)
-                    # Time and pid only: where the process ran is someone else's business.
-                    self.log.append(dict(time=dt.datetime.now().isoformat(timespec="seconds"), pid=pid))
-                except ProcessLookupError:
-                    pass
+            self.sweep()
             self.stop.wait(1.0)
+
+
+def set_profile(machine: isolation.Machine, name: str) -> bool:
+    """`powerprofilesctl set NAME`, then read it back: True only when the profile now reads NAME."""
+    rc, _ = machine.run(["powerprofilesctl", "set", name])
+    rc2, now = machine.run(["powerprofilesctl", "get"])
+    return rc == 0 and rc2 == 0 and now.strip() == name
+
+
+def profile_hooks(machine: isolation.Machine, previous: str,
+                  log: Callable[[str], None]) -> tuple[Callable[[], None], Callable[[], None]]:
+    """(on_pause, on_resume) for a run on battery: give the profile back while it waits, take performance after.
+
+    Each is read back. A profile that could not be put back is logged; one that could not be set again stops the
+    run, which would otherwise measure on the wrong profile.
+    """
+    def on_pause() -> None:
+        if not set_profile(machine, previous):
+            log(f"!! could not put the power profile back to {previous}: run `powerprofilesctl set {previous}`")
+
+    def on_resume() -> None:
+        if not set_profile(machine, "performance"):
+            raise isolation.IsolationError("could not set the power profile to performance after the charger came back")
+
+    return on_pause, on_resume
 
 
 def sh(cmd: str) -> str:
@@ -114,11 +161,13 @@ def timed(cmd: list[str]) -> tuple[int, str, str, float, int]:
         return p.returncode, p.stdout, p.stderr, float(parts[0]), int(parts[1]) * 1024
 
 
-def run_mojo(c: dict, prompt: str, threads: int, extra: list[str]) -> dict:
+def run_mojo(c: dict, prompt: str, threads: int, extra: list[str], n_prompt: int | None = None) -> dict:
     cmd = [
         str(ROOT / "build/mojo-dllm"), "run", "--model", c["models"]["gguf"], "--prompt", prompt,
         "--max-tokens", str(c["gen_length"]), "--steps", str(c["steps"]),
-        "--block-length", str(c["block_length"]), "--threads", str(threads), "--json",
+        # Dream has no blocks and ignores --block-length; the config says `"arch": "dream"` for it.
+        *([] if c.get("arch") == "dream" else ["--block-length", str(c["block_length"])]),
+        "--threads", str(threads), "--json",
         # Every runtime does every step, so ms / step and generation time compare.
         "--no-early-stop",
     ] + extra
@@ -127,6 +176,13 @@ def run_mojo(c: dict, prompt: str, threads: int, extra: list[str]) -> dict:
     if rc != 0 or line is None:
         return dict(ok=False, rc=rc, error=(err or out)[-400:])
     j = json.loads(line)
+    # Equal work is what the comparison rests on: every runtime does c["steps"] passes over the same prompt.
+    if j["forward_passes"] != c["steps"]:
+        return dict(ok=False, rc=rc, error=f"mojo-dllm did {j['forward_passes']} forward passes, not {c['steps']}; "
+                                           "the runtimes would not do equal work")
+    if n_prompt is not None and j["prompt_tokens"] != n_prompt:
+        return dict(ok=False, rc=rc, error=f"mojo-dllm counted {j['prompt_tokens']} prompt tokens, "
+                                           f"`tokenize` printed {n_prompt}")
     return dict(
         ok=True, wall_s=wall, peak_rss_bytes=rss, generate_s=j["generate_s"],
         ms_per_step=j["ms_per_step"], forward_passes=j["forward_passes"],
@@ -172,12 +228,8 @@ def parse_llama_output(output: str) -> dict | None:
 def run_llama(c: dict, prompt: str, threads: int, seq_len: int, cuda: bool = False) -> dict:
     """llama.cpp's diffusion example; with cuda, the build-cuda tree and every layer offloaded."""
     build = "build-cuda" if cuda else "build"
-    cmd = [
-        c["llama_cpp"] + f"/{build}/bin/llama-diffusion-cli", "-m", c["models"]["gguf"], "-p", prompt,
-        "-c", str(seq_len), "-b", str(seq_len), "-ub", str(seq_len),
-        "--diffusion-steps", str(c["steps"]), "--diffusion-eps", "0.001",
-        "--temp", "0", "-t", str(threads), "-tb", str(threads), "--seed", "42",
-    ] + (["-ngl", "99", "-v"] if cuda else [])
+    cmd = [c["llama_cpp"] + f"/{build}/bin/llama-diffusion-cli", "-m", c["models"]["gguf"], "-p", prompt]
+    cmd += spec.llama_diffusion_args(seq_len, c["steps"], threads, cuda)
     rc, out, err, wall, rss = timed(cmd)
     if cuda:
         bad = cuda_layer_error(err + out)
@@ -189,8 +241,8 @@ def run_llama(c: dict, prompt: str, threads: int, seq_len: int, cuda: bool = Fal
     total = parsed["total_s"]
     return dict(
         ok=True, wall_s=wall, peak_rss_bytes=rss, generate_s=total,
-        ms_per_step=parsed["ms_per_step"], forward_passes=c["steps"], startup_s=wall - total,
-        seq_len=seq_len, text=parsed["text"][-600:],
+        ms_per_step=parsed["ms_per_step"], forward_passes=None, steps=c["steps"], forward_passes_measured=False,
+        startup_s=wall - total, seq_len=seq_len, text=parsed["text"][-600:],
     )
 
 
@@ -266,8 +318,12 @@ def run_diffuse(c: dict, token_ids: str, threads: int, prompt_tokens: int, mode:
         last_step = int(steps[-1][0])
     if rc != 0 or t_start is None or t_end is None:
         return dict(ok=False, rc=rc, error=text_err[-600:])
+    if last_step < 1:
+        # ms / step would be divided by a step count nothing measured: refuse the run instead.
+        return dict(ok=False, rc=rc, error="diffuse-cli printed no `step i/N` line, so its step count is unknown: "
+                                           + text_err[-300:])
     total = t_end - t_start
-    n_steps = last_step or c["steps"]
+    n_steps = last_step
     return dict(
         ok=True, wall_s=float(wall_s), peak_rss_bytes=int(rss_kb) * 1024, generate_s=total,
         ms_per_step=total * 1000.0 / n_steps, forward_passes=n_steps,
@@ -276,8 +332,111 @@ def run_diffuse(c: dict, token_ids: str, threads: int, prompt_tokens: int, mode:
     )
 
 
+def parse_token_ids(out: str) -> tuple[str, int]:
+    """The comma-separated ids on the last line of `mojo-dllm tokenize`, and how many there are.
+
+    Anything but `[1, 2, 3]` (empty output, a log line) is refused: an empty line used to read as one token and
+    gave llama.cpp a wrong context size.
+    """
+    lines = out.strip().splitlines()
+    ids = lines[-1].strip().strip("[]").replace(" ", "") if lines else ""
+    if not re.fullmatch(r"\d+(,\d+)*", ids):
+        raise SystemExit(f"run_bench: `mojo-dllm tokenize` did not print token ids on its last line: {out[-200:]!r}")
+    return ids, len(ids.split(","))
+
+
+# The runtime names `one_run` can dispatch, and the two families whose name carries a thread count.
+FIXED_RUNTIMES = frozenset({
+    "mojo-dllm", "mojo-dllm-gpu", "mojo-dllm-full-logits", "llama.cpp", "llama.cpp-cuda", "llama-bench-cuda",
+    "diffuse-cpp", "diffuse-cpp-cache-entropy-exit"})
+THREADED_RUNTIME = re.compile(r"(?:llama\.cpp|llama-bench):t[1-9]\d*")
+
+
+def check_runtime_names(names: list[str]) -> None:
+    """Refuse a runtime `one_run` cannot start, before the preflight and the runs ahead of it are spent."""
+    unknown = [n for n in names if n not in FIXED_RUNTIMES and not THREADED_RUNTIME.fullmatch(n)]
+    if unknown:
+        raise SystemExit(f"run_bench: the config names runtimes this tool cannot run: {unknown}; "
+                         f"known: {sorted(FIXED_RUNTIMES)} and llama.cpp:tN, llama-bench:tN")
+
+
+def collect_versions(c: dict, runtimes: list[str]) -> dict:
+    """The versions recorded with a result, and the SHA-256 of build/mojo-dllm when a mojo-dllm runtime runs.
+
+    The commit label says what the source was; the binary hash says which build ran, so a stale
+    binary cannot carry the label of a newer commit.
+    """
+    versions = {
+        "mojo-dllm": sh(f"git -C {shlex.quote(str(ROOT))} rev-parse --short HEAD")
+        + ("-dirty" if sh(f"git -C {shlex.quote(str(ROOT))} status --porcelain -- src") else ""),
+        "mojo": mojo_version(),
+        "llama.cpp": sh(f"git -C {shlex.quote(c['llama_cpp'])} rev-parse --short HEAD"),
+        "diffuse-cpp": sh(f"git -C {shlex.quote(c['diffuse_cpp'])} rev-parse --short HEAD"),
+    }
+    if any(r.startswith("mojo-dllm") for r in runtimes):
+        versions["mojo-dllm-binary-sha256"] = ab_evidence.binary_sha256_or_none(ROOT)
+    return versions
+
+
+def select_runtimes(configured: list[str], only: str, reps: int) -> list[str]:
+    """The runtimes to run, refusing a selection that would write a result file with nothing measured."""
+    check_runtime_names(configured)
+    if reps < 1:
+        raise SystemExit(f"run_bench: --reps must be 1 or more, got {reps}")
+    wanted = [n for n in only.split(",") if n] if only else []
+    if only and not wanted:
+        raise SystemExit(f"run_bench: --only {only!r} names no runtime")
+    unknown = [n for n in wanted if n not in configured]
+    if unknown:
+        raise SystemExit(f"run_bench: --only names {unknown}, which the config does not list: {configured}")
+    chosen = [r for r in configured if not wanted or r in wanted]
+    if not chosen:
+        raise SystemExit("run_bench: no runtime selected; the config lists none")
+    return chosen
+
+
 def median_or_none(xs: list[float]) -> float | None:
     return statistics.median(xs) if xs else None
+
+
+def window_state(r: dict) -> str:
+    """`clean`, `noisy` or `unchecked` for one run, from its isolation window.
+
+    A run with no window (a file from before the windows existed, or a runner that did not record one) is
+    `unchecked`: nothing says the machine was quiet, so it never counts as clean.
+    """
+    iso = r.get("isolation")
+    if not isinstance(iso, dict):
+        return "unchecked"
+    return "clean" if iso.get("clean") is True and not iso.get("noisy") else "noisy"
+
+
+def summarize_runs(results: list[dict], runtimes: list[str], gen_length: int) -> dict:
+    """The per-runtime medians over every ok run, and how many of those runs were clean, noisy or unchecked.
+
+    A noisy run stays in the medians (it is data, and dropping it would hide that the window was noisy);
+    `noisy_runs` and `unchecked_runs` say how many there were, so the table can disclose them.
+    """
+    summary = {}
+    for rt in runtimes:
+        ok = [r for r in results if r["runtime"] == rt and r["ok"]]
+        bad = [r for r in results if r["runtime"] == rt and not r["ok"]]
+        states = [window_state(r) for r in ok]
+        summary[rt] = dict(
+            runs_ok=len(ok), runs_failed=len(bad),
+            clean_runs=states.count("clean"), noisy_runs=states.count("noisy"),
+            unchecked_runs=states.count("unchecked"),
+            ms_per_step_median=median_or_none([r["ms_per_step"] for r in ok if "ms_per_step" in r]),
+            generate_s_median=median_or_none([r["generate_s"] for r in ok if "generate_s" in r]),
+            tokens_per_s_median=median_or_none(
+                [gen_length / r["generate_s"] for r in ok if "generate_s" in r]),
+            startup_s_median=median_or_none([r["startup_s"] for r in ok if "startup_s" in r]),
+            peak_rss_gb_max=max((r["peak_rss_bytes"] for r in ok), default=0) / 1e9 or None,
+            forward_passes_median=median_or_none(
+                [r["forward_passes"] for r in ok if r.get("forward_passes") is not None]),
+            forward_ms_median=median_or_none([r["forward_ms"] for r in ok if r.get("forward_ms") is not None]),
+        )
+    return summary
 
 
 def main() -> int:
@@ -286,6 +445,7 @@ def main() -> int:
     ap.add_argument("--reps", type=int, default=3)
     ap.add_argument("--out", default=None)
     ap.add_argument("--only", default="", help="comma list of runtimes to run")
+    ap.add_argument("--force", action="store_true", help="replace an existing result file of the same name")
     ap.add_argument("--allow-battery", action="store_true",
                     help="measure on battery instead of pausing (each run records on_battery)")
     ap.add_argument("--allow-noisy", action="store_true",
@@ -300,7 +460,7 @@ def main() -> int:
         c["models"][key] = os.path.expanduser(c["models"][key])
     c["llama_cpp"] = os.path.expanduser(c["llama_cpp"])
     c["diffuse_cpp"] = os.path.expanduser(c["diffuse_cpp"])
-    runtimes = [r for r in c["runtimes"] if not args.only or r in args.only.split(",")]
+    runtimes = select_runtimes(c["runtimes"], args.only, args.reps)
     for key in ("gguf", "diffuse_gguf"):
         if key in c["models"] and not pathlib.Path(c["models"][key]).exists():
             raise SystemExit(f"model file missing: {c['models'][key]}")
@@ -308,36 +468,18 @@ def main() -> int:
     kills: list[dict] = []
     wd = Watchdog("pytest", kills)
     kill_pytest = c.get("kill_pytest", True)
-    profile_before = sh("powerprofilesctl get")
+    machine = isolation.get_machine()
+    say = lambda m: print(m, flush=True)  # noqa: E731
+    stack = contextlib.ExitStack()
     arm = None
     results: list[dict] = []
     out_path = pathlib.Path(args.out or ROOT / f"bench/results/{dt.date.today().isoformat()}-cpu.json")
+    atomic_write.refuse_existing(out_path, args.force)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    versions = {
-        "mojo-dllm": sh(f"git -C {shlex.quote(str(ROOT))} rev-parse --short HEAD")
-        + ("-dirty" if sh(f"git -C {shlex.quote(str(ROOT))} status --porcelain -- src") else ""),
-        "mojo": mojo_version(),
-        "llama.cpp": sh(f"git -C {shlex.quote(c['llama_cpp'])} rev-parse --short HEAD"),
-        "diffuse-cpp": sh(f"git -C {shlex.quote(c['diffuse_cpp'])} rev-parse --short HEAD"),
-    }
+    versions = collect_versions(c, runtimes)
 
     def summarize() -> dict:
-        summary = {}
-        for rt in runtimes:
-            ok = [r for r in results if r["runtime"] == rt and r["ok"]]
-            bad = [r for r in results if r["runtime"] == rt and not r["ok"]]
-            summary[rt] = dict(
-                runs_ok=len(ok), runs_failed=len(bad),
-                ms_per_step_median=median_or_none([r["ms_per_step"] for r in ok if "ms_per_step" in r]),
-                generate_s_median=median_or_none([r["generate_s"] for r in ok if "generate_s" in r]),
-                tokens_per_s_median=median_or_none(
-                    [c["gen_length"] / r["generate_s"] for r in ok if "generate_s" in r]),
-                startup_s_median=median_or_none([r["startup_s"] for r in ok if "startup_s" in r]),
-                peak_rss_gb_max=max((r["peak_rss_bytes"] for r in ok), default=0) / 1e9 or None,
-                forward_passes_median=median_or_none([r["forward_passes"] for r in ok if "forward_passes" in r]),
-                forward_ms_median=median_or_none([r["forward_ms"] for r in ok if r.get("forward_ms") is not None]),
-            )
-        return summary
+        return summarize_runs(results, runtimes, c["gen_length"])
 
     def write_doc(partial: bool) -> dict:
         summary = summarize()
@@ -353,7 +495,7 @@ def main() -> int:
             config=json.loads(pathlib.Path(args.config).read_text()), reps=args.reps, summary=summary,
             watchdog_kills=kills, runs=results,
         )
-        out_path.write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n")
+        atomic_write.write_atomic(out_path, json.dumps(doc, indent=2, ensure_ascii=False) + "\n")
         return summary
 
     def on_term(signum: int, frame: object) -> None:
@@ -365,11 +507,11 @@ def main() -> int:
         """One timed run of one runtime on one prompt."""
         t_start = dt.datetime.now().isoformat(timespec="seconds")
         if rt == "mojo-dllm":
-            r = run_mojo(c, p, threads, [])
+            r = run_mojo(c, p, threads, [], n_prompt)
         elif rt == "mojo-dllm-gpu":
-            r = run_mojo(c, p, threads, ["--device", "gpu"])
+            r = run_mojo(c, p, threads, ["--device", "gpu"], n_prompt)
         elif rt == "mojo-dllm-full-logits":
-            r = run_mojo(c, p, threads, ["--full-logits"])
+            r = run_mojo(c, p, threads, ["--full-logits"], n_prompt)
         elif rt == "llama.cpp":
             r = run_llama(c, p, threads, seq_len)
         elif rt == "llama.cpp-cuda":
@@ -389,7 +531,10 @@ def main() -> int:
         return r, t_start
 
     try:
-        subprocess.run(["powerprofilesctl", "set", "performance"], check=True)
+        # Verified by reading it back, and put back on every way out (the finally below, a signal, exit).
+        tuned_info = stack.enter_context(isolation.tuned(machine, say))
+        profile_before = tuned_info["previous"]
+        on_pause, on_resume = profile_hooks(machine, profile_before, say)
         if kill_pytest:
             wd.start()
         device = "gpu" if any("gpu" in r or "cuda" in r for r in runtimes) else "cpu"
@@ -397,7 +542,7 @@ def main() -> int:
             out_path.stem, device=device, need_ram_gb=isolation.need_ram_gb(c["models"]["gguf"]),
             runs_dir=out_path.parent / "env", retries=args.isolation_retries, allow_noisy=args.allow_noisy,
             allow_battery=args.allow_battery, thresholds=isolation.Thresholds(cpu_busy_max=c["busy_threshold"]),
-            tuned={"previous": profile_before, "set": "performance"}, log=lambda m: print(m, flush=True),
+            tuned=tuned_info, log=say,
             versions=versions)
         threads = c["threads"]
         tok_cache: dict[str, tuple[str, int]] = {}
@@ -406,8 +551,7 @@ def main() -> int:
                 [str(ROOT / "build/mojo-dllm"), "tokenize", "--model", c["models"]["gguf"], "--prompt", p],
                 capture_output=True, text=True, check=True,
             ).stdout
-            ids = out.strip().splitlines()[-1].strip("[]").replace(" ", "")
-            tok_cache[p] = (ids, len(ids.split(",")))
+            tok_cache[p] = parse_token_ids(out)
         for rep in range(args.reps):
             for pi, p in enumerate(c["prompts"]):
                 ids, n_prompt = tok_cache[p]
@@ -418,8 +562,7 @@ def main() -> int:
                     (r, t_start), pinfo = arm.run(
                         lambda: one_run(rt, p, ids, n_prompt, seq_len, threads),
                         max_quiet_wait_s=c["max_quiet_wait_s"], quiet_sample_s=2.0,
-                        on_pause=lambda: subprocess.run(["powerprofilesctl", "set", profile_before or "power-saver"]),
-                        on_resume=lambda: subprocess.run(["powerprofilesctl", "set", "performance"], check=True),
+                        on_pause=on_pause, on_resume=on_resume,
                     )
                     load, waited = pinfo["isolation"]["cpu_busy_before"], pinfo["isolation"]["waited_s"]
                     r.update(runtime=rt, prompt_index=pi, rep=rep, started=t_start,
@@ -442,14 +585,19 @@ def main() -> int:
     except isolation.IsolationError as e:
         raise SystemExit(str(e)) from e
     finally:
-        if arm is not None:
-            arm.finish()
+        # Each step on its own: a failure in one never skips the next, and none replaces the error being raised.
         wd.stop.set()
-        subprocess.run(["powerprofilesctl", "set", profile_before or "power-saver"])
+        if arm is not None:
+            try:
+                arm.finish()
+            except Exception as e:  # noqa: BLE001
+                print(f"!! the closing snapshot failed: {e}", flush=True)
+        stack.close()
 
     summary = write_doc(partial=False)
     print(json.dumps(summary, indent=2))
-    print(f"watchdog killed {len(kills)} pytest process(es)" if kill_pytest else "watchdog off (kill_pytest: false)")
+    print(f"watchdog killed {len(kills)} pytest process(es)" + (f", {len(wd.errors)} refused" if wd.errors else "")
+          if kill_pytest else "watchdog off (kill_pytest: false)")
     print(f"wrote {out_path}")
     failed = sum(s["runs_failed"] for s in summary.values())
     return 1 if failed else 0

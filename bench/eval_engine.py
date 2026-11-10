@@ -32,10 +32,10 @@ sys.path.insert(0, str(ROOT / "bench"))
 import eval_gsm8k  # noqa: E402  (bench/eval_gsm8k.py)
 import engines  # noqa: E402
 import isolation  # noqa: E402  (bench/isolation.py)
-from engines import EngineError, GenConfig  # noqa: E402
+from engines import EngineError, GenConfig, GenResult  # noqa: E402
 
 
-DEFAULT_TIMEOUT_S = 1800.0     # a 256-step LLaDA problem takes about 1 to 2 minutes on the GPU, CPU about 25
+DEFAULT_TIMEOUT_S = eval_gsm8k.DEFAULT_TIMEOUT_S
 
 
 def cmd_run(args: argparse.Namespace, extra: list[str]) -> int:
@@ -71,19 +71,21 @@ def cmd_run(args: argparse.Namespace, extra: list[str]) -> int:
                 g, pinfo = arm.run(lambda: engine.generate(prompt, cfg))
             except EngineError as e:
                 raise SystemExit(f"problem {p['index']}: {args.engine} failed: {e}")
-            if not isinstance(g.get("text"), str) or not g["text"].strip():
-                raise SystemExit(f"problem {p['index']}: {args.engine} returned no text; not scored")
-            pred = eval_gsm8k.extract(g["text"])
+            if not isinstance(g, GenResult):
+                raise SystemExit(f"problem {p['index']}: {args.engine} returned {type(g).__name__}, not a GenResult")
+            pred = eval_gsm8k.extract(g.text)
             rec = dict(index=p["index"], gold=p["answer"], pred=pred, correct=pred == eval_gsm8k.canon(p["answer"]),
-                       forward_passes=g["forward_passes"], generate_s=g["generate_s"],
-                       stopped_early=g.get("stopped_early"), text=g["text"], flags=flags, version=version,
+                       forward_passes=g.forward_passes, generate_s=g.generate_s,
+                       stopped_early=g.stopped_early, text=g.text, flags=flags, version=version,
                        model=model, power_retries=pinfo["power_retries"], on_battery=pinfo["on_battery"],
-                       power_source=pinfo["power_source"], isolation=pinfo["isolation"])
+                       power_source=pinfo["power_source"], isolation=pinfo["isolation"],
+                       schema="engine", steps=g.steps, completion_tokens=g.completion_tokens,
+                       finish_reason=g.finish_reason)
             with out.open("a") as f:
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
             noisy = "" if pinfo["isolation"]["clean"] else " NOISY: " + "; ".join(pinfo["isolation"]["reasons"])
             print(f"[{k + 1}/{len(problems)}] #{p['index']} {'ok ' if rec['correct'] else 'BAD'} "
-                  f"pred={pred} gold={p['answer']} passes={g['forward_passes']} {g['generate_s']:.1f}s{noisy}",
+                  f"pred={pred} gold={p['answer']} passes={g.forward_passes} {g.generate_s:.1f}s{noisy}",
                   flush=True)
     return 0
 

@@ -49,6 +49,8 @@ class ParityEvidenceTests(unittest.TestCase):
                 patch.object(parity_run, "LOGIT_CASES", []),
                 patch.object(parity_run, "GEN_CASES", []),
                 patch.object(parity_run, "run", return_value="test-head"),
+                # No inference runs here, so the document holds no logits; the schema has its own tests.
+                patch.object(parity_run, "validate_parity", lambda doc: None),
                 patch.dict(sys.modules, {"numpy": ModuleType("numpy")}),
                 redirect_stdout(io.StringIO()),
             ):

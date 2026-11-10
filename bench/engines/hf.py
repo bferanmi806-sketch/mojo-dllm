@@ -41,22 +41,23 @@ import threading
 import time
 from dataclasses import dataclass
 
-from . import EngineError, GenConfig, register
+from . import EngineError, GenConfig, GenResult, register
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 import isolation  # noqa: E402  (bench/isolation.py: its /proc/meminfo reader)
+import spec  # noqa: E402  (bench/spec.py)
 
 SHORT_TIMEOUT_S = 60           # git rev-parse
-LLADA_MASK_ID = 126336         # generate.py's default and the id its README assigns to [MASK]
+LLADA_MASK_ID = spec.ARCH_IDS["llada"]["mask"]   # generate.py's default and the id its README assigns to [MASK]
 LLADA_PARAMS = ("attention_mask", "steps", "gen_length", "block_length", "temperature", "cfg_scale", "remasking")
 README_EXAMPLE = {"temperature": 0.2, "top_p": 0.95, "steps": 512, "alg": "entropy", "alg_temp": 0.0}
 SHA_RE = re.compile(r"[0-9a-f]{40}")
 GIB = 1.073741824              # GB per GiB
 # Sum of the .safetensors of each repository on the Hugging Face API, 2026-11-09 (issue #178), in GiB.
 WEIGHTS_GIB = {"GSAI-ML/LLaDA-8B-Instruct": 14.93, "Dream-org/Dream-v0-Instruct-7B": 14.19}
-WORKING_GB = 3.0               # the Python loop's working memory (LLaDA's float64 Gumbel noise is about 0.5 GB a tensor)
-BF16_RESIDENT = 1.25           # resident set of a bf16 load over the weights' size
-NF4_RATIO = 3.5                # bf16 weights over their 4-bit size
+WORKING_GB = 3.0               # an estimate, not measured: the Python loop's working memory (LLaDA's float64 Gumbel noise is about 0.5 GB a tensor)
+BF16_RESIDENT = 1.25           # an estimate, not measured: resident set of a bf16 load over the weights' size
+NF4_RATIO = 3.5                # an estimate, not measured: bf16 weights over their 4-bit size
 
 
 @dataclass(frozen=True)
@@ -391,4 +392,5 @@ class HF:
         # result to the host, so the GPU work has finished when the clock stops.
         start = time.perf_counter()
         text = _call_with_timeout(lambda: self.backend.answer(prompt, cfg), cfg.timeout_s, f"{self.family} generation")
-        return dict(text=text, generate_s=time.perf_counter() - start, forward_passes=cfg.steps, steps=cfg.steps)
+        # The authors' loop is not instrumented: the configured steps go in `steps`, `forward_passes` stays None.
+        return GenResult(text=text, generate_s=time.perf_counter() - start, forward_passes=None, steps=cfg.steps)
