@@ -1,0 +1,14 @@
+{
+  "llama_cpp": {
+    "commit": "2e715c0639c6f07c57c943f8d5a7919953af8f7c"
+  },
+  "model": {
+    "file": "LLaDA-8B-Instruct.Q4_K_M.gguf",
+    "size_bytes": 4925226272,
+    "sha256": "8d313697ff01d76e0477ec30fe0b117e816d4da63af091b4d6a2a3e2eba23355"
+  },
+  "command": "llama-tokenize -m MODEL.gguf -f CASE.txt --ids --no-bos --log-disable",
+  "regenerate": "uv run --only-group fixtures python scripts/gen_tokenizer_fixture.py --golden-only MODEL.gguf $LLAMA_SRC/build/bin/llama-tokenize llada",
+  "cases": 36,
+  "golden_sha256": "06eb9c68e777bcdd74cd52a3a78e46527e65d11799f43bc671cab7069b7f918c"
+}

@@ -10,10 +10,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from launcher.build import BINARY, ensure_built, exec_binary
-from launcher.errors import UsageError
+from launcher.errors import LauncherError, UsageError
 from launcher.gpu import QUERY, Gpu, choose_device, parse_nvidia_smi
 from launcher.hub import Hub, offline_requested
-from launcher.models import DEFAULT_MODEL, ensure_model
+from launcher.models import DEFAULT_MODEL, ensure_model, ensure_model_status
 from launcher.verified import default_store
 
 # Flags of the binary that take no value. A test compares this list with
@@ -53,6 +53,11 @@ def parse_run_args(argv: list[str]) -> RunArgs:
         elif arg == "--prompt":
             raise UsageError(f"pass the prompt as the first word, without --prompt. Example: {EXAMPLE}")
         elif arg.startswith("-"):
+            if "=" in arg:
+                # The binary's parser has no --flag=value form either: say what to write instead.
+                flag, _, value = arg.partition("=")
+                fix = f"{flag} {value}" if flag not in BOOLEAN_FLAGS else flag
+                raise UsageError(f"{arg} is not supported: write {fix} (the flag and its value are separate arguments)")
             if arg in BOOLEAN_FLAGS:
                 passthrough.append(arg)
             else:
@@ -104,15 +109,30 @@ def detect_gpus() -> tuple[list[Gpu], str | None]:
     return parse_nvidia_smi(done.stdout), None
 
 
+def _gpus_for(device: str) -> tuple[list[Gpu], str | None]:
+    if device == "cpu":
+        return [], None
+    if device == "auto":
+        return detect_gpus()
+    try:  # an explicit gpu is checked, and an unreadable listing is a warning, not a refusal
+        return detect_gpus()
+    except LauncherError as e:
+        return [], str(e).splitlines()[0]
+
+
 def cmd_run(argv: list[str]) -> int:
     args = parse_run_args(argv)
     ensure_built()
     hub = Hub(offline=offline_requested(args.offline, os.environ))
     # Progress and status go to stderr so stdout stays the model's text.
     model = ensure_model(args.model, hub, sys.stderr, announce_cached=False, store=default_store())
-    gpus, smi_failure = detect_gpus() if args.device == "auto" else ([], None)
-    device = choose_device(args.device, gpus, smi_failure)
+    gpus, smi_failure = _gpus_for(args.device)
+    device = choose_device(args.device, gpus, smi_failure, os.environ)
     print(device.line, file=sys.stderr, flush=True)
+    if device.warning:
+        print(f"warning: {device.warning}", file=sys.stderr, flush=True)
+    # The binary opens CUDA's default device: name the card that was chosen (or checked).
+    os.environ.update(device.env)
     argv_out = run_argv(BINARY, model.resolve(), args, device.kind)
     exec_binary(argv_out)
 
@@ -130,7 +150,13 @@ def cmd_pull(argv: list[str]) -> int:
     if len(refs) > 1:
         raise UsageError("pull takes one model. Usage: ./mojo-dllm pull [MODEL] [--offline]")
     hub = Hub(offline=offline_requested(offline, os.environ))
-    ensure_model(
+    result = ensure_model_status(
         refs[0] if refs else DEFAULT_MODEL, hub, sys.stdout, announce_cached=True, store=default_store()
     )
+    if not result.verified:
+        print(
+            "The file was not checked against its sha256. Run ./mojo-dllm pull again without --offline.",
+            file=sys.stdout,
+        )
+        return 3
     return 0

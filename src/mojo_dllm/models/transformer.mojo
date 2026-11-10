@@ -102,6 +102,20 @@ comptime GEMMA_EXPERTS_DOWN = "ffn_down_exps.weight"
 # one (see `ModelConfig.__init__`). The reader lists each of these that the
 # file left out, in `ModelConfig.defaults`.
 comptime DEFAULT_CONTEXT = 4096
+
+
+def gemma_run_refusal() -> String:
+    """The text that refuses `run` on a diffusion-gemma file, in `main` before
+    any parse work and in `ModelConfig.check_runnable` for a model that is built
+    anyway. The forward pass (#64) and the entropy-bounded denoiser (#65) are
+    written; #277 tracks wiring one into the other."""
+    return (
+        GEMMA_ARCH
+        + " does not run on this model: `run` waits for the model to be wired"
+        " into the generation loop (#277), so use `logits` (CPU) until then"
+    )
+
+
 comptime DEFAULT_ROPE_BASE: Float32 = 10000.0
 comptime DEFAULT_SOFTCAP: Float32 = 30.0
 
@@ -297,14 +311,10 @@ struct ModelConfig(Copyable, ImplicitlyCopyable, Movable):
         DiffusionGemma has a forward pass of its own (`DiffusionGemma` in
         models/diffusion_gemma.mojo, which `logits` drives on the CPU), but it
         does not implement `DenoisingModel`, so `run` cannot use it until the
-        generation loop is wired to it (#64).
+        model is wired into the generation loop (#277).
         """
         if self.arch == GEMMA_ARCH:
-            raise Error(
-                GEMMA_ARCH
-                + " does not run on this model: `logits` runs it on the CPU,"
-                " and `run` waits for the generation loop (#64)"
-            )
+            raise Error(gemma_run_refusal())
 
 
 def _default_line(key: String, value: String) -> String:

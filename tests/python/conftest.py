@@ -51,6 +51,8 @@ def make_probes(**overrides: object) -> Probes:
         gpu_text=GPU_TEXT,
         driver_text="580.65.06\n",
         cached_model=Path("/cache/llada.gguf"),
+        verified=True,
+        stamp_problem=None,
     )
     return dataclasses.replace(base, **overrides)
 
@@ -86,7 +88,7 @@ class FakeHub:
         self.cached[(repo, filename)] = path
         return path
 
-    def expected_sha256(self, repo: str, filename: str) -> str | None:
+    def expected_sha256(self, repo: str, filename: str, revision: str | None = None) -> str | None:
         self.sha_requests += 1
         return self.sha256
 

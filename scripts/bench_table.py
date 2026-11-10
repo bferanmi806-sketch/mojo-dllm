@@ -24,6 +24,7 @@ import json
 import math
 import statistics
 import pathlib
+import re
 import sys
 from typing import NamedTuple
 
@@ -114,6 +115,7 @@ def load() -> dict[str, dict]:
         g = groups.setdefault(label, dict(merged={}, meta={}, sources=[], gpu=gpu))
         check_summary(f.name, doc)
         g["sources"].append(f.name)
+        g.setdefault("source_versions", []).append((f.name, doc["versions"], list(doc["summary"])))
         g.setdefault("runs", []).extend(doc["runs"])
         g.setdefault("files", []).append((f.name, doc["runs"]))
         g.setdefault("busy_threshold", doc["config"].get("busy_threshold", 0.1))
@@ -295,6 +297,23 @@ def busy_note(runs: list[dict], threshold: float, rows: list) -> list[str]:
     return ["", note]
 
 
+def mojo_dllm_versions(source_versions: list[tuple[str, dict, list[str]]]) -> str:
+    """The mojo-dllm commit under a table. Result files can record different commits (the diffuse-cpp rows were
+    measured in a later run than the mojo-dllm rows), so each commit is named with its file, and with "diffuse-cpp
+    rows only" when no mojo-dllm row comes from it. Commits that hold mojo-dllm rows come first."""
+    by_commit: dict[str, list[tuple[str, list[str]]]] = {}
+    for name, versions, rows in source_versions:
+        by_commit.setdefault(str(versions.get("mojo-dllm")), []).append((name, rows))
+    if len(by_commit) == 1:
+        return f"`{next(iter(by_commit))}`"
+    parts = []
+    for commit, files in sorted(by_commit.items(), key=lambda kv: all(r.startswith("diffuse") for _, rows in kv[1] for r in rows)):
+        names = ", ".join(re.sub(r"^\d{4}-\d{2}-\d{2}-|\.json$", "", n) for n, _ in files)
+        only = ", diffuse-cpp rows only" if all(r.startswith("diffuse") for _, rows in files for r in rows) else ""
+        parts.append(f"`{commit}` ({names}{only})")
+    return ", ".join(parts[:-1]) + " and " + parts[-1] if len(parts) > 2 else " and ".join(parts)
+
+
 def render() -> str:
     groups = load()
     order = sorted(groups, key=lambda k: (not k.startswith("LLaDA"), groups[k]["gpu"], k))
@@ -347,7 +366,7 @@ def render() -> str:
         v = meta["versions"]
         out += [
             "",
-            f"Versions: mojo-dllm `{v.get('mojo-dllm')}`, {v.get('mojo')}, llama.cpp `{v.get('llama.cpp')}`"
+            f"Versions: mojo-dllm {mojo_dllm_versions(g['source_versions'])}, {v.get('mojo')}, llama.cpp `{v.get('llama.cpp')}`"
             + (f", diffuse-cpp `{v['diffuse-cpp']}`" if any(k.startswith("diffuse") for k in merged) else "")
             + f". Evidence: {', '.join(f'`bench/results/{s}`' for s in sources)}.",
         ]

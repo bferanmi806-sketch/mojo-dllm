@@ -257,21 +257,33 @@ def _sha256(path: pathlib.Path) -> str:
     return h.hexdigest()
 
 
+def _source_commit(tokenize: str) -> str:
+    """The commit of the llama.cpp checkout that holds `tokenize` at <checkout>/build/bin/llama-tokenize."""
+    parents = pathlib.Path(tokenize).resolve().parents
+    found = None
+    if len(parents) > 2:
+        found = subprocess.run(
+            ["git", "-C", str(parents[2]), "rev-parse", "HEAD"], capture_output=True, text=True, check=False
+        )
+    if found is None or found.returncode != 0:
+        raise SystemExit(
+            f"{tokenize} is not <git checkout>/build/bin/llama-tokenize, so the commit that built it is unknown; "
+            "the provenance file records it"
+        )
+    return found.stdout.strip()
+
+
 def golden(model: pathlib.Path, tokenize: str, prefix: str, expect_commit: str | None = None) -> None:
     profile = PROFILES.get(prefix, DEFAULT_PROFILE)
-    commit = None
+    commit = _source_commit(tokenize)
     if profile["gemma"]:
         if expect_commit is None:
             pins = PINNED_RE.findall((ROOT / "scripts" / "build_dg_ref.sh").read_text())
             if len(pins) != 1:
                 raise SystemExit("scripts/build_dg_ref.sh does not hold exactly one full PINNED_COMMIT")
             expect_commit = pins[0]
-        src = pathlib.Path(tokenize).resolve().parents[2]
-        commit = subprocess.run(
-            ["git", "-C", str(src), "rev-parse", "HEAD"], capture_output=True, text=True, check=True
-        ).stdout.strip()
         if commit != expect_commit:
-            raise SystemExit(f"the llama.cpp checkout {src} is at {commit}, the pinned commit is {expect_commit}")
+            raise SystemExit(f"the llama.cpp checkout of {tokenize} is at {commit}, the pinned commit is {expect_commit}")
     lines = []
     bos_ids = set()
     for text in profile["cases"]:
@@ -293,25 +305,30 @@ def golden(model: pathlib.Path, tokenize: str, prefix: str, expect_commit: str |
     tsv = OUT / f"{prefix}-tokenizer-golden.tsv"
     tsv.write_text("\n".join(lines) + "\n")
     print(f"{len(lines)} golden cases")
+    llama_cpp = dict(commit=commit)
     if profile["gemma"]:
-        provenance = dict(
-            llama_cpp=dict(
-                repository="https://github.com/danielhanchen/llama.cpp",
-                pull_request="ggml-org/llama.cpp#24423",
-                commit=commit,
-            ),
-            model=dict(file=model.name, size_bytes=model.stat().st_size, sha256=_sha256(model)),
-            command="llama-tokenize -m MODEL.gguf -f CASE.txt --ids --no-bos --no-escape --log-disable",
-            regenerate=(
-                "uv run --only-group fixtures python scripts/gen_tokenizer_fixture.py --golden-only "
-                "MODEL.gguf $DG_LLAMA_SRC/build/bin/llama-tokenize gemma4"
-            ),
-            bos_id=bos_ids.pop(),
-            bos_check="for every case the ids with BOS equal [bos_id] + the ids without it",
-            cases=len(lines),
-            golden_sha256=hashlib.sha256(tsv.read_bytes()).hexdigest(),
+        llama_cpp = dict(
+            repository="https://github.com/danielhanchen/llama.cpp",
+            pull_request="ggml-org/llama.cpp#24423",
+            commit=commit,
         )
-        (OUT / f"{prefix}-tokenizer-golden.provenance.json").write_text(json.dumps(provenance, indent=2) + "\n")
+    command = " ".join(["llama-tokenize -m MODEL.gguf -f CASE.txt --ids --no-bos", *profile["flags"], "--log-disable"])
+    source_var = "$DG_LLAMA_SRC" if profile["gemma"] else "$LLAMA_SRC"
+    provenance = dict(
+        llama_cpp=llama_cpp,
+        model=dict(file=model.name, size_bytes=model.stat().st_size, sha256=_sha256(model)),
+        command=command,
+        regenerate=(
+            "uv run --only-group fixtures python scripts/gen_tokenizer_fixture.py --golden-only "
+            f"MODEL.gguf {source_var}/build/bin/llama-tokenize {prefix}"
+        ),
+    )
+    if profile["gemma"]:
+        provenance["bos_id"] = bos_ids.pop()
+        provenance["bos_check"] = "for every case the ids with BOS equal [bos_id] + the ids without it"
+    provenance["cases"] = len(lines)
+    provenance["golden_sha256"] = hashlib.sha256(tsv.read_bytes()).hexdigest()
+    (OUT / f"{prefix}-tokenizer-golden.provenance.json").write_text(json.dumps(provenance, indent=2) + "\n")
 
 
 def main() -> int:

@@ -46,7 +46,8 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "bench"))
 import spec  # noqa: E402  (bench/spec.py)
 
-OUT = ROOT / "tests" / "fixtures"
+# scripts/check_fixtures.py sets FIXTURES_OUT to regenerate into a scratch directory.
+OUT = pathlib.Path(os.environ.get("FIXTURES_OUT", ROOT / "tests" / "fixtures"))
 SEED = 1234
 # These three fixtures once drew from one generator seeded with SEED, in the order below, so each one's values
 # depend on how many numbers the earlier ones drew. Each now starts its own generator at the position (in 64-bit

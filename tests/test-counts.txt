@@ -1,5 +1,5 @@
 test_args 28
-test_cli 100
+test_cli 101
 test_dg_cache 10
 test_dg_forward 17
 test_dg_selfcond 9

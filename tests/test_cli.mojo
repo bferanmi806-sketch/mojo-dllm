@@ -7,7 +7,7 @@ from cli.args import Args, env_flags
 from mojo_dllm.diffusion.sampler import GenConfig, GenResult
 from mojo_dllm.formats.gguf import GGUFFile
 from mojo_dllm.models.diffusion_gemma import DiffusionGemma
-from mojo_dllm.models.transformer import DiffusionLM, Timings
+from mojo_dllm.models.transformer import DiffusionLM, ModelConfig, Timings
 from mojo_dllm.sys.mem import Bytes, F32Ptr, Floats
 from mojo_dllm.sys.mmap import Mapping
 from mojo_dllm.tokenizer.bpe import Tokenizer
@@ -1659,10 +1659,35 @@ def test_run_refuses_a_diffusion_gemma_file_before_the_tokenizer_is_built() rais
     with assert_raises(
         contains=(
             "diffusion-gemma does not run on this model: `run` waits for the"
-            " generation loop (#64), so use `logits` (CPU) until then"
+            " model to be wired into the generation loop (#277), so use"
+            " `logits` (CPU) until then"
         )
     ):
         cmd_run(a)
+
+
+def test_both_refusals_of_a_diffusion_gemma_run_say_the_same() raises:
+    # `run` stops in main before any parse work, and `check_runnable` stops a
+    # model that is built anyway (the GPU path). One text, so a reader sees
+    # one issue number.
+    var spec = command_spec("run")
+    var a = Args(
+        ["x", "run", "--model", DG_TINY, "--prompt", "hi"],
+        spec.values,
+        spec.booleans,
+    )
+    var from_run = String("")
+    try:
+        cmd_run(a)
+    except e:
+        from_run = String(e)
+    var from_config = String("")
+    try:
+        ModelConfig(GGUFFile(DG_TINY)).check_runnable()
+    except e:
+        from_config = String(e)
+    assert_true(from_run.byte_length() > 0)
+    assert_equal(from_run, from_config)
 
 
 def test_run_help_says_the_entropy_bound_flags_have_no_effect_yet() raises:
@@ -1670,7 +1695,7 @@ def test_run_help_says_the_entropy_bound_flags_have_no_effect_yet() raises:
     assert_true(
         text.__contains__(
             "the eb-* flags have no effect until run accepts"
-            " diffusion-gemma (#64)"
+            " diffusion-gemma (#277)"
         )
     )
 

@@ -3,6 +3,8 @@ from __future__ import annotations
 import io
 from pathlib import Path
 
+import pytest
+
 from launcher.doctor import preflight, run_doctor
 from launcher.ui import Style
 
@@ -45,6 +47,61 @@ def test_toolchain_not_installed_points_at_setup() -> None:
     assert any(line == "  → ./mojo-dllm setup" for line in lines)
 
 
+@pytest.mark.parametrize(
+    "reason",
+    ["timed out after 60 s", "exit 2: Failed to spawn: mojo", "uv: No such file or directory"],
+)
+def test_the_toolchain_line_carries_the_reason_the_probe_failed(reason: str) -> None:
+    _, lines = doctor(mojo_version_output=None, mojo_failure=reason)
+    line = next(line for line in lines if " toolchain " in line)
+    assert line.startswith("✗") and reason in line and "1.1.0" in line
+
+
+def test_a_failed_toolchain_probe_without_a_reason_keeps_the_old_text() -> None:
+    _, lines = doctor(mojo_version_output=None)
+    assert "mojo 1.1.0 is not installed in .venv" in next(line for line in lines if " toolchain " in line)
+
+
+@pytest.mark.parametrize(
+    "reason",
+    ["nvidia-smi not found on PATH", "timed out after 60 s",
+     "exit 9: Failed to initialize NVML: Driver/library version mismatch"],
+)
+def test_the_gpu_line_carries_the_reason_nvidia_smi_failed(reason: str) -> None:
+    code, lines = doctor(gpu_text=None, driver_text=None, gpu_failure=reason)
+    line = next(line for line in lines if " gpu " in line)
+    assert code == 0 and line.startswith("!") and reason in line
+    assert "no NVIDIA GPU found" not in line
+
+
+def test_no_reason_and_no_nvidia_smi_output_keeps_the_old_text() -> None:
+    _, lines = doctor(gpu_text=None, driver_text=None)
+    assert "no NVIDIA GPU found" in next(line for line in lines if " gpu " in line)
+
+
+def test_an_unreadable_cpuinfo_is_reported_as_unreadable_not_as_no_avx2() -> None:
+    code, lines = doctor(cpuinfo=None, cpuinfo_error="Permission denied")
+    line = next(line for line in lines if " cpu " in line)
+    assert line.startswith("!") and "cannot read /proc/cpuinfo: Permission denied" in line
+    assert "no AVX2" not in line and code == 0
+
+
+def test_an_unreadable_cpuinfo_does_not_stop_setup() -> None:
+    assert [c.status for c in preflight(make_probes(cpuinfo=None, cpuinfo_error="x"))] == ["ok", "ok", "warn"]
+
+
+def test_an_unreadable_meminfo_is_reported_with_its_reason() -> None:
+    _, lines = doctor(meminfo=None, meminfo_error="Permission denied")
+    line = next(line for line in lines if " memory " in line)
+    assert line.startswith("!") and "cannot read /proc/meminfo: Permission denied" in line
+
+
+def test_a_model_lookup_that_failed_names_the_reason_not_an_empty_cache() -> None:
+    _, lines = doctor(cached_model=None, verified=False, model_error="no .gguf file in the repo")
+    line = next(line for line in lines if " model " in line)
+    assert line.startswith("!") and "no .gguf file in the repo" in line and "is not in the Hugging Face cache" not in line
+
+
 def test_toolchain_version_mismatch_names_both_versions() -> None:
     code, lines = doctor(mojo_version_output="Mojo 1.0.0 (x)\n")
     line = next(line for line in lines if "toolchain" in line)
@@ -62,9 +119,68 @@ def test_no_glibc_fails() -> None:
     assert code == 1 and next(line for line in lines if "glibc" in line).startswith("✗")
 
 
-def test_wrong_platform_fails() -> None:
-    assert doctor(system="Darwin")[0] == 1
-    assert doctor(machine="aarch64")[0] == 1
+@pytest.mark.parametrize("overrides", [{"system": "Darwin"}, {"machine": "aarch64"}, {"system": "Windows", "machine": "AMD64"}])
+def test_wrong_platform_fails_on_the_platform_line_alone(overrides: dict[str, str]) -> None:
+    code, lines = doctor(**overrides)
+    failed = [line.split()[1] for line in lines if line.startswith("✗")]
+    assert code == 1 and failed == ["platform"]
+    assert "needs Linux x86_64" in next(line for line in lines if line.startswith("✗"))
+
+
+@pytest.mark.parametrize(("glibc", "status"), [("2.33", "✗"), ("2.34", "✓"), ("2.35", "✓"), ("2.100", "✓"), ("3.0", "✓"), ("2.9", "✗")])
+def test_glibc_boundary(glibc: str, status: str) -> None:
+    _, lines = doctor(glibc=glibc)
+    assert next(line for line in lines if " glibc " in line).startswith(status)
+
+
+@pytest.mark.parametrize(("kb", "status"), [(6 * 1024 * 1024, "✓"), (6 * 1024 * 1024 - 1, "!"), (6 * 1024 * 1024 + 1, "✓")])
+def test_memory_boundary_is_exactly_6_gib(kb: int, status: str) -> None:
+    _, lines = doctor(meminfo=f"MemAvailable: {kb} kB\n")
+    assert next(line for line in lines if " memory " in line).startswith(status)
+
+
+def test_a_meminfo_without_memavailable_warns() -> None:
+    code, lines = doctor(meminfo="MemTotal: 16000000 kB\n")
+    line = next(line for line in lines if " memory " in line)
+    assert code == 0 and line.startswith("!") and "MemAvailable not readable" in line
+
+
+def test_an_empty_nvidia_smi_listing_warns_that_it_lists_no_device() -> None:
+    code, lines = doctor(gpu_text="", driver_text=None)
+    line = next(line for line in lines if " gpu " in line)
+    assert code == 0 and line.startswith("!") and "lists no device" in line
+
+
+def test_a_missing_driver_text_leaves_the_driver_out_of_a_good_gpu_line() -> None:
+    line = next(line for line in doctor(driver_text=None)[1] if " gpu " in line)
+    assert line.startswith("✓") and "driver" not in line
+    assert "driver" not in next(line for line in doctor(driver_text="\n")[1] if " gpu " in line)
+
+
+def test_a_mixed_gpu_list_uses_the_first_card_that_qualifies() -> None:
+    text = "GTX 1650, 7.5, 3900\nNVIDIA A100, 8.0, 40000\nRTX 4090, 8.9, 24000\n"
+    line = next(line for line in doctor(gpu_text=text)[1] if " gpu " in line)
+    assert line.startswith("✓") and "A100" in line and "4090" not in line and "1650" not in line
+
+
+def test_a_list_of_only_old_cards_names_the_first() -> None:
+    line = next(line for line in doctor(gpu_text="GTX 1650, 7.5, 3900\nGTX 1080, 6.1, 8000\n")[1] if " gpu " in line)
+    assert line.startswith("!") and "GTX 1650" in line and "7.5" in line
+
+
+def test_garbage_from_mojo_version_fails_and_shows_it() -> None:
+    code, lines = doctor(mojo_version_output="command not found\n")
+    line = next(line for line in lines if " toolchain " in line)
+    assert code == 1 and line.startswith("✗") and "command not found" in line and "1.1.0" in line
+
+
+def test_a_pin_with_a_suffix_matches_the_same_suffix_in_the_version_output() -> None:
+    _, lines = doctor(mojo_pin="1.1.0.dev1", mojo_version_output="Mojo 1.1.0.dev1 (abc123)\n")
+    assert next(line for line in lines if " toolchain " in line).startswith("✓")
+    _, lines = doctor(mojo_pin="1.1.0.dev1", mojo_version_output="Mojo 1.1.0 (abc123)\n")
+    assert next(line for line in lines if " toolchain " in line).startswith("✗")
+    _, lines = doctor(mojo_pin="1.1.0", mojo_version_output="Mojo 1.1.0.dev1 (abc123)\n")
+    assert next(line for line in lines if " toolchain " in line).startswith("✗")
 
 
 def test_no_avx2_fails() -> None:
@@ -104,10 +220,36 @@ def test_missing_binary_fails_and_stale_binary_warns() -> None:
     assert "  → ./mojo-dllm setup" in lines
 
 
+def test_a_stale_stamp_warns_that_the_binary_needs_a_rebuild() -> None:
+    code, lines = doctor(stamp_problem="built for sm_80, this machine now builds for sm_86")
+    line = next(line for line in lines if " binary " in line)
+    assert code == 0 and line.startswith("!") and "sm_80" in line
+    assert lines[lines.index(line) + 1] == "  → ./mojo-dllm setup"
+
+
+def test_a_tree_with_no_sources_fails_the_binary_check() -> None:
+    code, lines = doctor(source_mtimes=())
+    line = next(line for line in lines if " binary " in line)
+    assert code == 1 and line.startswith("✗") and "no sources" in line
+
+
 def test_missing_model_warns_with_the_pull_command() -> None:
     code, lines = doctor(cached_model=None)
     assert code == 0
     assert "  → ./mojo-dllm pull" in lines
+
+
+def test_an_unverified_cached_model_warns_and_names_the_pull_command() -> None:
+    code, lines = doctor(verified=False)
+    line = next(line for line in lines if " model " in line)
+    assert code == 0 and line.startswith("!") and "/cache/llada.gguf" in line and "not verified" in line
+    assert lines[lines.index(line) + 1] == "  → ./mojo-dllm pull"
+
+
+def test_a_verified_cached_model_stays_green() -> None:
+    _, lines = doctor(verified=True)
+    line = next(line for line in lines if " model " in line)
+    assert line.startswith("✓") and "not verified" not in line
 
 
 def test_every_failure_is_listed_before_exit() -> None:

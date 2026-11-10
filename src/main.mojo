@@ -39,6 +39,7 @@ from mojo_dllm.models.transformer import (
     ModelConfig,
     Timings,
     GEMMA_ARCH,
+    gemma_run_refusal,
 )
 from mojo_dllm.sys.mem import Bytes, F32Ptr, Floats, U8Ptr
 from mojo_dllm.sys.mmap import Mapping
@@ -145,7 +146,7 @@ def command_usage(command: String) raises -> String:
             " 0.8] [--eb-bound 0.1]\n"
             + "                [--eb-stability 1] [--eb-confidence 0.005]\n"
             + "                (the eb-* flags have no effect until run accepts"
-            " diffusion-gemma (#64))"
+            " diffusion-gemma (#277))"
         )
     if command == "tokenize":
         return "  mojo-dllm tokenize --model M --prompt TEXT [--no-chat]"
@@ -773,11 +774,7 @@ def cmd_run(a: Args) raises:
     if g.architecture() == GEMMA_ARCH:
         # Before the tokenizer, the prompt and the model: DiffusionGemma has no
         # DenoisingModel yet, so no work done here could end in a run.
-        raise Error(
-            GEMMA_ARCH
-            + " does not run on this model: `run` waits for the generation"
-            " loop (#64), so use `logits` (CPU) until then"
-        )
+        raise Error(gemma_run_refusal())
     var tok = Tokenizer(g)
     check_tokenizer_matches_model(g, tok)
     var prompt = encode_prompt(tok, g.architecture(), a)

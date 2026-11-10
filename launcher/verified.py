@@ -14,6 +14,8 @@ import tempfile
 from collections.abc import Mapping
 from pathlib import Path
 
+from launcher.errors import LauncherError
+
 
 def default_state_path(env: Mapping[str, str], home: Path) -> Path:
     base = Path(env["XDG_CACHE_HOME"]) if env.get("XDG_CACHE_HOME") else home / ".cache"
@@ -52,8 +54,22 @@ class VerifiedStore:
             and record.get("mtime_ns") == stat.st_mtime_ns
         )
 
-    def record(self, blob: Path, sha256: str) -> None:
-        stat = blob.stat()
+    def record(self, blob: Path, sha256: str, stat: os.stat_result | None = None) -> None:
+        """Remember that `blob` matched its sha256.
+
+        Pass the stat taken before the file was hashed: a file replaced while it was being
+        hashed then fails is_verified instead of being recorded with its new size and mtime.
+        """
+        try:
+            self._write(blob, sha256, stat if stat is not None else blob.stat())
+        except OSError as e:
+            raise LauncherError(
+                f"cannot record the check of {blob.name} in {self.path}: {e.strerror or e}. "
+                "The file matched its sha256, and it will be checked again on the next run. "
+                f"Make {self.path.parent} writable, or set XDG_CACHE_HOME to a directory that is."
+            ) from e
+
+    def _write(self, blob: Path, sha256: str, stat: os.stat_result) -> None:
         records = self._load()
         records[self._key(blob)] = {"size": stat.st_size, "mtime_ns": stat.st_mtime_ns, "sha256": sha256}
         self.path.parent.mkdir(parents=True, exist_ok=True)
