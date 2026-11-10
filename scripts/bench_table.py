@@ -88,7 +88,7 @@ def check_summary(name: str, doc: dict) -> None:
         gen_length = doc["config"]["gen_length"]
         starts = [r["startup_s"] for r in ok if "startup_s" in r]
         rates = [gen_length / r["generate_s"] for r in ok if "generate_s" in r]
-        peak = max((r["peak_rss_bytes"] for r in ok), default=0) / 1e9 or None
+        peak = max((r["peak_rss_bytes"] for r in ok if "peak_rss_bytes" in r), default=0) / 1e9 or None
         for field, value in (("tokens_per_s_median", statistics.median(rates) if rates else None),
                              ("startup_s_median", statistics.median(starts) if starts else None),
                              ("peak_rss_gb_max", peak)):

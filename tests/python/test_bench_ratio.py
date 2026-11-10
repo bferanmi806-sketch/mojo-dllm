@@ -23,7 +23,9 @@ tables = load_module("bench_table_ratio", ROOT / "scripts/bench_table.py")
 
 
 def run(runtime, rep, prompt, ms, ok=True):
-    return dict(runtime=runtime, rep=rep, prompt_index=prompt, ms_per_step=ms, ok=ok, cpu_busy_before=0.01)
+    # generate_s, startup_s and peak_rss_bytes are what summary() below claims: bench_table re-derives them (#253).
+    return dict(runtime=runtime, rep=rep, prompt_index=prompt, ms_per_step=ms, ok=ok, cpu_busy_before=0.01,
+                generate_s=32 * ms / 1000, startup_s=2.0, peak_rss_bytes=1_000_000_000)
 
 
 def summary(ms, runs_ok=6):
