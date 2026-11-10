@@ -37,12 +37,12 @@ stops the run (see [Errors](#errors)).
 | `--threshold P` | 0 (off) | A number from 0 to 1. LLaDA: each step also commits every masked token whose confidence is at least P, so easy blocks finish in fewer steps (Fast-dLLM's parallel decoding). A step still commits at least what the schedule says. Not exact: see [Benchmarks](benchmarks.md#steps-and-quality) for its measured effect on accuracy |
 | `--dual-cache` | off | LLaDA: cache every position's keys and values and, inside a block, recompute only that block's rows (Fast-dLLM's DualCache). The cache is refreshed at the first step of each block. Not exact: the prompt and later blocks see keys from the block's first step; see [Benchmarks](benchmarks.md#steps-and-quality) for its measured effect on accuracy. Cannot combine with `--full-logits` |
 | `--seed N` | 42 | seeds this program's PRNG (it does not reproduce a PyTorch run). It fixes DiffusionGemma's random canvas and draws as well |
-| `--eb-steps N` | 48 | DiffusionGemma: most denoising steps (use it instead of `--steps`, which that model refuses) (no effect yet, see the paragraph after the table) |
+| `--eb-steps N` | 48 | DiffusionGemma: most denoising steps, at least 1 (use it instead of `--steps`, which that model refuses) (no effect yet, see the paragraph after the table) |
 | `--eb-t-min T` | 0.4 | DiffusionGemma: the temperature the schedule approaches, 0 or more; the last of `--eb-steps` steps runs at `T + (t-max - T) / steps` (no effect yet, see the paragraph after the table) |
-| `--eb-t-max T` | 0.8 | DiffusionGemma: the temperature of the first step; it falls linearly from there (no effect yet, see the paragraph after the table) |
-| `--eb-bound B` | 0.1 | DiffusionGemma: a position is accepted while the entropies of the lower-entropy positions before it sum to at most B (no effect yet, see the paragraph after the table) |
+| `--eb-t-max T` | 0.8 | DiffusionGemma: the temperature of the first step, above 0; it falls linearly from there (no effect yet, see the paragraph after the table) |
+| `--eb-bound B` | 0.1 | DiffusionGemma: a position is accepted while the entropies of the lower-entropy positions before it sum to at most B, which must be at least 0 (no effect yet, see the paragraph after the table) |
 | `--eb-stability N` | 1 | DiffusionGemma: steps the argmax canvas must hold before the run may stop; 0 or more, and 0 lets the first step stop it (no effect yet, see the paragraph after the table) |
-| `--eb-confidence C` | 0.005 | DiffusionGemma: the run may stop once the mean entropy over the canvas is below C (no effect yet, see the paragraph after the table) |
+| `--eb-confidence C` | 0.005 | DiffusionGemma: the run may stop once the mean entropy over the canvas is below C, which must be at least 0 (no effect yet, see the paragraph after the table) |
 | `--threads N` | all logical CPUs | worker threads of every parallel CPU loop, including the activation quantization and the weight repack at load (with `--device gpu`, only the sampler uses them) |
 | `--device D` | `cpu` | `cpu`, or `gpu` for an NVIDIA GPU with compute capability 8.0 or newer |
 | `--no-chat` | off | skip the chat template |
@@ -188,7 +188,7 @@ stderr, so stdout stays free for the answer or the JSON object; help text and
 | `ERROR: flag --prompt needs a value, got the flag --verbose` | A value flag is followed by the name of a declared flag, which is almost always a forgotten value. `--help` stays a legal value |
 | `ERROR: flag --steps is given twice` | A value flag appears twice; the command no longer keeps the last silently. A boolean flag repeated is harmless |
 | `ERROR: flag --rows needs comma-separated integers, got '0,,2'` | An empty entry in `--tokens` or `--rows` (a trailing comma stays legal) |
-| `ERROR: flag --steps must be at least 1, got 0` | `--max-tokens`, `--steps`, `--block-length` and `--threads` need at least 1, and `--temperature` at least 0. `--threshold` needs a number from 0 to 1 and `--prev-temp-inv` one above 0. The check runs before the model is mapped |
+| `ERROR: flag --steps must be at least 1, got 0` | `--max-tokens`, `--steps`, `--block-length`, `--threads` and `--eb-steps` need at least 1, and `--eb-stability` at least 0. `--temperature`, `--eb-t-min`, `--eb-bound` and `--eb-confidence` need a finite number of at least 0, `--eb-t-max` and `--prev-temp-inv` one above 0 (not only finite), and `--threshold` a number from 0 to 1. The check runs before the model is mapped |
 | `ERROR: prompt 10 + --max-tokens 4096 = 4106 exceeds the context length 4096 (llada.context_length)` | The canvas is longer than the file's context length. Lower `--max-tokens`. Exit status 1, before any weight is mapped |
 | `ERROR: cannot open model file PATH: No such file or directory` | The path is wrong. The reason is the operating system's. The next line is `to download a model, run: ./mojo-dllm pull` |
 | `ERROR: cannot open model file PATH: Permission denied` | The open failed for a reason other than a missing file, such as `Not a directory`. The operating system names the reason. No download hint follows, because `pull` would not fix it |

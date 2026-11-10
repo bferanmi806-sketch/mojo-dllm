@@ -52,7 +52,7 @@ minutes](diffusion.md) walks through it with a picture.
   `unsupported model architecture: <name> (runs: llada, dream; read only: diffusion-gemma)`.
 - One quantization mix: Q4_K and Q6_K projection matrices, as in a Q4_K_M
   file, with an embedding table and norm vectors that the reference decoders
-  read (F32, F16, BF16, Q8_0, Q4_K, Q5_K, Q6_K). A matrix of any other type
+  read (F32, F16, BF16, Q5_0, Q8_0, Q4_K, Q5_K, Q6_K). A matrix of any other type
   stops the load with an error that names it. DiffusionGemma's `logits` also
   reads Q5_0 and Q8_0 matrices for the down projections.
 

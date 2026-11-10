@@ -477,6 +477,13 @@ semantic versioning (0.y: minor bumps may break things).
   `ModelConfig.check_runnable` raise one text from one function, `gemma_run_refusal`, and `docs/cli.md`,
   `docs/introduction.md`, `docs/model-porting.md` and `docs/benchmarks.md` use the same three numbers. `docs/cli.md` no
   longer says that DiffusionGemma's `--json` reports `stopped_early` today.
+- Documentation facts checked against the code (#271). The source map in `docs/architecture.md` lists every file under
+  `src/` and names DiffusionGemma's loop in the sampler row. `docs/cli.md` gives the limits of `--eb-steps` (at least
+  1), `--eb-t-max` (above 0), `--eb-bound` and `--eb-confidence` (at least 0). The README, the introduction and the
+  architecture page list the eight tensor types the decoders accept in one order. The version line under the first CPU
+  table names `bdd268b` (cpu-llada) and `dd0a647` (cpu-diffuse, diffuse-cpp rows only), which
+  `scripts/bench_table.py` now renders from each result file instead of the last one read. `tests/python/test_docs_facts.py`
+  checks each of these against `src/` and `bench/results`.
 
 ## [0.1.0] - 2026-10-04
 
