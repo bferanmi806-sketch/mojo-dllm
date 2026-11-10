@@ -108,3 +108,13 @@ def test_a_link_to_a_target_outside_the_cache_is_removed_and_the_target_is_kept(
             store=VerifiedStore(tmp_path / "verified.json"),
         )
     assert not link.is_symlink() and outside.read_bytes() == b"truncated"
+
+
+def test_a_hub_that_lists_no_such_path_is_a_launcher_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Empty(FakeHfApi):
+        def get_paths_info(self, repo, paths, revision=None):  # type: ignore[no-untyped-def]
+            return []
+
+    monkeypatch.setattr(huggingface_hub, "HfApi", Empty)
+    with pytest.raises(LauncherError, match="no file m.Q4_K_M.gguf"):
+        Hub(Path("/unused")).expected_sha256(REPO, NAME)

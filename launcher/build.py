@@ -136,14 +136,19 @@ def ensure_built() -> bool:
     print("Building mojo-dllm (about a minute)...", file=sys.stderr, flush=True)
     stamp = current_stamp()  # taken before the build: it names what the build was asked for
     tail: collections.deque[str] = collections.deque(maxlen=20)
-    proc = subprocess.Popen(
-        ["bash", "scripts/build.sh"],
-        cwd=ROOT,
-        env=project_env(),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
+    try:
+        proc = subprocess.Popen(
+            ["bash", "scripts/build.sh"],
+            cwd=ROOT,
+            env=project_env(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+    except OSError as e:
+        raise LauncherError(
+            f"cannot start bash scripts/build.sh: {e.strerror}. Install bash, then run ./mojo-dllm setup again."
+        ) from e
     assert proc.stdout is not None
     for line in proc.stdout:
         sys.stderr.write(line)

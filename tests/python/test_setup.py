@@ -352,3 +352,15 @@ def test_the_smoke_test_has_a_timeout_a_full_argv_and_returns_the_measured_secon
     ]
     assert seen[0]["timeout"] == 300
     assert capsys.readouterr().out == "Hello there\n"
+
+
+def test_an_os_error_during_setup_is_an_error_line_and_status_1(hub: FakeHub, store: VerifiedStore) -> None:
+    e = Env(hub, store)
+
+    def sync() -> None:
+        raise PermissionError(13, "Permission denied", "/repo/.venv")
+
+    e.env = dataclasses.replace(e.env, sync=sync)
+    assert e.run(["--yes"]) == 1
+    err = e.err.getvalue()
+    assert err.startswith("error: ") and "/repo/.venv" in err and "Permission denied" in err

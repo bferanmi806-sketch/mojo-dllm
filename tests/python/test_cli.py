@@ -172,3 +172,37 @@ def test_a_missing_binary_after_the_build_names_doctor(
     assert cli.main(["inspect", "m.gguf"]) == 1
     err = capsys.readouterr().err
     assert err.startswith("error:") and "./mojo-dllm doctor" in err and "absent" in err
+
+
+def test_an_os_error_prints_its_path_and_reason_not_a_traceback(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def boom(argv: list[str]) -> int:
+        raise PermissionError(13, "Permission denied", "/home/u/.cache/huggingface/hub/x")
+
+    monkeypatch.setattr(cli, "cmd_pull", boom)
+    assert cli.main(["pull"]) == 1
+    err = capsys.readouterr().err
+    assert err.startswith("error: ") and "/home/u/.cache/huggingface/hub/x" in err and "Permission denied" in err
+    assert "Traceback" not in err and err.count("\n") == 1
+
+
+def test_an_os_error_without_a_path_still_prints_one_line(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(cli, "cmd_run", lambda argv: (_ for _ in ()).throw(OSError(28, "No space left on device")))
+    assert cli.main(["run", "hi"]) == 1
+    err = capsys.readouterr().err
+    assert "No space left on device" in err and "Traceback" not in err
+
+
+def test_ctrl_c_is_one_line_and_exit_130(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def interrupted(argv: list[str]) -> int:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "cmd_pull", interrupted)
+    assert cli.main(["pull"]) == 130
+    err = capsys.readouterr().err
+    assert err == "interrupted\n"

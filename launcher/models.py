@@ -129,6 +129,7 @@ def _check_sha256(path: Path, plan: ModelPlan, hub: Hub, store: VerifiedStore) -
     if expected is None:
         _delete(path, hub.cache_dir)
         raise LauncherError(f"Hugging Face reported no sha256 for {plan.label}, so the download cannot be verified.")
+    before = path.stat()  # taken before hashing: a file replaced while it is read must not be recorded
     actual = _sha256(path)
     if actual != expected:
         _delete(path, hub.cache_dir)
@@ -136,7 +137,7 @@ def _check_sha256(path: Path, plan: ModelPlan, hub: Hub, store: VerifiedStore) -
             f"sha256 of {plan.label} does not match the hub's. The file was deleted.\n"
             "Run the command again to download it fresh."
         )
-    store.record(path, actual)
+    store.record(path, actual, before)
 
 
 def fetch_model(plan: ModelPlan, hub: Hub, out: TextIO, store: VerifiedStore) -> Path:

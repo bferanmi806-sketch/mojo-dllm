@@ -14,7 +14,7 @@ from typing import TextIO
 
 from launcher import build
 from launcher.doctor import preflight, render
-from launcher.errors import LauncherError, UsageError
+from launcher.errors import LauncherError, UsageError, describe_os_error
 from launcher.gpu import Device, choose_device, parse_nvidia_smi
 from launcher.hub import offline_requested
 from launcher.models import DEFAULT_MODEL, Hub, already_downloaded_line, fetch_model, parse_model_ref, plan_model, use_cached
@@ -102,6 +102,9 @@ def run_setup(args: SetupArgs, env: SetupEnv) -> int:
     except LauncherError as e:
         print(f"error: {e}", file=env.err)
         return e.code
+    except OSError as e:
+        print(f"error: {describe_os_error(e)}", file=env.err)
+        return 1
 
 
 def _setup(args: SetupArgs, env: SetupEnv) -> int:

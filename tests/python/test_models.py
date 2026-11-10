@@ -306,3 +306,21 @@ def test_a_local_file_is_not_a_cache_entry(hub, store, tmp_path: Path) -> None:
     f.write_bytes(b"x")
     result = ensure_model_status(str(f), None, io.StringIO(), announce_cached=True, store=store)
     assert (result.path, result.verified) == (f, True)
+
+
+def test_a_file_replaced_between_the_hash_and_the_record_is_not_recorded_as_verified(
+    hub, store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from launcher import models
+
+    real = models._sha256
+
+    def hash_then_replace(path: Path) -> str:
+        digest = real(path)
+        path.write_bytes(b"another file, written after the hash was read")
+        return digest
+
+    monkeypatch.setattr(models, "_sha256", hash_then_replace)
+    plan = plan_model(ModelRef(repo=REPO, quant="Q4_K_M"), hub)
+    path = fetch_model(plan, hub, io.StringIO(), store)
+    assert not store.is_verified(path)

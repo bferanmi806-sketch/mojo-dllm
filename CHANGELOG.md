@@ -433,6 +433,11 @@ semantic versioning (0.y: minor bumps may break things).
   (a driver and library mismatch is visible), an unreadable `/proc/cpuinfo` or `/proc/meminfo` is reported with the system's
   reason instead of "no AVX2", and a cache lookup that failed names its error instead of "not in the cache". The driver
   version comes from the same `nvidia-smi` call as the GPU list.
+- The launcher prints one error line, not a Python traceback, for the failures that were not `LauncherError` (#261): an
+  `OSError` (a read-only home directory, a full disk, a missing `bash`) names the path and the system's reason, an empty
+  `get_paths_info` answer says the hub has no such file, and Ctrl-C prints `interrupted` and exits 130. A failed write of
+  `verified.json` says that the download matched its sha256 and will be checked again. The size and mtime recorded for a
+  verified file are the ones taken before it was hashed, so a file replaced during the hash is not recorded as verified.
 
 ## [0.1.0] - 2026-10-04
 

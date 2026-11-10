@@ -7,7 +7,7 @@ import sys
 
 from launcher.build import BINARY, ROOT, ensure_built, exec_binary
 from launcher.doctor import run_doctor
-from launcher.errors import LauncherError, UsageError
+from launcher.errors import LauncherError, UsageError, describe_os_error
 from launcher.probes import read_project_version, real_probes
 from launcher.runcmd import cmd_pull, cmd_run
 from launcher.ui import Style
@@ -105,3 +105,9 @@ def main(argv: list[str]) -> int:
     except LauncherError as e:
         print(f"error: {e}", file=sys.stderr)
         return e.code
+    except OSError as e:
+        print(f"error: {describe_os_error(e)}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        print("interrupted", file=sys.stderr)
+        return 130

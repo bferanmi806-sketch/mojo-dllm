@@ -172,3 +172,13 @@ def test_a_current_binary_is_not_rebuilt(tree: Path, monkeypatch: pytest.MonkeyP
     calls = _fake_popen(monkeypatch, [], 0)
     monkeypatch.setattr(build, "needs_build", lambda: False)
     assert build.ensure_built() is False and calls == []
+
+
+def test_a_missing_bash_is_a_launcher_error(tree: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def popen(cmd: list[str], **kwargs: object) -> None:
+        raise FileNotFoundError(2, "No such file or directory", "bash")
+
+    monkeypatch.setattr(build, "needs_build", lambda: True)
+    monkeypatch.setattr(build.subprocess, "Popen", popen)
+    with pytest.raises(LauncherError, match="cannot start bash"):
+        build.ensure_built()

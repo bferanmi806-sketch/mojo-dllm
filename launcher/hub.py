@@ -87,7 +87,11 @@ class Hub:
         from huggingface_hub import HfApi
 
         with _hub_errors(repo, self.cache_dir):
-            (info,) = HfApi().get_paths_info(repo, [filename], revision=revision)
+            infos = list(HfApi().get_paths_info(repo, [filename], revision=revision))
+        if len(infos) != 1:
+            where = f" at revision {revision[:12]}" if revision else ""
+            raise LauncherError(f"Hugging Face has no file {filename} in {repo}{where}, so it cannot be verified.")
+        (info,) = infos
         return info.lfs.sha256 if getattr(info, "lfs", None) else None
 
 
