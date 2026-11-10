@@ -363,7 +363,7 @@ def check_runtime_names(names: list[str]) -> None:
 def collect_versions(c: dict, runtimes: list[str]) -> dict:
     """The versions recorded with a result, and the SHA-256 of build/mojo-dllm when a mojo-dllm runtime runs.
 
-    The commit label says what the source was; the binary hash says which build actually ran, so a stale
+    The commit label says what the source was; the binary hash says which build ran, so a stale
     binary cannot carry the label of a newer commit.
     """
     versions = {

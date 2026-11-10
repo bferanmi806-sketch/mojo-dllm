@@ -17,13 +17,13 @@
 # It never edits cron files. A per-minute user cron job still fires; the isolation window sees it and the
 # runner repeats the problem (bench/isolation.py).
 #
-# Every change is written to the state file as it is made, so --restore can undo a run that could not clean up.
+# Every change is written to the state file before it is made, so --restore can undo a run that could not clean up.
 # The command after `--` runs as the user who invoked sudo (SUDO_USER) when there is one. Exit status is the
 # command's, and it sees BENCH_QUIET_ACTIVE=timers:N,pm:N,clocks:N,refused:N: how many timers it stopped, how
 # many cards it switched to persistence mode and locked, and how many changes it tried and could not make
 # (bench/isolation.py records it as `bench_quiet_changes`, so a row says what was quieted, not only that the
-# script ran). Each change is written to the state file before it is made. A trap on EXIT, INT, TERM, HUP and QUIT restores everything, and the script prints what it changed and what
-# it restored.
+# script ran). A trap on EXIT, INT, TERM, HUP and QUIT restores everything, and the script prints what it changed
+# and what it restored.
 #
 # Test seams (environment, all optional):
 #   BENCH_QUIET_ASSUME_ROOT=1   skip the "must be root" check, but only when BENCH_QUIET_TESTING=1 is set too,
