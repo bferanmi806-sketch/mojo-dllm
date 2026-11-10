@@ -13,7 +13,12 @@ from __future__ import annotations
 import argparse
 import math
 from dataclasses import dataclass, field, fields
+from pathlib import Path
 from typing import Protocol, runtime_checkable
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import spec  # noqa: E402  (bench/spec.py)
 
 
 class EngineError(RuntimeError):
@@ -25,13 +30,19 @@ class GenConfig:
     """What one generation is asked to do; the same for every problem of an arm."""
 
     model: str
-    device: str = "gpu"
+    device: spec.Device = "gpu"
     gen_length: int = 256
     steps: int = 256
     block_length: int = 32
-    schedule: str = "timestep"
+    schedule: spec.Schedule = "timestep"
     extra: tuple[str, ...] = field(default_factory=tuple)
-    timeout_s: float = 1800.0      # per generation; a timeout fails the run, it never scores a row
+    timeout_s: float = spec.GENERATION_TIMEOUT_S      # per generation; a timeout fails the run, it never scores a row
+
+    def __post_init__(self) -> None:
+        if self.device not in spec.DEVICES:
+            raise EngineError(f"device must be one of {list(spec.DEVICES)}, got {self.device!r}")
+        if self.schedule not in spec.SCHEDULES:
+            raise EngineError(f"schedule must be one of {list(spec.SCHEDULES)}, got {self.schedule!r}")
 
 
 def _count(name: str, value: object, minimum: int, optional: bool = True) -> None:

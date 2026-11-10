@@ -45,9 +45,10 @@ from . import EngineError, GenConfig, GenResult, register
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 import isolation  # noqa: E402  (bench/isolation.py: its /proc/meminfo reader)
+import spec  # noqa: E402  (bench/spec.py)
 
 SHORT_TIMEOUT_S = 60           # git rev-parse
-LLADA_MASK_ID = 126336         # generate.py's default and the id its README assigns to [MASK]
+LLADA_MASK_ID = spec.ARCH_IDS["llada"]["mask"]   # generate.py's default and the id its README assigns to [MASK]
 LLADA_PARAMS = ("attention_mask", "steps", "gen_length", "block_length", "temperature", "cfg_scale", "remasking")
 README_EXAMPLE = {"temperature": 0.2, "top_p": 0.95, "steps": 512, "alg": "entropy", "alg_temp": 0.0}
 SHA_RE = re.compile(r"[0-9a-f]{40}")

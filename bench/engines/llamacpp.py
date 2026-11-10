@@ -21,11 +21,12 @@ from . import EngineError, GenConfig, GenResult, register
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "bench"))
 import run_bench  # noqa: E402  (bench/run_bench.py: the CUDA check and the output parser)
+import spec  # noqa: E402  (bench/spec.py)
 
-EPS = "0.001"     # the timestep schedule's epsilon, as in run_bench
-TEMP = "0"
-SHORT_TIMEOUT_S = 60    # git rev-parse and `mojo-dllm tokenize`: both finish in well under a second
-SEED = "42"
+EPS = spec.LLAMA_EPS     # the timestep schedule's epsilon, as in run_bench
+TEMP = spec.LLAMA_TEMP
+SHORT_TIMEOUT_S = 60    # git rev-parse and `mojo-dllm tokenize`: a slow disk can take seconds, 60 s is the ceiling
+SEED = spec.LLAMA_SEED
 
 
 def _run(cmd: list[str], timeout_s: float) -> subprocess.CompletedProcess:
@@ -92,13 +93,9 @@ class LlamaCpp:
         return len(lines[-1].strip("[]").replace(" ", "").split(","))
 
     def command(self, prompt: str, cfg: GenConfig, seq_len: int) -> list[str]:
-        cmd = [str(binary(self.llama_cpp, cfg.device)), "-m", cfg.model, "-p", prompt,
-               "-c", str(seq_len), "-b", str(seq_len), "-ub", str(seq_len),
-               "--diffusion-steps", str(cfg.steps)]
-        cmd += ["--diffusion-eps", EPS] if cfg.schedule == "timestep" else ["--diffusion-block-length", str(cfg.block_length)]
-        cmd += ["--temp", TEMP, "-t", str(self.threads), "-tb", str(self.threads), "--seed", SEED]
-        if cfg.device == "gpu":
-            cmd += ["-ngl", "99", "-v"]
+        cmd = [str(binary(self.llama_cpp, cfg.device)), "-m", cfg.model, "-p", prompt]
+        cmd += spec.llama_diffusion_args(seq_len, cfg.steps, self.threads, cfg.device == "gpu", cfg.schedule,
+                                         cfg.block_length)
         return cmd + list(cfg.extra)
 
     def generate(self, prompt: str, cfg: GenConfig) -> dict:

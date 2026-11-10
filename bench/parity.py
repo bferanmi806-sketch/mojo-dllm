@@ -47,11 +47,12 @@ if TYPE_CHECKING:
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "bench"))
 import atomic_write  # noqa: E402  (bench/atomic_write.py)
+import spec  # noqa: E402  (bench/spec.py: the ids, prompts and seeds shared with the other tools)
 from parity_schema import (  # noqa: E402  (bench/parity_schema.py)
     BOUND_KEYS, VIOLATION_KEYS, Bound, DgMetrics, Metrics, ParityError, require_keys, validate_parity,
 )
 
-SPECS = {"llada": dict(vocab=126464, mask=126336), "dream": dict(vocab=152064, mask=151666)}
+SPECS = spec.ARCH_IDS
 
 class LogitCase(NamedTuple):
     prompt: str
@@ -66,12 +67,12 @@ class GenCase(NamedTuple):
 
 
 LOGIT_CASES = [
-    LogitCase("Explain speculative decoding in two sentences.", 44),
-    LogitCase("List three differences between diffusion language models and autoregressive language models.", 100),
+    LogitCase(spec.PROMPTS[0], 44),
+    LogitCase(spec.PROMPTS[2], 100),
 ]
 GEN_CASES = [
-    GenCase("Explain speculative decoding in two sentences.", 32, 32, 32),
-    GenCase("Write a short Python function that checks whether a number is prime.", 64, 32, 32),
+    GenCase(spec.PROMPTS[0], 32, 32, 32),
+    GenCase(spec.PROMPTS[1], 64, 32, 32),
 ]
 
 
@@ -112,7 +113,7 @@ def compare(a: np.ndarray, b: np.ndarray, first_mask: int) -> Metrics:
 DG_ARCH = "diffusion-gemma"
 # The canvas is random token ids (the model starts from noise, not masks), fixed here so that both
 # runtimes see the same one. Seeds are the issue number plus the case index.
-DG_CANVAS_SEED = 66
+DG_CANVAS_SEED = spec.DG_CANVAS_SEED
 # The four forward passes of one canvas. The cached ones run the prompt through a prefill first and then
 # the canvas against the stored K/V; the -sc ones add self-conditioning from the previous step's logits.
 DG_VARIANTS = ("unified", "cached", "unified-sc", "cached-sc")
@@ -121,7 +122,7 @@ DG_VARIANTS = ("unified", "cached", "unified-sc", "cached-sc")
 DG_PREV_FILE = "unified.ref.f32"
 # The first denoising step runs at temperature 0.8 (issue #60), so the second step's self-conditioning
 # divides the previous logits by it.
-DG_PREV_TEMP_INV = 1.0 / 0.8
+DG_PREV_TEMP_INV = 1.0 / spec.DG_FIRST_STEP_TEMP
 LLADA_EVIDENCE = "bench/parity/2026-10-03-llada.json"
 # The reference's own sensitivity: with the previous-step logits changed by this relative L2 amount (about
 # ten times the spacing of float32 values) the output of the reference itself moved by a median relative RMS
@@ -129,7 +130,7 @@ LLADA_EVIDENCE = "bench/parity/2026-10-03-llada.json"
 # The cause is untested; expert routing flips spread by bidirectional attention are a hypothesis. It is run on
 # every case so that a comparison is never read without that spread beside it.
 DG_NOISE_REL = 1e-6
-DG_NOISE_SEED = 66
+DG_NOISE_SEED = spec.DG_NOISE_SEED
 DG_NOISY_FILE = "unified-sc-noisy.ref.f32"
 
 

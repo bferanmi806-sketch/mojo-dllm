@@ -780,8 +780,10 @@ def test_extra_engine_flags_are_refused(rig: Rig) -> None:
 
 
 def test_a_device_other_than_cpu_or_gpu_is_refused(rig: Rig) -> None:
+    cfg = rig.cfg()
+    object.__setattr__(cfg, "device", "tpu")   # GenConfig refuses it at construction; the adapter's own guard stays
     with pytest.raises(SystemExit, match="cpu or gpu"):
-        rig.engine().check(rig.cfg(device="tpu"))
+        rig.engine().check(cfg)
 
 
 def test_a_step_count_the_server_cannot_take_is_refused(rig: Rig) -> None:

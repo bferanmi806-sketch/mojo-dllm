@@ -12,7 +12,13 @@ import json
 import math
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import spec  # noqa: E402  (bench/spec.py)
+
+ARCH_IDS = spec.ARCH_IDS
 
 
 def run(cmd):
@@ -29,7 +35,7 @@ def main():
     args = ap.parse_args()
     roots = {k: Path(getattr(args, k)).resolve() for k in ('base', 'new')}
     bins = {k: str(p / 'build/mojo-dllm') for k, p in roots.items()}
-    mask, vocab = {'llada': (126336, 126464), 'dream': (151666, 152064)}[args.arch]
+    mask, vocab = ARCH_IDS[args.arch]['mask'], ARCH_IDS[args.arch]['vocab']
     model = str(Path(args.model).resolve())
     prompts = json.loads((roots['new'] / 'bench/config-gpu.json').read_text())['prompts']
     doc = dict(arch=args.arch, model=Path(model).name, mask_id=mask,

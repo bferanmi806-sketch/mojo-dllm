@@ -55,6 +55,7 @@ sys.path.insert(0, str(ROOT / "bench"))
 import atomic_write  # noqa: E402  (bench/atomic_write.py)
 import isolation  # noqa: E402  (bench/isolation.py)
 import power  # noqa: E402  (bench/power.py)
+import spec  # noqa: E402  (bench/spec.py)
 
 
 class Watchdog(threading.Thread):
@@ -225,12 +226,8 @@ def parse_llama_output(output: str) -> dict | None:
 def run_llama(c: dict, prompt: str, threads: int, seq_len: int, cuda: bool = False) -> dict:
     """llama.cpp's diffusion example; with cuda, the build-cuda tree and every layer offloaded."""
     build = "build-cuda" if cuda else "build"
-    cmd = [
-        c["llama_cpp"] + f"/{build}/bin/llama-diffusion-cli", "-m", c["models"]["gguf"], "-p", prompt,
-        "-c", str(seq_len), "-b", str(seq_len), "-ub", str(seq_len),
-        "--diffusion-steps", str(c["steps"]), "--diffusion-eps", "0.001",
-        "--temp", "0", "-t", str(threads), "-tb", str(threads), "--seed", "42",
-    ] + (["-ngl", "99", "-v"] if cuda else [])
+    cmd = [c["llama_cpp"] + f"/{build}/bin/llama-diffusion-cli", "-m", c["models"]["gguf"], "-p", prompt]
+    cmd += spec.llama_diffusion_args(seq_len, c["steps"], threads, cuda)
     rc, out, err, wall, rss = timed(cmd)
     if cuda:
         bad = cuda_layer_error(err + out)
@@ -346,8 +343,24 @@ def parse_token_ids(out: str) -> tuple[str, int]:
     return ids, len(ids.split(","))
 
 
+# The runtime names `one_run` can dispatch, and the two families whose name carries a thread count.
+FIXED_RUNTIMES = frozenset({
+    "mojo-dllm", "mojo-dllm-gpu", "mojo-dllm-full-logits", "llama.cpp", "llama.cpp-cuda", "llama-bench-cuda",
+    "diffuse-cpp", "diffuse-cpp-cache-entropy-exit"})
+THREADED_RUNTIME = re.compile(r"(?:llama\.cpp|llama-bench):t[1-9]\d*")
+
+
+def check_runtime_names(names: list[str]) -> None:
+    """Refuse a runtime `one_run` cannot start, before the preflight and the runs ahead of it are spent."""
+    unknown = [n for n in names if n not in FIXED_RUNTIMES and not THREADED_RUNTIME.fullmatch(n)]
+    if unknown:
+        raise SystemExit(f"run_bench: the config names runtimes this tool cannot run: {unknown}; "
+                         f"known: {sorted(FIXED_RUNTIMES)} and llama.cpp:tN, llama-bench:tN")
+
+
 def select_runtimes(configured: list[str], only: str, reps: int) -> list[str]:
     """The runtimes to run, refusing a selection that would write a result file with nothing measured."""
+    check_runtime_names(configured)
     if reps < 1:
         raise SystemExit(f"run_bench: --reps must be 1 or more, got {reps}")
     wanted = [n for n in only.split(",") if n] if only else []

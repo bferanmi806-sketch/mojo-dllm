@@ -58,6 +58,7 @@ sys.path.insert(0, str(ROOT / "bench"))
 import atomic_write  # noqa: E402  (bench/atomic_write.py)
 import isolation  # noqa: E402  (bench/isolation.py)
 import power  # noqa: E402  (bench/power.py)
+import spec  # noqa: E402  (bench/spec.py)
 
 # While this file exists, `run` waits before starting the next problem, so a
 # timing measurement can have the GPU to itself without stopping the arm.
@@ -66,7 +67,7 @@ PROMPT = (
     "{question}\n\nSolve the problem step by step. End with a line of the form "
     '"The answer is N." where N is the final number.'
 )
-DEFAULT_TIMEOUT_S = 1800.0     # per problem; a 256-step LLaDA problem takes 1 to 2 minutes on the GPU, CPU about 25
+DEFAULT_TIMEOUT_S = spec.GENERATION_TIMEOUT_S     # per problem; a 256-step LLaDA problem takes 1 to 2 minutes on the GPU, CPU about 25
 NUMBER = r"-?\d[\d,]*(?:\.\d+)?"
 # Wrappers a model puts between "answer is" and the number: \( \[ \boxed{ ** $ (each may be followed by spaces).
 WRAPPERS = r"(?:(?:\\\(|\\\[|\\boxed\{|\*\*|\$)\s*)*"

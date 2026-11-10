@@ -33,6 +33,7 @@ Outputs (deterministic, seed 1234 unless noted):
 from __future__ import annotations
 
 import pathlib
+import sys
 
 import numpy as np
 from gguf import GGMLQuantizationType as Q
@@ -40,6 +41,9 @@ from gguf import GGUFReader, GGUFValueType, GGUFWriter
 from gguf.quants import dequantize, quantize
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "bench"))
+import spec  # noqa: E402  (bench/spec.py)
+
 OUT = ROOT / "tests" / "fixtures"
 RNG = np.random.default_rng(1234)
 
@@ -982,10 +986,10 @@ DG_CASES = {
     "p150": dict(prompt=150, seed=8),
     # Prompt of 9 with self-conditioning: the previous step's logits are those of another canvas over the
     # same prompt, taken one denoising step back at temperature 0.8.
-    "p9sc": dict(prompt=9, seed=7, prev_seed=99, prev_temp_inv=1.0 / 0.8),
+    "p9sc": dict(prompt=9, seed=7, prev_seed=99, prev_temp_inv=1.0 / spec.DG_FIRST_STEP_TEMP),
     # Self-conditioning with no prompt (the canvas alone) and past the sliding window (#229).
-    "p0sc": dict(prompt=0, seed=9, prev_seed=98, prev_temp_inv=1.0 / 0.8),
-    "p150sc": dict(prompt=150, seed=8, prev_seed=99, prev_temp_inv=1.0 / 0.8),
+    "p0sc": dict(prompt=0, seed=9, prev_seed=98, prev_temp_inv=1.0 / spec.DG_FIRST_STEP_TEMP),
+    "p150sc": dict(prompt=150, seed=8, prev_seed=99, prev_temp_inv=1.0 / spec.DG_FIRST_STEP_TEMP),
 }
 
 

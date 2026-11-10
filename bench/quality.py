@@ -27,11 +27,9 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "bench"))
 import atomic_write  # noqa: E402  (bench/atomic_write.py)
 import power  # noqa: E402  (bench/power.py)
+import spec  # noqa: E402  (bench/spec.py)
 
-PROMPTS = [
-    "Explain speculative decoding in two sentences.",
-    "Write a short Python function that checks whether a number is prime.",
-]
+PROMPTS = list(spec.PROMPTS[:2])
 
 
 def repeated_words(text: str) -> int:
@@ -73,8 +71,7 @@ def main() -> int:
             ))
             print(f"steps {steps:4d}  {j['generate_s']:7.1f} s  repeats {rows[-1]['repeated_words']}  {j['text'][:80]!r}")
     git = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--short", "HEAD"], capture_output=True, text=True)
-    doc = dict(date=dt.datetime.now().isoformat(timespec="seconds"), model=pathlib.Path(model).name,
-               versions={"mojo-dllm": git.stdout.strip()}, gen_length=args.gen, threads=args.threads, runs=rows)
+    doc = dict(model=pathlib.Path(model).name, gen_length=args.gen, **spec.result_meta({"mojo-dllm": git.stdout.strip()}, args.threads), runs=rows)
     atomic_write.write_atomic(out_path, json.dumps(doc, indent=2, ensure_ascii=False) + "\n")
     print(f"wrote {out_path.relative_to(ROOT)}")
     return 0

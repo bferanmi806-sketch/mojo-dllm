@@ -21,10 +21,14 @@ import math
 import os
 import pathlib
 import subprocess
+import sys
 import tempfile
 from array import array
 
-MASK = 126336
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "bench"))
+import spec  # noqa: E402  (bench/spec.py)
+
+MASK = spec.ARCH_IDS["llada"]["mask"]
 
 
 def run(cmd: list[str]) -> str:
@@ -46,7 +50,7 @@ def main() -> int:
     ap.add_argument("--base", required=True)
     ap.add_argument("--new", required=True)
     ap.add_argument("--out", required=True)
-    ap.add_argument("--prompt", default="Explain speculative decoding in two sentences.")
+    ap.add_argument("--prompt", default=spec.PROMPTS[0])
     ap.add_argument("--masked", type=int, default=64)
     args = ap.parse_args()
     model = os.path.expanduser(args.model)

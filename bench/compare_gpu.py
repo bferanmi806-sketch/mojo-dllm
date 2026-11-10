@@ -10,6 +10,10 @@ import os
 from pathlib import Path
 import statistics
 import subprocess
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import spec  # noqa: E402  (bench/spec.py)
 
 def command(args):
     return subprocess.check_output(args, text=True).strip()
@@ -39,27 +43,30 @@ def main():
     bench = load_bench(roots['new'])
     os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
     os.environ.pop('MOJO_DLLM_GPU_PROFILE', None)
-    os.environ['OMP_NUM_THREADS'] = '8'
+    os.environ['OMP_NUM_THREADS'] = str(spec.COMPARE_THREADS)
     prompts = json.loads((roots['new'] / 'bench/config-gpu.json').read_text())['prompts'][:args.prompts]
     versions = {k: command(['git', '-C', str(p), 'rev-parse', 'HEAD']) + ('-dirty' if command(['git', '-C', str(p), 'status', '--porcelain', '--', 'src']) else '') for k, p in roots.items()}
     query = ['nvidia-smi', '-i', args.gpu, '--query-gpu=name,uuid,pci.bus_id,memory.total,driver_version,power.limit', '--format=csv,noheader']
+    meta = spec.result_meta(versions, spec.COMPARE_THREADS)
     doc = dict(date=dt.datetime.now(dt.timezone.utc).isoformat(), partial=True,
                method='run_bench.run_mojo; interleaved AB/BA, no early stop, no threshold or dual cache, no profiler synchronization; first pair per length is warmup',
                machine=dict(gpu=command(query), cpu=command(['lscpu'])),
-               versions=versions, model=Path(args.model).name,
+               versions=meta['versions'], model=Path(args.model).name,
                model_bytes=Path(args.model).stat().st_size, gpu_uuid=args.gpu,
-               threads=8, steps=32, block_length=32, prompts=prompts, runs=[])
+               threads=meta['threads'], steps=spec.COMPARE_STEPS, block_length=spec.COMPARE_BLOCK_LENGTH,
+               prompts=prompts, runs=[])
     output = Path(args.out)
     output.parent.mkdir(parents=True, exist_ok=True)
     def save():
         output.write_text(json.dumps(doc, indent=2) + '\n')
     for length in map(int, args.lengths.split(',')):
-        config = dict(models=dict(gguf=args.model), gen_length=length, steps=32, block_length=32)
-        for rep in range(-1, args.reps):
-            for pi, prompt in enumerate(prompts if rep >= 0 else prompts[:1]):
+        config = dict(models=dict(gguf=args.model), gen_length=length, steps=spec.COMPARE_STEPS,
+                      block_length=spec.COMPARE_BLOCK_LENGTH)
+        for rep in range(spec.WARMUP_REP, args.reps):
+            for pi, prompt in enumerate(prompts if rep != spec.WARMUP_REP else prompts[:1]):
                 for variant in (('base', 'new') if rep % 2 == 0 else ('new', 'base')):
                     bench.ROOT = roots[variant]
-                    result = bench.run_mojo(config, prompt, 8, ['--device', 'gpu'])
+                    result = bench.run_mojo(config, prompt, spec.COMPARE_THREADS, ['--device', 'gpu'])
                     result.update(variant=variant, gen_length=length, rep=rep, prompt_index=pi)
                     doc['runs'].append(result)
                     save()
@@ -78,7 +85,7 @@ def main():
                     raise SystemExit('workload mismatch')
                 pairs.append(a['generate_s'] / b['generate_s'])
                 same_text &= a['text'] == b['text']
-        per_variant = {v: statistics.median(r['ms_per_step'] for r in doc['runs'] if r['variant'] == v and r['gen_length'] == length and r['rep'] >= 0) for v in roots}
+        per_variant = {v: statistics.median(r['ms_per_step'] for r in doc['runs'] if r['variant'] == v and r['gen_length'] == length and r['rep'] != spec.WARMUP_REP) for v in roots}
         summaries.append(dict(gen_length=length, median_ms_per_step=per_variant,
                               median_paired_speedup=statistics.median(pairs), paired_speedups=pairs,
                               all_text_equal=same_text, pairs=len(pairs)))

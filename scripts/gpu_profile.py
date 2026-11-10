@@ -35,6 +35,7 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "bench"))
 import power  # noqa: E402  (bench/power.py)
+import spec  # noqa: E402  (bench/spec.py)
 IMPORTERS = [
     "/usr/lib/nsight-systems/host-linux-x64/QdstrmImporter",
     "/opt/nvidia/nsight-systems/host-linux-x64/QdstrmImporter",
@@ -89,7 +90,7 @@ def main() -> int:
     ap.add_argument("--steps", type=int, default=4)
     ap.add_argument("--max-tokens", type=int, default=128)
     ap.add_argument("--block-length", type=int, default=32)
-    ap.add_argument("--prompt", default="Explain speculative decoding in two sentences.")
+    ap.add_argument("--prompt", default=spec.PROMPTS[0])
     ap.add_argument("--out", default=None)
     ap.add_argument("--root", default=str(ROOT),
                     help="checkout whose build/mojo-dllm runs and whose commit is recorded (for A/B runs)")
