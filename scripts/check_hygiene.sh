@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# check_hygiene.sh: refuse to commit a credential or an employer reference.
+# check_hygiene.sh: refuse to commit a credential, an employer reference, or an em or en dash in Markdown.
 #
 # Adapted from lacs-project/sysknife scripts/check_no_secrets.sh (MIT,
 # Copyright (c) 2026 Vladimir Rotariu), which explains the length-bounded
@@ -18,18 +18,26 @@
 set -euo pipefail
 
 PATTERNS=(
-    "OpenAI:sk-[A-Za-z0-9]{40,}"
-    "OpenAI project:sk-proj-[A-Za-z0-9_-]{40,}"
-    "Anthropic:sk-ant-[A-Za-z0-9_-]{40,}"
+    "OpenAI key:sk-[A-Za-z0-9]{40,}"
+    "OpenAI project key:sk-proj-[A-Za-z0-9_-]{40,}"
+    "Anthropic key:sk-ant-[A-Za-z0-9_-]{40,}"
     "GitHub PAT:ghp_[A-Za-z0-9]{36,}"
     "GitHub fine-grained PAT:github_pat_[A-Za-z0-9_]{60,}"
     "Hugging Face token:hf_[A-Za-z0-9]{34,}"
-    "Groq:gsk_[A-Za-z0-9]{40,}"
+    "Groq key:gsk_[A-Za-z0-9]{40,}"
     "AWS access key:AKIA[0-9A-Z]{16}"
     "Google API key:AIza[A-Za-z0-9_-]{35,}"
     "Slack token:xox[baprs]-[A-Za-z0-9-]{20,}"
+    # The two secrets TruffleHog's verified-only scan (secret-scan.yml) cannot confirm and lets pass.
+    "Private key block:-----BEGIN [A-Z ]*PRIVATE KEY-----"
+    "Database URL with a password:(postgres(ql)?|mysql|mariadb|mongodb(\\+srv)?|redis|amqp)://[^[:space:]:/@]+:[^[:space:]@]+@"
 )
 EMPLOYER="$(printf '%s%s' 'entr' 'opia')"
+
+# Public text keeps em and en dashes out (they read as machine-written). Markdown only, and not the result
+# directories under bench/results: their tables are written by the benchmark tools, with the en dash of a range.
+DASH_EXEMPT=("bench/results/")
+DASHES=$'\xe2\x80\x93|\xe2\x80\x94'
 
 found=0
 
@@ -39,10 +47,16 @@ scan() {
     content="$(cat)"
     for entry in "${PATTERNS[@]}"; do
         local provider="${entry%%:*}" regex="${entry#*:}" hits
-        hits="$(grep -IoE "$regex" <<<"$content" || true)"
+        # grep exits 1 for "no match" and 2 for an error (a bad pattern): only the first means clean.
+        rc=0
+        hits="$(grep -IoE -e "$regex" <<<"$content")" || rc=$?
+        if [ "$rc" -gt 1 ]; then
+            echo "check_hygiene: grep failed (exit $rc) on the $provider pattern; nothing was checked" >&2
+            exit 1
+        fi
         while IFS= read -r hit; do
             [ -n "$hit" ] || continue
-            printf 'SECRET: %s key in %s, starts %s..., %d chars\n' "$provider" "$label" "${hit:0:7}" "${#hit}" >&2
+            printf 'SECRET: %s in %s, starts %s..., %d chars\n' "$provider" "$label" "${hit:0:7}" "${#hit}" >&2
             found=1
         done <<<"$hits"
     done
@@ -50,6 +64,26 @@ scan() {
         printf 'EMPLOYER: %s mentions the employer name; this is a personal project\n' "$label" >&2
         found=1
     fi
+}
+
+dash_scan() {
+    # $1 = path; stdin = the file. Reports each line with an em or en dash, by number.
+    local path="$1" prefix hit rc
+    [[ "$path" == *.md ]] || return 0
+    for prefix in "${DASH_EXEMPT[@]}"; do
+        [[ "$path" == "$prefix"* ]] && return 0
+    done
+    rc=0
+    hit="$(LC_ALL=C grep -nE -e "$DASHES")" || rc=$?
+    if [ "$rc" -gt 1 ]; then
+        echo "check_hygiene: grep failed (exit $rc) on the dash pattern; nothing was checked" >&2
+        exit 1
+    fi
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        printf 'DASH: %s:%s has an em or en dash; use a comma, a colon, parentheses or "to"\n' "$path" "${line%%:*}" >&2
+        found=1
+    done <<<"$hit"
 }
 
 case "${1:-}" in
@@ -96,6 +130,7 @@ while IFS= read -r path; do
         continue
     fi
     scan "$path" <"$src"
+    dash_scan "$path" <"$src"
 done <<<"$list"
 
 if [ "$found" != 0 ]; then

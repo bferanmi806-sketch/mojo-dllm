@@ -7,7 +7,7 @@ import sys
 
 from launcher.build import BINARY, ROOT, ensure_built, exec_binary
 from launcher.doctor import run_doctor
-from launcher.errors import LauncherError, UsageError
+from launcher.errors import LauncherError, UsageError, describe_os_error
 from launcher.probes import read_project_version, real_probes
 from launcher.runcmd import cmd_pull, cmd_run
 from launcher.ui import Style
@@ -42,7 +42,7 @@ def help_text(style: Style) -> str:
         "  --version prints the version from pyproject.toml and exits.",
         "",
         b("Options"),
-        "  setup [--model MODEL] [--yes] [--no-model]",
+        "  setup [--model MODEL] [--yes] [--no-model] [--offline]",
         "  pull [MODEL] [--offline]",
         '  run "PROMPT" [-m MODEL] [--device auto|cpu|gpu] [--offline] [binary flags]',
         "",
@@ -61,6 +61,7 @@ def help_text(style: Style) -> str:
         "  HF_TOKEN             Hugging Face token, for gated or private repos",
         "  HF_HOME              Hugging Face home; models live in $HF_HOME/hub",
         "  HF_HUB_CACHE         the model cache directory (overrides HF_HOME)",
+        "  XDG_CACHE_HOME       cache root when HF_HOME is unset; mojo-dllm keeps verified.json under it",
         "  HF_HUB_OFFLINE=1     same as --offline: use the cache only",
         "  MOJO_DLLM_GPU_ARCH   GPU architecture to build for, such as sm_86",
         "  NO_COLOR             turn colour off",
@@ -76,8 +77,10 @@ def _unknown_command(command: str) -> str:
 
 def main(argv: list[str]) -> int:
     command, rest = (argv[0], argv[1:]) if argv else ("help", [])
+    # After a bare "--" every word is data (a prompt may be "-h"), so help is looked for only before it.
+    options = rest[: rest.index("--")] if "--" in rest else rest
     if command in ("help", "-h", "--help") or (
-        command in LAUNCHER_COMMANDS and any(a in ("-h", "--help") for a in rest)
+        command in LAUNCHER_COMMANDS and any(a in ("-h", "--help") for a in options)
     ):
         print(help_text(Style.for_stream(sys.stdout)))
         return 0
@@ -90,7 +93,8 @@ def main(argv: list[str]) -> int:
             print(f"mojo-dllm {read_project_version(text)}")
             return 0
         if command == "setup":
-            return run_setup(parse_setup_args(rest), real_env())
+            setup_args = parse_setup_args(rest)
+            return run_setup(setup_args, real_env(offline=setup_args.offline))
         if command == "pull":
             return cmd_pull(rest)
         if command == "run":
@@ -104,3 +108,9 @@ def main(argv: list[str]) -> int:
     except LauncherError as e:
         print(f"error: {e}", file=sys.stderr)
         return e.code
+    except OSError as e:
+        print(f"error: {describe_os_error(e)}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        print("interrupted", file=sys.stderr)
+        return 130

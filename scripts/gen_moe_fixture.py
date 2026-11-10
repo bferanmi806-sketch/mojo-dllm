@@ -6,6 +6,7 @@ down slices. Integer weights and f16 scales are exact in the scalar oracle.
 No model downloads or third-party dependencies are needed.
 """
 
+import os
 from pathlib import Path
 import struct
 
@@ -35,7 +36,8 @@ def tensor(rows, columns, kind, stage):
 
 
 def main():
-    fixtures = Path(__file__).resolve().parents[1] / "tests" / "fixtures"
+    # scripts/check_fixtures.py sets FIXTURES_OUT to regenerate into a scratch directory.
+    fixtures = Path(os.environ.get("FIXTURES_OUT", Path(__file__).resolve().parents[1] / "tests" / "fixtures"))
     for kind in ("q5", "q8"):
         data = tensor(64, 256, kind, 0) + tensor(256, 32, kind, 1)
         path = fixtures / f"moe-{kind}.bin"

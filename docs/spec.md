@@ -1,4 +1,4 @@
-# mojo-dllm — Technical Specification
+# mojo-dllm: Technical Specification
 
 **Status:** Original specification, draft v0.1, written on 2026-10-03 before the code. It is not kept up to date. The [development plan](plan.md) lists the corrections that research made, [Architecture](architecture.md) maps the source as built, and [Command line](cli.md) lists the current flags.  
 **Project type:** Open-source ML inference systems project  
@@ -633,20 +633,20 @@ The initial backend is x86 CPU.
 
 Priority order:
 
-### Stage 1 — correctness
+### Stage 1: correctness
 
 - scalar/reference kernels;
 - single thread;
 - deterministic output.
 
-### Stage 2 — vectorization
+### Stage 2: vectorization
 
 - SIMD vector operations;
 - vectorized dequantization;
 - vectorized dot products;
 - optimized softmax.
 
-### Stage 3 — threading
+### Stage 3: threading
 
 Potential parallel regions:
 
@@ -739,7 +739,7 @@ Recommended references:
 
 Validation levels:
 
-### Level 1 — tensor-level
+### Level 1: tensor-level
 
 Compare:
 
@@ -753,7 +753,7 @@ Compare:
 
 Use small contexts and fixed inputs.
 
-### Level 2 — diffusion-step parity
+### Level 2: diffusion-step parity
 
 Compare:
 
@@ -763,7 +763,7 @@ Compare:
 - sampled token IDs;
 - updated canvas.
 
-### Level 3 — generation parity
+### Level 3: generation parity
 
 With fixed:
 
@@ -1099,7 +1099,7 @@ runtime arena
 
 ## 29. Milestones
 
-### M0 — repository bootstrap
+### M0: repository bootstrap
 
 Deliverables:
 
@@ -1109,7 +1109,7 @@ Deliverables:
 - basic tests;
 - coding conventions.
 
-### M1 — GGUF inspection
+### M1: GGUF inspection
 
 Deliverables:
 
@@ -1126,7 +1126,7 @@ Outputs:
 - quantization formats;
 - tokenizer metadata.
 
-### M2 — Q4_K_M primitives
+### M2: Q4_K_M primitives
 
 Deliverables:
 
@@ -1136,7 +1136,7 @@ Deliverables:
 - numerical tests;
 - microbenchmarks.
 
-### M3 — transformer primitives
+### M3: transformer primitives
 
 Deliverables:
 
@@ -1147,7 +1147,7 @@ Deliverables:
 - MLP;
 - transformer layer tests.
 
-### M4 — LLaDA forward pass
+### M4: LLaDA forward pass
 
 Deliverables:
 
@@ -1158,7 +1158,7 @@ Deliverables:
 - logits;
 - comparison against reference implementation.
 
-### M5 — diffusion generation
+### M5: diffusion generation
 
 Deliverables:
 
@@ -1177,7 +1177,7 @@ mojo-dllm run ...
 
 must work.
 
-### M6 — CPU optimization
+### M6: CPU optimization
 
 Deliverables:
 
@@ -1186,7 +1186,7 @@ Deliverables:
 - fused kernels;
 - benchmark report.
 
-### M7 — NVIDIA backend
+### M7: NVIDIA backend
 
 Deliverables:
 
@@ -1195,7 +1195,7 @@ Deliverables:
 - end-to-end GPU inference;
 - consumer RTX benchmark.
 
-### M8 — second architecture
+### M8: second architecture
 
 Deliverables:
 
@@ -1315,7 +1315,7 @@ with limited backend-specific code.
 
 ### Research-quality success
 
-The project demonstrates a useful dLLM-specific optimization—such as efficient inter-step reuse or portable block diffusion—that produces a measurable speedup while preserving output quality.
+The project demonstrates a useful dLLM-specific optimization, such as efficient inter-step reuse or portable block diffusion, that produces a measurable speedup while preserving output quality.
 
 ---
 

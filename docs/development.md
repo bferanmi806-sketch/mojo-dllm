@@ -21,12 +21,13 @@ machine with a GPU, the GPU tests that CI only builds:
 
 | Step | Command | Fails when |
 |---|---|---|
-| hygiene | `scripts/check_hygiene.sh --tracked` | a credential pattern or the author's employer name appears in tracked text (files whose names git quotes are skipped, [#140](https://github.com/vladimirrott/mojo-dllm/issues/140)) |
+| hygiene | `scripts/check_hygiene.sh --tracked` | a credential pattern (a provider token, a private key block, a database URL with a password) or the author's employer name appears in tracked text, or a tracked Markdown file outside `bench/results/` holds an em or en dash (files whose names git quotes are skipped, [#140](https://github.com/vladimirrott/mojo-dllm/issues/140)) |
 | format | `uv run --frozen mojo format -q src tests bench`, then `git diff` | `mojo format` changes any file (Mojo has no check mode) |
 | build | `scripts/build.sh` | any compiler warning (`-Werror`) |
 | tests | `scripts/run-tests.sh` | a test fails, a file runs zero tests, or the total differs from `tests/test-count.txt` |
-| launcher tests | `uv run --frozen --only-group test pytest tests/python -q` | a test of the `./mojo-dllm` launcher fails |
-| shellcheck, yamllint, markdownlint | `shellcheck --severity=warning scripts/*.sh .githooks/*`; `uv run --frozen --only-group lint yamllint --strict .github`; `markdownlint-cli2 "*.md" "docs/**/*.md" "#docs/spec.md"` | any of the three reports a finding |
+| launcher tests | `uv run --locked --only-group test pytest tests/python -q` | a test of the `./mojo-dllm` launcher fails |
+| script lock | `uv lock --script mojo-dllm --check` | `mojo-dllm.lock` is missing, or the `# dependencies` header of `./mojo-dllm` no longer matches it. After you change the pin, run `uv lock --script mojo-dllm` and commit the lock |
+| shellcheck, yamllint, markdownlint | `shellcheck --severity=warning scripts/*.sh .githooks/*`; `uv run --frozen --only-group lint yamllint --strict .github`; `markdownlint-cli2 "*.md" "docs/**/*.md" "assets/*.md" ".github/*.md" "#node_modules"` | any of the three reports a finding |
 | claims | `uv run --no-project python scripts/bench_table.py --check` | a table in the README, `docs/benchmarks.md` or `docs/correctness.md` differs from what `bench/results`, `bench/parity`, `bench/quality` and `bench/eval` render (a missing table marker, target file or quality or eval evidence passes, [#141](https://github.com/vladimirrott/mojo-dllm/issues/141); an unknown mode exits 0, [#142](https://github.com/vladimirrott/mojo-dllm/issues/142)) |
 | docs | `mdbook build` + `scripts/check_links.py` | a relative link is broken |
 | action pins | `scripts/verify-action-pins.sh` (needs an authenticated `gh`) | a pinned SHA is not the tag its comment names |
@@ -34,12 +35,27 @@ machine with a GPU, the GPU tests that CI only builds:
 | checker self-test | `uv run --frozen --only-group fixtures python scripts/check_weights.py --self-test` | a safetensors or index guard in `check_weights.py` stops rejecting its case, or stops naming it |
 | no GPU | `scripts/check_no_gpu.sh` | `--device gpu` without a GPU does anything but exit 1 with a message |
 | visual options | `scripts/check_visual.sh` | an invalid `--visual-interval` does not exit 1, or `--json` with `--visual` does not exit 2, with a message naming the flag before model loading |
+| fixtures | `uv run --frozen --only-group fixtures python scripts/check_fixtures.py` | `scripts/gen_fixtures.py` or `scripts/gen_moe_fixture.py` writes a file that differs from the tracked one (they run into a scratch directory), a file that is not tracked, or a tracked fixture that no generator writes and that is not a tokenizer fixture, a tokenizer golden or `golden-generation.tsv` |
+| GPU test count | `scripts/check_gpu_test_count.sh` | the `def test_` functions of `tests/gpu/test_*.mojo` number other than `tests/gpu/test-count.txt` pins, or a file defines none; needs no GPU, runs in CI and `ci-local.sh` |
 | GPU tests | `scripts/run-gpu-tests.sh` (local only) | a GPU kernel or the GPU forward pass disagrees with the CPU or the f32 reference, or the count differs from `tests/gpu/test-count.txt` |
 
 GitHub's runners have no GPU, so CI builds the GPU suite without running it.
-`ci-local.sh` runs it when `nvidia-smi` lists a GPU and otherwise prints a
-`SKIP` line, never a `PASS`; `run-gpu-tests.sh` on its own exits 1 without a
+`ci-local.sh` runs it when `nvidia-smi` lists a GPU and otherwise builds it and
+prints a `SKIP` line for the run, never a `PASS`; `run-gpu-tests.sh` on its own exits 1 without a
 GPU.
+
+The launcher tests run `pytest -rs`, so every skip is listed in the summary,
+and `tests/python/skip_policy.py` fails the run on a skip that
+`tests/python/allowed-skips.txt` does not name (a test id and the text of the
+reason). Add a line there in the commit that adds a skip. `--locked` makes
+`uv run` fail when `uv.lock` no longer matches `pyproject.toml`; `--frozen` does
+not compare them.
+
+Branch protection on `main` requires four checks: `hygiene`, `mojo` and `docs` of the CI
+workflow and `trufflehog` of the secret scan. The job `build` of the
+"Deploy docs to GitHub Pages" workflow skips while the repository is private,
+and a skipped job satisfies a required check, so it must not be required. CI
+already runs the same `mdbook build` in `docs`.
 
 The test count is pinned because Mojo's `TestSuite` exits 0 after running zero
 tests. If you add tests, run `UPDATE_TEST_COUNT=1 scripts/run-tests.sh` (for
@@ -55,12 +71,15 @@ live in `tests/fixtures/` and come from scripts, never from hand:
 |---|---|---|
 | `kquants.gguf`, `bad-magic.gguf`, `tiny-llada.gguf`, `tiny-llada.expected.f32`, `tiny-dream.gguf`, `tiny-dream.expected.f32`, `malformed/`, `metadata/` | `scripts/gen_fixtures.py` | GGUF parsing and rejection, decoders, `ModelConfig` validation, the forward pass against a numpy reference |
 | `tiny-diffusion-gemma.gguf`, `diffusion-gemma/` | `scripts/gen_fixtures.py` | the `diffusion-gemma` config (seed 610061): a 2-layer model with one sliding and one global layer, 4 experts, the tensor names and types of the real file, and one file per refusal (metadata only, or zero-filled tensors) |
+| `tiny-diffusion-gemma.p0sc.case`, `.p9.case`, `.p9sc.case`, `.p150.case`, `.p150sc.case` (`tiny-diffusion-gemma.*.case`) | `scripts/gen_fixtures.py` (the forward pass is `scripts/dg_numpy.py`) | the tokens and numpy logits that `logits` on the tiny DiffusionGemma file must reproduce, for a prompt of 0, 9 and 150 tokens, with and without self-conditioning (`sc`) |
+| `entropy-rows.tsv` | `scripts/gen_fixtures.py` (seed 65065, so no other fixture changes) | logits rows with the numpy f64 argmax, entropy and inverse-CDF draw that `tests/test_entropy_bound.mojo` pins |
+| `utf8-cases.tsv` | `scripts/gen_fixtures.py` | byte strings with the code points and the first invalid offset that Python's own UTF-8 decoder gives, for `utf8_decode` |
 | `dequant-types.gguf`, `unsupported-embedding.gguf` | `scripts/gen_fixtures.py` | Q8_0/Q5_K/BF16/Q5_0 references (seed 340034) and embedding rejection before CPU/GPU allocation (no RNG) |
-| `llada-tokenizer.gguf`, `llada-tokenizer-golden.tsv`, `dream-tokenizer.gguf`, `dream-tokenizer-golden.tsv` | `scripts/gen_tokenizer_fixture.py` | tokenizer ids against `llama-tokenize` |
+| `llada-tokenizer.gguf`, `llada-tokenizer-golden.tsv`, `llada-tokenizer-golden.provenance.json`, `dream-tokenizer.gguf`, `dream-tokenizer-golden.tsv`, `dream-tokenizer-golden.provenance.json` | `scripts/gen_tokenizer_fixture.py` (`--golden-only` rewrites the golden and its provenance) | tokenizer ids against `llama-tokenize`. Each provenance file records the llama.cpp commit, the model file and its sha256, the command and the golden's sha256. The two goldens were committed with the first import, and regenerating them with llama.cpp `2e715c0639` on 2026-11-09 gave the same bytes |
 | `gemma4-tokenizer.gguf` | `scripts/gen_tokenizer_fixture.py ... gemma4` | the 262,144 tokens of the DiffusionGemma file and the 472 of its 514,906 merges that apply to the 54 golden strings, tokenizer keys only and without the scores (5.5 MB) |
 | `gemma4-tiny/` | `scripts/gen_fixtures.py` | a 279-token gemma4 vocabulary whose ids can be worked out by hand, and variants with one thing wrong or unusual each (a missing byte token, a merge with no space, mismatched counts, nested special tokens, an unknown-type token, an end-of-turn token the vocabulary lacks) |
 | `gpt2-tiny/` | `scripts/gen_fixtures.py` | a six-token byte-level BPE vocabulary with padding, unknown and EOS ids and no end-of-turn token: the ids that LLaDA's and Dream's files leave out |
-| `gemma4-tokenizer-golden.tsv`, `gemma4-tokenizer-golden.provenance.json` | `scripts/gen_tokenizer_fixture.py ... gemma4` (`--golden-only` rewrites just these) | DiffusionGemma tokenizer ids against `llama-tokenize` from the ggml-org/llama.cpp#24423 branch at the commit `scripts/build_dg_ref.sh` pins; the provenance file records that commit, the model file's sha256 and the command |
+| `gemma4-tokenizer-golden.tsv`, `gemma4-tokenizer-golden.provenance.json` | `scripts/gen_tokenizer_fixture.py ... gemma4` (`--golden-only` rewrites only these) | DiffusionGemma tokenizer ids against `llama-tokenize` from the ggml-org/llama.cpp#24423 branch at the commit `scripts/build_dg_ref.sh` pins; the provenance file records that commit, the model file's sha256 and the command |
 | `golden-generation.tsv` | `UPDATE_GOLDEN=1 build/tests/test_golden` | tiny LLaDA/Dream token sequences, forward-pass counts, early stopping and per-step commits |
 | `src/mojo_dllm/tokenizer/unicode_tables.mojo` | `scripts/gen_unicode_tables.py` | code point classes from llama.cpp's own tables |
 | `moe-q5.bin`, `moe-q8.bin`, `moe-q4-q5.bin`, `moe-q4-q8.bin` | `scripts/gen_moe_fixture.py` | deterministic raw expert tensors for scalar MoE comparisons, including mixed activation block sizes |
@@ -91,7 +110,10 @@ build/tests/test_golden
 UPDATE_GOLDEN=1 build/tests/test_golden
 ```
 
-Only `UPDATE_GOLDEN=1` writes the file. Normal runs reject missing, empty,
+Only `UPDATE_GOLDEN=1` writes the file, and `scripts/run-tests.sh` drops that variable
+from the environment (and says so) unless you run `scripts/run-tests.sh --update-golden`:
+the test rewrites the golden and then compares against what it wrote, so an exported
+variable would make every run pass. Normal runs reject missing, empty,
 duplicate, unknown or incomplete cases and compare tokens and schedule metadata
 exactly. A mismatch names the case, the first differing token position (including
 the prompt), both token lists and both complete rows. A golden diff in a PR needs
@@ -113,7 +135,7 @@ at runtime. All cases disable threshold and dual-cache acceleration.
 
 A job that holds more memory than the machine can spare makes the kernel's global OOM killer pick a victim.
 With systemd's default `OOMPolicy=stop`, systemd then stops every process in the victim's scope, and a job
-started from a terminal lives in that terminal's scope: the shell, the editor session and every agent in the
+started from a terminal lives in that terminal's scope: the shell, the editor session and every other session in the
 window end with it. A measured run of DiffusionGemma-26B on the CPU peaked at about 25.6 GiB resident, and on a
 30 GiB machine with a 2 GiB swapfile that run ended in exactly this way.
 
@@ -134,7 +156,7 @@ controller and of systemd's resource control:
 | `CPUQuota=N00%` | only with `--cpus N`, so a job leaves cores for the desktop |
 
 It never sets `MemoryHigh`. Below the cap, `MemoryHigh` throttles a process that has nothing to reclaim until it
-stands still (state `D`, no progress); a job that really needs its memory should be killed, not frozen.
+stands still (state `D`, no progress); a job that needs its memory should be killed, not frozen.
 
 The script also refuses to start a job in two cases:
 

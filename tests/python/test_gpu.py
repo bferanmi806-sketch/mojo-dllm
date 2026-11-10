@@ -74,3 +74,30 @@ def test_a_failed_nvidia_smi_is_named_in_the_device_line() -> None:
         "device: cpu (nvidia-smi failed: exit 9: driver mismatch)"
     )
     assert choose_device("auto", []).line == "device: cpu (no NVIDIA GPU found)"
+
+
+def test_a_valid_line_followed_by_garbage_is_an_error_naming_the_bad_line() -> None:
+    with pytest.raises(LauncherError, match="garbage") as e:
+        parse_nvidia_smi("NVIDIA A100, 8.0, 40000\ngarbage\n")
+    assert "NVIDIA A100" not in str(e.value).splitlines()[0]
+
+
+def test_crlf_line_endings_parse() -> None:
+    assert parse_nvidia_smi("NVIDIA A100, 8.0, 40000\r\nGTX 1650, 7.5, 3900\r\n") == [
+        Gpu("NVIDIA A100", 8.0, 40000), Gpu("GTX 1650", 7.5, 3900)
+    ]
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["x, nan, 100", "x, inf, 100", "x, -inf, 100", "x, -1.0, 100", "x, 0, 100", "x, 8.0, -5"],
+    ids=["nan", "inf", "-inf", "negative-cap", "zero-cap", "negative-memory"],
+)
+def test_a_non_finite_or_negative_value_is_unreadable_not_a_card(text: str) -> None:
+    # float("inf") used to parse and qualify for the GPU kernels; nan never did and read as "too old".
+    with pytest.raises(LauncherError, match="nvidia-smi"):
+        parse_nvidia_smi(text)
+
+
+def test_zero_free_memory_is_a_valid_full_card() -> None:
+    assert parse_nvidia_smi("x, 8.0, 0") == [Gpu("x", 8.0, 0)]

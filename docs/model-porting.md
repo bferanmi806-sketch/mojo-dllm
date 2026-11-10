@@ -63,7 +63,8 @@ A `diffusion-gemma` file is read into a `ModelConfig`, and `mojo-dllm inspect`
 prints the result, or the refusal and its key. `DiffusionLM` and the GPU model
 stop on it with `diffusion-gemma does not run on this model`. `DiffusionGemma`
 runs it on the CPU through `logits`, and `tokenize` prints the ids of its chat
-prompt; `run` still waits for the generation loop (#64), so a clean `inspect`
+prompt; `run` still waits for the model to be wired into the generation loop
+(#277; the forward pass is #64 and the denoiser #65), so a clean `inspect`
 does not mean `run` works. The names come from the unmerged
 ggml-org/llama.cpp#24423 and appear once each, as the `GEMMA_*` constants at the
 top of `models/transformer.mojo`. Keys carry the `diffusion-gemma.` prefix
@@ -146,7 +147,7 @@ unmapped source names; dtypes are shown for reference, not compared. Use
 `--ignore 'rotary.*inv_freq'` for source buffers intentionally omitted during
 conversion; `ignored N` counts these source entries, and their mapped GGUF
 counterparts are also omitted. Index shard names must be bare `.safetensors`
-filenames resolving inside the index directory. The checker accepts 1–1024
+filenames resolving inside the index directory. The checker accepts 1 to 1024
 blocks to bound name-map construction. Malformed inputs return 2, including
 JSON nesting errors. An output tensor absent from a tied source is still reported as
 missing, with an explanation. Exit 0 means at least one tensor was compared and

@@ -10,13 +10,15 @@ from pathlib import Path
 from typing import Protocol, TextIO
 
 from launcher.errors import LauncherError
+from launcher.hub import snapshot_revision
 from launcher.ui import human_size
 from launcher.verified import VerifiedStore
 
 DEFAULT_MODEL = "llada-8b"
 ALIASES = {"llada-8b": ("mradermacher/LLaDA-8B-Instruct-GGUF", "Q4_K_M")}
-# llama.cpp's order when no quant is requested; the first file is the last resort.
-DEFAULT_QUANTS = ("Q4_K_M", "Q8_0")
+# The quants the binary's matrix kernels load (Q4_K and Q6_K tensors), in the order tried
+# when no quant is requested. A Q8_0 or F16 file downloads fine and then fails to load.
+DEFAULT_QUANTS = ("Q4_K_M", "Q4_K_S", "Q6_K")
 
 # Owner and name never start with "." or "-", so "..", "./x" and "-x/y" are not repos.
 _REPO = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]*/[A-Za-z0-9_][A-Za-z0-9._-]*(:[A-Za-z0-9._-]+)?$")
@@ -30,7 +32,7 @@ class Hub(Protocol):
     def list_files(self, repo: str) -> dict[str, int]: ...
     def cached_path(self, repo: str, filename: str) -> Path | None: ...
     def download(self, repo: str, filename: str) -> Path: ...
-    def expected_sha256(self, repo: str, filename: str) -> str | None: ...
+    def expected_sha256(self, repo: str, filename: str, revision: str | None = None) -> str | None: ...
 
 
 @dataclass(frozen=True)
@@ -87,10 +89,14 @@ def pick_gguf(files: Sequence[str], quant: str | None) -> str:
         for name in ggufs:
             if _has_quant(name, q):
                 return name
+    listing = "\n".join(f"  {f}" for f in ggufs)
     if quant:
-        listing = "\n".join(f"  {f}" for f in ggufs)
         raise LauncherError(f"no GGUF file matches quant {quant}\nAvailable GGUF files:\n{listing}")
-    return ggufs[0]
+    raise LauncherError(
+        "the repo has no Q4_K_M, Q4_K_S or Q6_K file, the quants mojo-dllm can load\n"
+        f"Available GGUF files:\n{listing}\n"
+        "Pick one with owner/repo:QUANT, for example owner/repo:Q4_K_M."
+    )
 
 
 def plan_model(ref: ModelRef, hub: Hub) -> ModelPlan:
@@ -118,18 +124,20 @@ def _sha256(path: Path) -> str:
 
 def _check_sha256(path: Path, plan: ModelPlan, hub: Hub, store: VerifiedStore) -> None:
     """Compare the file with the hub's sha256; record it on a match, delete it otherwise."""
-    expected = hub.expected_sha256(plan.repo, plan.filename)
+    # A file cached at commit A is compared with the hub's hash at A, not at the newest main.
+    expected = hub.expected_sha256(plan.repo, plan.filename, snapshot_revision(path))
     if expected is None:
-        _delete(path)
+        _delete(path, hub.cache_dir)
         raise LauncherError(f"Hugging Face reported no sha256 for {plan.label}, so the download cannot be verified.")
+    before = path.stat()  # taken before hashing: a file replaced while it is read must not be recorded
     actual = _sha256(path)
     if actual != expected:
-        _delete(path)
+        _delete(path, hub.cache_dir)
         raise LauncherError(
             f"sha256 of {plan.label} does not match the hub's. The file was deleted.\n"
             "Run the command again to download it fresh."
         )
-    store.record(path, actual)
+    store.record(path, actual, before)
 
 
 def fetch_model(plan: ModelPlan, hub: Hub, out: TextIO, store: VerifiedStore) -> Path:
@@ -141,47 +149,70 @@ def fetch_model(plan: ModelPlan, hub: Hub, out: TextIO, store: VerifiedStore) ->
     return path
 
 
-def use_cached(plan: ModelPlan, hub: Hub, out: TextIO, store: VerifiedStore) -> Path:
-    """The cached file, after its sha256 has been checked once.
+def use_cached(plan: ModelPlan, hub: Hub, out: TextIO, store: VerifiedStore) -> tuple[Path, bool]:
+    """The cached file and whether its sha256 has been checked.
 
     An interrupted download, or another tool, can leave an unchecked file in
-    the cache. Offline there is nothing to check against, so it is used with a warning.
+    the cache. Online it is checked once. Offline there is nothing to check
+    against, so it is used with a warning and reported as not verified.
     """
     path = plan.cached
     assert path is not None
     if store.is_verified(path):
-        return path
+        return path, True
     if hub.offline:
         print(
             f"warning: {plan.label} in the cache was not verified against its sha256, "
             "and offline mode cannot check it now",
             file=out,
         )
-        return path
+        return path, False
     print(f"Verifying {plan.label} against the hub's sha256 (once)", file=out, flush=True)
     _check_sha256(path, plan, hub, store)
     print("sha256 verified", file=out, flush=True)
-    return path
+    return path, True
 
 
-def _delete(path: Path) -> None:
-    path.resolve().unlink(missing_ok=True)
+def _delete(path: Path, cache_dir: Path) -> None:
+    """Remove a bad cache entry: the link, and its blob only when the blob lies inside the cache.
+
+    A snapshot link can point at a file that another tool owns, outside the cache.
+    """
+    target = path.resolve()
+    if target.is_relative_to(cache_dir.resolve()):
+        target.unlink(missing_ok=True)
     path.unlink(missing_ok=True)
 
 
-def ensure_model(text: str, hub: Hub | None, out: TextIO, *, announce_cached: bool, store: VerifiedStore) -> Path:
+@dataclass(frozen=True)
+class ModelResult:
+    path: Path
+    verified: bool  # False only for a cached file that could not be checked offline
+
+
+def already_downloaded_line(verified: bool) -> str:
+    return "already downloaded" if verified else "already downloaded (not verified)"
+
+
+def ensure_model_status(
+    text: str, hub: Hub | None, out: TextIO, *, announce_cached: bool, store: VerifiedStore
+) -> ModelResult:
     """Resolve a model reference to a local file, downloading it when needed."""
     ref = parse_model_ref(text)
     if ref.path is not None:
-        return ref.path
+        return ModelResult(ref.path, True)
     assert hub is not None
     plan = plan_model(ref, hub)
     if plan.cached is not None:
-        path = use_cached(plan, hub, out, store)
+        path, verified = use_cached(plan, hub, out, store)
         if announce_cached:
-            print(f"already downloaded\n{path}", file=out)
-        return path
+            print(f"{already_downloaded_line(verified)}\n{path}", file=out)
+        return ModelResult(path, verified)
     path = fetch_model(plan, hub, out, store)
     if announce_cached:
         print(f"{path} ({human_size(path.stat().st_size)})", file=out)
-    return path
+    return ModelResult(path, True)
+
+
+def ensure_model(text: str, hub: Hub | None, out: TextIO, *, announce_cached: bool, store: VerifiedStore) -> Path:
+    return ensure_model_status(text, hub, out, announce_cached=announce_cached, store=store).path

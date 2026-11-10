@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import io
 import subprocess
 from pathlib import Path
@@ -20,7 +21,8 @@ FILE = "LLaDA-8B-Instruct.Q4_K_M.gguf"
 class Env:
     """Builds a SetupEnv with recording fakes."""
 
-    def __init__(self, hub: FakeHub, store: VerifiedStore, *, tty: bool = False, answer: str = "", **probe_overrides: object) -> None:
+    def __init__(self, hub: FakeHub, store: VerifiedStore, *, tty: bool = False, answer: str = "",
+                 binary: bool = True, **probe_overrides: object) -> None:
         self.calls: list[str] = []
         self.questions: list[str] = []
         self.out, self.err = io.StringIO(), io.StringIO()
@@ -37,6 +39,7 @@ class Env:
             ask=ask,
             sync=lambda: self.calls.append("sync"),
             build=self._build,
+            binary_ready=lambda: binary,
             smoke=self._smoke,
             style=Style(False),
             out=self.out,
@@ -47,8 +50,9 @@ class Env:
         self.calls.append("build")
         return True
 
-    def _smoke(self, model: Path, device: str) -> float:
+    def _smoke(self, model: Path, device: str, extra_env: object = None) -> float:
         self.calls.append(f"smoke:{device}")
+        self.smoke_env = extra_env
         return 3.25
 
     def run(self, argv: list[str]) -> int:
@@ -95,6 +99,30 @@ def test_smoke_test_uses_cpu_without_a_gpu(hub: FakeHub, store: VerifiedStore) -
     assert "device: cpu (no NVIDIA GPU found)" in e.out.getvalue()
 
 
+def test_the_smoke_test_leaves_a_cuda_visible_devices_the_user_set_and_says_so(
+    hub: FakeHub, store: VerifiedStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from test_gpu_select import TWO_GPUS
+
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "1")
+    e = Env(hub, store, gpu_text=TWO_GPUS)
+    assert e.run(["--yes"]) == 0 and e.calls[-1] == "smoke:gpu"
+    assert e.smoke_env == {}
+    assert e.out.getvalue().count("did not pin the card") == 1
+
+
+def test_the_smoke_test_runs_on_the_card_that_qualifies(
+    hub: FakeHub, store: VerifiedStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from test_gpu_select import NEW_UUID, TWO_GPUS
+
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    e = Env(hub, store, gpu_text=TWO_GPUS)
+    assert e.run(["--yes"]) == 0 and e.calls[-1] == "smoke:gpu"
+    assert "RTX 3090" in e.out.getvalue()
+    assert e.smoke_env == {"CUDA_VISIBLE_DEVICES": NEW_UUID, "CUDA_DEVICE_ORDER": "PCI_BUS_ID"}
+
+
 def test_an_unreadable_nvidia_smi_is_not_reported_as_no_gpu(hub: FakeHub, store: VerifiedStore) -> None:
     e = Env(hub, store, gpu_text=None)
     assert e.run(["--yes"]) == 0 and e.calls[-1] == "smoke:cpu"
@@ -122,7 +150,8 @@ def test_no_model_skips_silently_and_completes(hub: FakeHub, store: VerifiedStor
     e = Env(hub, store, tty=True)
     assert e.run(["--no-model"]) == 0
     assert e.questions == [] and hub.downloads == []
-    assert "Setup complete." in e.out.getvalue()
+    text = e.out.getvalue()
+    assert "Setup complete (no smoke test)" in text and "Setup complete." not in text
     assert e.calls == ["sync", "build"]
 
 
@@ -145,6 +174,30 @@ def test_setup_checks_an_unverified_cached_model_once(hub: FakeHub, store: Verif
     assert Env(hub, store).run([]) == 0
     assert Env(hub, store).run([]) == 0
     assert hub.sha_requests == 1 and store.is_verified(cached)
+
+
+def test_setup_offline_with_an_unverified_cached_model_leaves_a_step_outstanding(
+    hub: FakeHub, store: VerifiedStore, tmp_path: Path
+) -> None:
+    hub.offline = True
+    hub.files = {FILE: 10}
+    cached = tmp_path / "c.gguf"
+    cached.write_bytes(hub.content)
+    hub.cached[(REPO, FILE)] = cached
+    e = Env(hub, store)
+    assert e.run([]) == 3
+    text = e.out.getvalue()
+    assert f"already downloaded (not verified)\n{cached}" in text
+    assert "Setup complete." not in text and text.rstrip().splitlines()[-1] == "  ./mojo-dllm pull"
+
+
+def test_setup_with_a_verified_cached_model_completes(hub: FakeHub, store: VerifiedStore, tmp_path: Path) -> None:
+    cached = tmp_path / "c.gguf"
+    cached.write_bytes(hub.content)
+    hub.cached[(REPO, FILE)] = cached
+    store.record(cached, hub.sha256)
+    e = Env(hub, store)
+    assert e.run([]) == 0 and f"already downloaded\n{cached}" in e.out.getvalue()
 
 
 def test_setup_refuses_a_cached_model_that_fails_its_check(hub: FakeHub, store: VerifiedStore, tmp_path: Path) -> None:
@@ -177,12 +230,79 @@ def test_outstanding_pull_names_a_non_default_model(hub: FakeHub, store: Verifie
     assert "  ./mojo-dllm pull a/b:Q8_0" in e.out.getvalue()
 
 
+def test_a_build_that_leaves_no_binary_stops_setup(hub: FakeHub, store: VerifiedStore) -> None:
+    e = Env(hub, store, binary=False)
+    assert e.run(["--yes"]) == 1
+    assert "build/mojo-dllm does not exist" in e.err.getvalue()
+    assert "Setup complete" not in e.out.getvalue() and "smoke" not in " ".join(e.calls)
+
+
+class _Input:
+    def __init__(self, answer: str | None) -> None:
+        self.answer = answer
+
+    def __call__(self, question: str) -> str:
+        if self.answer is None:
+            raise EOFError
+        return self.answer
+
+
+@pytest.mark.parametrize(
+    ("answer", "downloads"),
+    [("y", 1), ("Y", 1), ("yes", 1), ("", 1), ("n", 0), ("maybe", 0), (None, 0)],
+    ids=["y", "Y", "yes", "enter", "n", "maybe", "ctrl-d"],
+)
+def test_the_download_question_accepts_yes_and_treats_anything_else_as_no(
+    hub: FakeHub, store: VerifiedStore, answer: str | None, downloads: int
+) -> None:
+    e = Env(hub, store, tty=True)
+    e.env = dataclasses.replace(e.env, ask=_Input(answer))
+    code = e.run([])
+    assert len(hub.downloads) == downloads
+    assert code == (0 if downloads else 3)
+    assert ("not downloaded (declined)" in e.out.getvalue()) == (not downloads)
+
+
+def test_a_local_model_path_never_touches_the_hub(hub: FakeHub, store: VerifiedStore, tmp_path: Path) -> None:
+    model = tmp_path / "x.gguf"
+    model.write_bytes(b"gguf")
+    hub.list_files = lambda repo: pytest.fail("the hub was asked about a local file")  # type: ignore[method-assign]
+    e = Env(hub, store)
+    assert e.run(["--model", str(model)]) == 0
+    assert f"using {model}" in e.out.getvalue()
+    assert e.calls[-1] == "smoke:gpu" and hub.downloads == []
+
+
+def test_setup_accepts_offline_and_the_environment_variable(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert parse_setup_args(["--offline"]).offline is True
+    assert parse_setup_args([]).offline is False
+    monkeypatch.setattr("launcher.probes.real_probes", lambda: make_probes())
+    monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+    assert wizard.real_env(offline=False).hub.offline is False
+    assert wizard.real_env(offline=True).hub.offline is True
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    assert wizard.real_env(offline=False).hub.offline is True
+
+
+def test_offline_setup_with_a_cached_model_does_not_need_the_network(
+    hub: FakeHub, store: VerifiedStore, tmp_path: Path
+) -> None:
+    hub.offline = True
+    hub.files = {FILE: 10}
+    cached = tmp_path / "c.gguf"
+    cached.write_bytes(hub.content)
+    hub.cached[(REPO, FILE)] = cached
+    store.record(cached, hub.sha256)
+    e = Env(hub, store)
+    assert e.run([]) == 0 and hub.downloads == [] and hub.sha_requests == 0
+
+
 def test_usage_errors() -> None:
     for argv in (["--bogus"], ["--model"], ["extra"]):
         with pytest.raises(UsageError):
             parse_setup_args(argv)
-    assert parse_setup_args(["--yes", "--no-model", "--model", "x/y"]) == SetupArgs(
-        model="x/y", yes=True, no_model=True
+    assert parse_setup_args(["--yes", "--no-model", "--model", "x/y", "--offline"]) == SetupArgs(
+        model="x/y", yes=True, no_model=True, offline=True
     )
 
 
@@ -209,13 +329,81 @@ def test_a_good_uv_sync_returns(monkeypatch: pytest.MonkeyPatch) -> None:
     wizard.real_sync()
 
 
+def _smoke_run(monkeypatch: pytest.MonkeyPatch, *, code: int = 0, stdout: str = "hello\n") -> list[dict[str, object]]:
+    seen: list[dict[str, object]] = []
+
+    def run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen.append({"cmd": cmd, **kwargs})
+        return subprocess.CompletedProcess(cmd, code, stdout)
+
+    monkeypatch.setattr(wizard.subprocess, "run", run)
+    return seen
+
+
+def test_the_smoke_test_binary_gets_the_card_pinning_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    seen = _smoke_run(monkeypatch)
+    monkeypatch.setenv("KEEP", "1")
+    wizard.real_smoke(tmp_path / "m.gguf", "gpu", {"CUDA_VISIBLE_DEVICES": "GPU-x"})
+    env = seen[0]["env"]
+    assert env["CUDA_VISIBLE_DEVICES"] == "GPU-x" and env["KEEP"] == "1"  # type: ignore[index]
+
+
 def test_a_failed_smoke_test_raises(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    calls = _fake_run(monkeypatch, 3)
+    seen = _smoke_run(monkeypatch, code=3)
     with pytest.raises(LauncherError, match="smoke test failed"):
         wizard.real_smoke(tmp_path / "m.gguf", "cpu")
-    assert calls[0][1:3] == ["run", "--model"] and calls[0][-2:] == ["--device", "cpu"]
+    assert seen[0]["cmd"][1:3] == ["run", "--model"]  # type: ignore[index]
 
 
-def test_a_good_smoke_test_returns_the_seconds(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    _fake_run(monkeypatch, 0)
-    assert wizard.real_smoke(tmp_path / "m.gguf", "cpu") >= 0.0
+@pytest.mark.parametrize("stdout", ["", "  \n\n"], ids=["empty", "blank"])
+def test_a_smoke_test_that_prints_nothing_fails(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, stdout: str) -> None:
+    _smoke_run(monkeypatch, stdout=stdout)
+    with pytest.raises(LauncherError, match="printed nothing"):
+        wizard.real_smoke(tmp_path / "m.gguf", "cpu")
+
+
+def test_a_hung_smoke_test_is_a_launcher_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    def run(cmd: list[str], **kwargs: object) -> None:
+        raise subprocess.TimeoutExpired(cmd, kwargs["timeout"])  # type: ignore[arg-type]
+
+    monkeypatch.setattr(wizard.subprocess, "run", run)
+    with pytest.raises(LauncherError, match="did not finish within 300 s"):
+        wizard.real_smoke(tmp_path / "m.gguf", "cpu")
+
+
+def test_the_smoke_test_has_a_timeout_a_full_argv_and_returns_the_measured_seconds(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    seen = _smoke_run(monkeypatch, stdout="Hello there\n")
+    clock = iter([100.0, 102.5])
+    monkeypatch.setattr(wizard.time, "monotonic", lambda: next(clock))
+    model = tmp_path / "m.gguf"
+    assert wizard.real_smoke(model, "cpu") == 2.5
+    assert seen[0]["cmd"] == [
+        str(wizard.build.BINARY), "run", "--model", str(model.resolve()), "--prompt", "Say hello.",
+        "--max-tokens", "16", "--steps", "8", "--device", "cpu",
+    ]
+    assert seen[0]["timeout"] == 300
+    assert capsys.readouterr().out == "Hello there\n"
+
+
+def test_an_os_error_during_setup_is_an_error_line_and_status_1(hub: FakeHub, store: VerifiedStore) -> None:
+    e = Env(hub, store)
+
+    def sync() -> None:
+        raise PermissionError(13, "Permission denied", "/repo/.venv")
+
+    e.env = dataclasses.replace(e.env, sync=sync)
+    assert e.run(["--yes"]) == 1
+    err = e.err.getvalue()
+    assert err.startswith("error: ") and "/repo/.venv" in err and "Permission denied" in err
+
+
+def test_garbage_from_nvidia_smi_means_cpu_after_the_download_not_a_failure(hub: FakeHub, store: VerifiedStore) -> None:
+    # doctor only warns about an unreadable listing; setup must not fail after a multi-gigabyte download for it.
+    e = Env(hub, store, gpu_text="garbage\n")
+    assert e.run(["--yes"]) == 0
+    text = e.out.getvalue()
+    assert hub.downloads == [(REPO, FILE)] and e.calls[-1] == "smoke:cpu"
+    assert "device: cpu (nvidia-smi output is unreadable: nvidia-smi printed a line the launcher cannot read" in text
+    assert e.smoke_env == {}

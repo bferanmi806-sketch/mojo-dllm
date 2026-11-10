@@ -23,8 +23,9 @@
 //                   self-conditioning path runs (what a block's first step is).
 //
 // The sampler is not reimplemented here: unlike LLaDA's, DiffusionGemma's loop
-// (random canvas, entropy-bounded acceptance, re-noising) is the #65 work, and
-// this tool exists to compare one forward pass at a time.
+// (random canvas, entropy-bounded acceptance, re-noising) is mojo-dllm's #65
+// (written, in src/mojo_dllm/diffusion/sampler.mojo), and this tool exists to
+// compare one forward pass at a time.
 //
 // Attention runs without flash attention, as in the branch's own
 // llama-diffusion-gemma-eval: its eager fp32 softmax is the reference the

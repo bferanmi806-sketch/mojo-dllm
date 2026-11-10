@@ -32,6 +32,7 @@ Outputs (deterministic, seed 1234 unless noted):
 
 from __future__ import annotations
 
+import os
 import pathlib
 
 import numpy as np
@@ -40,7 +41,8 @@ from gguf import GGUFReader, GGUFValueType, GGUFWriter
 from gguf.quants import dequantize, quantize
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-OUT = ROOT / "tests" / "fixtures"
+# scripts/check_fixtures.py sets FIXTURES_OUT to regenerate into a scratch directory.
+OUT = pathlib.Path(os.environ.get("FIXTURES_OUT", ROOT / "tests" / "fixtures"))
 RNG = np.random.default_rng(1234)
 
 QK_K = 256
@@ -1033,7 +1035,7 @@ def main() -> None:
     gemma4_tiny()
     gpt2_tiny()
     for p in sorted(OUT.iterdir()):
-        print(f"{p.stat().st_size:>9}  {p.relative_to(ROOT)}")
+        print(f"{p.stat().st_size:>9}  {p.relative_to(ROOT) if p.is_relative_to(ROOT) else p}")
 
 
 GEMMA4_TINY_BYTE0 = 9

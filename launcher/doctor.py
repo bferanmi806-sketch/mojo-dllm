@@ -55,6 +55,9 @@ def check_glibc(p: Probes) -> Check:
 
 
 def check_cpu(p: Probes) -> Check:
+    if p.cpuinfo is None:
+        return Check("warn", "cpu", f"cannot read /proc/cpuinfo: {p.cpuinfo_error}; AVX2 was not checked",
+                     "the CPU kernels need AVX2 (Intel Haswell or AMD Excavator and newer)")
     for line in p.cpuinfo.splitlines():
         if line.startswith("flags") and "avx2" in line.split():
             return _ok("cpu", "AVX2")
@@ -63,6 +66,9 @@ def check_cpu(p: Probes) -> Check:
 
 
 def check_memory(p: Probes) -> Check:
+    if p.meminfo is None:
+        return Check("warn", "memory", f"cannot read /proc/meminfo: {p.meminfo_error}",
+                     f"make sure about {MIN_MEM_GIB} GiB are free before you run a model")
     match = re.search(r"^MemAvailable:\s+(\d+) kB", p.meminfo, re.M)
     if match is None:
         return Check("warn", "memory", "MemAvailable not readable from /proc/meminfo",
@@ -78,8 +84,10 @@ def check_toolchain(p: Probes) -> Check:
     if p.uv_path is None:
         return Check("fail", "toolchain", "uv not found", UV_INSTALL)
     if p.mojo_version_output is None:
-        return Check("fail", "toolchain", f"mojo {p.mojo_pin} is not installed in .venv", "./mojo-dllm setup")
-    match = re.search(r"\d+\.\d+\.\d+", p.mojo_version_output)
+        why = f"mojo {p.mojo_pin} could not be run in .venv: {p.mojo_failure}" if p.mojo_failure else (
+            f"mojo {p.mojo_pin} is not installed in .venv")
+        return Check("fail", "toolchain", why, "./mojo-dllm setup")
+    match = re.search(r"\d+\.\d+\.\d+[0-9A-Za-z.+!-]*", p.mojo_version_output)
     found = match.group(0) if match else p.mojo_version_output.strip()
     if found != p.mojo_pin:
         return Check("fail", "toolchain", f"mojo {found} found, pyproject.toml pins {p.mojo_pin}", "uv sync --frozen")
@@ -89,15 +97,22 @@ def check_toolchain(p: Probes) -> Check:
 def check_binary(p: Probes) -> Check:
     if p.binary_mtime is None:
         return Check("fail", "binary", "build/mojo-dllm does not exist", "./mojo-dllm setup")
+    if not p.source_mtimes:
+        return Check("fail", "binary", "no sources found under src/, so the binary cannot be compared with them",
+                     "restore src/ from git")
     if build.is_stale(p.binary_mtime, p.source_mtimes):
-        return Check("warn", "binary", "build/mojo-dllm is older than src/", "./mojo-dllm setup")
+        return Check("warn", "binary", "build/mojo-dllm is older than its sources (src/, pyproject.toml, uv.lock, scripts/build.sh)",
+                     "./mojo-dllm setup")
+    if p.stamp_problem is not None:
+        return Check("warn", "binary", p.stamp_problem, "./mojo-dllm setup")
     return _ok("binary", "build/mojo-dllm is up to date")
 
 
 def check_gpu(p: Probes) -> Check:
     cpu_note = "device: cpu will be used"
     if p.gpu_text is None:
-        return Check("warn", "gpu", "no NVIDIA GPU found (nvidia-smi missing or failed)", cpu_note)
+        why = f"nvidia-smi failed: {p.gpu_failure}" if p.gpu_failure else "no NVIDIA GPU found (nvidia-smi missing or failed)"
+        return Check("warn", "gpu", why, cpu_note)
     try:
         gpus = parse_nvidia_smi(p.gpu_text)
     except LauncherError as e:
@@ -116,8 +131,14 @@ def check_gpu(p: Probes) -> Check:
 
 
 def check_model(p: Probes) -> Check:
+    if p.cached_model is not None and not p.verified:
+        return Check("warn", "model", f"{p.cached_model} (not verified against its sha256)",
+                     "./mojo-dllm pull")
     if p.cached_model is not None:
         return _ok("model", str(p.cached_model))
+    if p.model_error:
+        return Check("warn", "model", f"cannot look for llada-8b in the Hugging Face cache: {p.model_error}",
+                     "./mojo-dllm pull")
     return Check("warn", "model", "llada-8b (Q4_K_M) is not in the Hugging Face cache", "./mojo-dllm pull")
 
 
