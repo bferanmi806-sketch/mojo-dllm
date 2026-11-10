@@ -38,6 +38,12 @@ jobs:
       - name: Launcher tests
         run: uv run --frozen --only-group test pytest tests/python -q
 
+      - name: Launcher script lock is current
+        # `uv run --script` resolves the script's dependencies from mojo-dllm.lock. Fails when the lock is
+        # missing or the `# dependencies` header no longer matches it.
+        if: ${{ !cancelled() }}
+        run: uv lock --script mojo-dllm --check
+
       - name: Install markdownlint at its exact version
         run: npm install --global markdownlint-cli2@0.23.2
 

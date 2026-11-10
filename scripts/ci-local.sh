@@ -101,6 +101,10 @@ md_lint() {
 launcher_tests() {
     need uv && uv run --frozen --only-group test pytest tests/python -q
 }
+script_lock() {
+    # The lock `uv run --script` uses; fails when it is missing or does not match the script header.
+    need uv && uv lock --script mojo-dllm --check
+}
 claims() {
     need uv && uv run --no-project python scripts/bench_table.py --check &&
         uv run --no-project python bench/eval_gsm8k.py --self-test &&
@@ -131,6 +135,7 @@ if [ "$mode" = full ]; then
     step "yamllint" yaml_lint
     step "markdownlint" md_lint
     step "launcher tests" launcher_tests
+    step "launcher script lock is current" script_lock
     step "README numbers match bench/results" claims
     step "docs build + links" docs_build
     step "action pins match their tags" action_pins

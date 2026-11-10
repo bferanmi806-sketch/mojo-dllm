@@ -443,6 +443,11 @@ semantic versioning (0.y: minor bumps may break things).
   `setup` smoke test), so a machine with an older card first in the `nvidia-smi` list no longer prints one GPU and runs
   on another. An explicit `--device gpu` runs the same detection, pins the first qualifying card, and prints a warning on
   stderr when `nvidia-smi` fails, finds no card or finds only cards below compute capability 8.0.
+- `mojo-dllm.lock` locks the dependency tree of the `./mojo-dllm` script, which `uv run --script` uses (#263). Before,
+  the first run resolved `huggingface-hub`'s transitive packages (httpx2, httpcore2, hf-xet, certifi, filelock, tqdm) at
+  their latest versions without hashes. CI and `scripts/ci-local.sh` run `uv lock --script mojo-dllm --check`, and
+  `tests/python/test_launcher_script.py` checks that the header pin equals the `huggingface-hub` version in `pyproject.toml`,
+  `uv.lock` and the script lock, that every locked package has sha256 hashes, and that the script starts.
 
 ## [0.1.0] - 2026-10-04
 
