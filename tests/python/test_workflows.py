@@ -11,6 +11,8 @@ import re
 import subprocess
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOWS = ROOT / ".github" / "workflows"
 CI_LOCAL = ROOT / "scripts" / "ci-local.sh"
@@ -402,3 +404,12 @@ def test_no_tracked_markdown_file_outside_the_evidence_has_a_dash() -> None:
 
 def test_the_spec_is_linted_like_every_other_document() -> None:
     assert "#docs/spec.md" not in " ".join(md_lint_arguments(CI_LOCAL.read_text()))
+
+
+@pytest.mark.parametrize(
+    "scheme", ["postgres", "postgresql", "mysql", "mariadb", "mongodb", "mongodb+srv", "redis", "amqp"]
+)
+def test_hygiene_refuses_a_database_url_with_a_password_for_each_scheme(tmp_path: Path, scheme: str) -> None:
+    """Each alternative of the pattern is a separate way to miss a secret."""
+    result = run_hygiene(tmp_path, f"URL={scheme}://app:" + "s3cretvalue@db.example.com/app\n")
+    assert result.returncode == 1 and "database url" in result.stderr.lower(), scheme
