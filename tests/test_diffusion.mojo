@@ -917,7 +917,6 @@ def test_dream_commits_its_schedule_in_confidence_order() raises:
     _assert_list(r.tokens, [1, 2, 7, 6, 6, 1], "final canvas")
 
 
-
 def _check_mask_score_row(mask_id: Int, runner_up: Int) raises:
     var vocab = 700
     var logits = Floats(vocab)
@@ -971,11 +970,13 @@ def _check_mask_score_row(mask_id: Int, runner_up: Int) raises:
     assert_equal(greedy_plus[0][0], runner_up)
     assert_true(abs(greedy_plus[1][0] - expected_p) < 1e-12)
 
+
 def test_mask_token_is_excluded_from_greedy_scores() raises:
     # Include index 0 and the final index to cover scorers' old start values.
     _check_mask_score_row(0, 350)
     _check_mask_score_row(350, 0)
     _check_mask_score_row(699, 350)
+
 
 def _check_gumbel_mask(mask_id: Int) raises:
     var vocab = 700
@@ -995,10 +996,12 @@ def _check_gumbel_mask(mask_id: Int) raises:
     assert_true(selected != mask_id, "mask candidate won Gumbel sampling")
     assert_equal(suppressed_rng.next_u64(), plain_rng.next_u64())
 
+
 def test_gumbel_mask_skip_preserves_rng_draws() raises:
     _check_gumbel_mask(0)
     _check_gumbel_mask(350)
     _check_gumbel_mask(699)
+
 
 def test_mask_suppression_preserves_fixture_generations() raises:
     var defaults = GenConfig()
@@ -1023,6 +1026,7 @@ def test_mask_suppression_preserves_fixture_generations() raises:
                 path + " position " + String(i),
             )
 
+
 struct FirstCommit(StepObserver):
     var step_one_commits: Int
     var step_one_tokens: List[Int]
@@ -1038,6 +1042,7 @@ struct FirstCommit(StepObserver):
             self.step_one_commits = len(committed)
             self.step_one_tokens = tokens.copy()
 
+
 def _dream_cfg(gen_length: Int, steps: Int, seed: Int) -> GenConfig:
     var c = GenConfig()
     c.gen_length = gen_length
@@ -1046,6 +1051,7 @@ def _dream_cfg(gen_length: Int, steps: Int, seed: Int) -> GenConfig:
     c.seed = seed
     c.remasking = "origin"
     return c^
+
 
 def test_dream_origin_commits_everything_on_final_step() raises:
     var model = DiffusionLM(FIX + "tiny-dream.gguf", threads=2, max_tokens=16)
@@ -1060,6 +1066,7 @@ def test_dream_origin_commits_everything_on_final_step() raises:
     assert_equal(recorder.step_one_commits, 8)
     for i in range(len(prompt), len(result.tokens)):
         assert_true(result.tokens[i] != c.mask_id, "mask left at " + String(i))
+
 
 def test_dream_origin_first_step_matches_binomial_mean() raises:
     var model = DiffusionLM(FIX + "tiny-dream.gguf", threads=2, max_tokens=70)
@@ -1077,6 +1084,7 @@ def test_dream_origin_first_step_matches_binomial_mean() raises:
         abs(mean - 15.98) < 1.0,
         "origin step-one mean " + String(mean) + " against 15.98",
     )
+
 
 def test_dream_origin_and_random_are_seeded_and_resolve_masks() raises:
     var model = DiffusionLM(FIX + "tiny-dream.gguf", threads=2, max_tokens=70)
@@ -1120,6 +1128,7 @@ def test_dream_origin_and_random_are_seeded_and_resolve_masks() raises:
             "random step-one position " + String(j),
         )
 
+
 def test_remasking_names_are_model_specific() raises:
     var prompt: List[Int] = [5, 17, 300]
     var llada = DiffusionLM(FIX + "tiny-llada.gguf", threads=2, max_tokens=16)
@@ -1133,5 +1142,7 @@ def test_remasking_names_are_model_specific() raises:
     c.remasking = "unknown"
     with assert_raises(contains="unknown Dream algorithm"):
         _ = generate(dream, prompt, c)
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
