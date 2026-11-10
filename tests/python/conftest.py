@@ -87,7 +87,7 @@ class FakeHub:
         self.cached[(repo, filename)] = path
         return path
 
-    def expected_sha256(self, repo: str, filename: str) -> str | None:
+    def expected_sha256(self, repo: str, filename: str, revision: str | None = None) -> str | None:
         self.sha_requests += 1
         return self.sha256
 

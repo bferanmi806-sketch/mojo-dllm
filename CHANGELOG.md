@@ -415,6 +415,10 @@ semantic versioning (0.y: minor bumps may break things).
 - A cached model file that has not been checked against its sha256 is no longer reported as healthy (#256).
   `pull --offline` and `setup` print `already downloaded (not verified)` and exit with status 3 (`setup` lists
   `./mojo-dllm pull` as the outstanding step), and `doctor` marks the `model` line `!` with the pull command.
+- The launcher checks a cached file against the hub's hash at the commit the file was cached at (the name of its
+  snapshot directory), not at the newest `main` (#257). A file that another tool cached at commit A, and that upstream
+  re-uploaded later, is kept. A file that fails its check loses its snapshot link and its blob, and a link whose target
+  lies outside the Hugging Face cache loses only the link.
 
 ## [0.1.0] - 2026-10-04
 

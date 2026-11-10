@@ -28,6 +28,15 @@ def offline_requested(flag: bool, env: Mapping[str, str]) -> bool:
     return flag or env.get("HF_HUB_OFFLINE", "").upper() in {"1", "ON", "YES", "TRUE"}
 
 
+def snapshot_revision(path: Path) -> str | None:
+    """The commit a cached file belongs to: the directory under snapshots/ that holds it."""
+    parts = path.parts
+    for i in range(len(parts) - 2):
+        if parts[i] == "snapshots":
+            return parts[i + 1]
+    return None
+
+
 class Hub:
     def __init__(self, cache_dir: Path | None = None, offline: bool = False) -> None:
         self.cache_dir = cache_dir or hf_cache_dir(os.environ, Path.home())
@@ -73,11 +82,12 @@ class Hub:
         with _hub_errors(repo, self.cache_dir):
             return Path(hf_hub_download(repo, filename, cache_dir=self.cache_dir))
 
-    def expected_sha256(self, repo: str, filename: str) -> str | None:
+    def expected_sha256(self, repo: str, filename: str, revision: str | None = None) -> str | None:
+        """The hub's sha256 of the file at `revision` (the default branch when None)."""
         from huggingface_hub import HfApi
 
         with _hub_errors(repo, self.cache_dir):
-            (info,) = HfApi().get_paths_info(repo, [filename])
+            (info,) = HfApi().get_paths_info(repo, [filename], revision=revision)
         return info.lfs.sha256 if getattr(info, "lfs", None) else None
 
 

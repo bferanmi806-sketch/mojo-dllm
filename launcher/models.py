@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Protocol, TextIO
 
 from launcher.errors import LauncherError
+from launcher.hub import snapshot_revision
 from launcher.ui import human_size
 from launcher.verified import VerifiedStore
 
@@ -31,7 +32,7 @@ class Hub(Protocol):
     def list_files(self, repo: str) -> dict[str, int]: ...
     def cached_path(self, repo: str, filename: str) -> Path | None: ...
     def download(self, repo: str, filename: str) -> Path: ...
-    def expected_sha256(self, repo: str, filename: str) -> str | None: ...
+    def expected_sha256(self, repo: str, filename: str, revision: str | None = None) -> str | None: ...
 
 
 @dataclass(frozen=True)
@@ -123,13 +124,14 @@ def _sha256(path: Path) -> str:
 
 def _check_sha256(path: Path, plan: ModelPlan, hub: Hub, store: VerifiedStore) -> None:
     """Compare the file with the hub's sha256; record it on a match, delete it otherwise."""
-    expected = hub.expected_sha256(plan.repo, plan.filename)
+    # A file cached at commit A is compared with the hub's hash at A, not at the newest main.
+    expected = hub.expected_sha256(plan.repo, plan.filename, snapshot_revision(path))
     if expected is None:
-        _delete(path)
+        _delete(path, hub.cache_dir)
         raise LauncherError(f"Hugging Face reported no sha256 for {plan.label}, so the download cannot be verified.")
     actual = _sha256(path)
     if actual != expected:
-        _delete(path)
+        _delete(path, hub.cache_dir)
         raise LauncherError(
             f"sha256 of {plan.label} does not match the hub's. The file was deleted.\n"
             "Run the command again to download it fresh."
@@ -170,8 +172,14 @@ def use_cached(plan: ModelPlan, hub: Hub, out: TextIO, store: VerifiedStore) -> 
     return path, True
 
 
-def _delete(path: Path) -> None:
-    path.resolve().unlink(missing_ok=True)
+def _delete(path: Path, cache_dir: Path) -> None:
+    """Remove a bad cache entry: the link, and its blob only when the blob lies inside the cache.
+
+    A snapshot link can point at a file that another tool owns, outside the cache.
+    """
+    target = path.resolve()
+    if target.is_relative_to(cache_dir.resolve()):
+        target.unlink(missing_ok=True)
     path.unlink(missing_ok=True)
 
 
