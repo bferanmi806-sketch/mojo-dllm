@@ -114,7 +114,7 @@ def timed(cmd: list[str]) -> tuple[int, str, str, float, int]:
         return p.returncode, p.stdout, p.stderr, float(parts[0]), int(parts[1]) * 1024
 
 
-def run_mojo(c: dict, prompt: str, threads: int, extra: list[str]) -> dict:
+def run_mojo(c: dict, prompt: str, threads: int, extra: list[str], n_prompt: int | None = None) -> dict:
     cmd = [
         str(ROOT / "build/mojo-dllm"), "run", "--model", c["models"]["gguf"], "--prompt", prompt,
         "--max-tokens", str(c["gen_length"]), "--steps", str(c["steps"]),
@@ -127,6 +127,13 @@ def run_mojo(c: dict, prompt: str, threads: int, extra: list[str]) -> dict:
     if rc != 0 or line is None:
         return dict(ok=False, rc=rc, error=(err or out)[-400:])
     j = json.loads(line)
+    # Equal work is what the comparison rests on: every runtime does c["steps"] passes over the same prompt.
+    if j["forward_passes"] != c["steps"]:
+        return dict(ok=False, rc=rc, error=f"mojo-dllm did {j['forward_passes']} forward passes, not {c['steps']}; "
+                                           "the runtimes would not do equal work")
+    if n_prompt is not None and j["prompt_tokens"] != n_prompt:
+        return dict(ok=False, rc=rc, error=f"mojo-dllm counted {j['prompt_tokens']} prompt tokens, "
+                                           f"`tokenize` printed {n_prompt}")
     return dict(
         ok=True, wall_s=wall, peak_rss_bytes=rss, generate_s=j["generate_s"],
         ms_per_step=j["ms_per_step"], forward_passes=j["forward_passes"],
@@ -189,8 +196,8 @@ def run_llama(c: dict, prompt: str, threads: int, seq_len: int, cuda: bool = Fal
     total = parsed["total_s"]
     return dict(
         ok=True, wall_s=wall, peak_rss_bytes=rss, generate_s=total,
-        ms_per_step=parsed["ms_per_step"], forward_passes=c["steps"], startup_s=wall - total,
-        seq_len=seq_len, text=parsed["text"][-600:],
+        ms_per_step=parsed["ms_per_step"], forward_passes=c["steps"], forward_passes_measured=False,
+        startup_s=wall - total, seq_len=seq_len, text=parsed["text"][-600:],
     )
 
 
@@ -266,14 +273,47 @@ def run_diffuse(c: dict, token_ids: str, threads: int, prompt_tokens: int, mode:
         last_step = int(steps[-1][0])
     if rc != 0 or t_start is None or t_end is None:
         return dict(ok=False, rc=rc, error=text_err[-600:])
+    if last_step < 1:
+        # ms / step would be divided by a step count nothing measured: refuse the run instead.
+        return dict(ok=False, rc=rc, error="diffuse-cli printed no `step i/N` line, so its step count is unknown: "
+                                           + text_err[-300:])
     total = t_end - t_start
-    n_steps = last_step or c["steps"]
+    n_steps = last_step
     return dict(
         ok=True, wall_s=float(wall_s), peak_rss_bytes=int(rss_kb) * 1024, generate_s=total,
         ms_per_step=total * 1000.0 / n_steps, forward_passes=n_steps,
         startup_s=t_start - t_launch, seq_len=prompt_tokens + c["gen_length"],
         tokens=out.strip()[-800:],
     )
+
+
+def parse_token_ids(out: str) -> tuple[str, int]:
+    """The comma-separated ids on the last line of `mojo-dllm tokenize`, and how many there are.
+
+    Anything but `[1, 2, 3]` (empty output, a log line) is refused: an empty line used to read as one token and
+    gave llama.cpp a wrong context size.
+    """
+    lines = out.strip().splitlines()
+    ids = lines[-1].strip().strip("[]").replace(" ", "") if lines else ""
+    if not re.fullmatch(r"\d+(,\d+)*", ids):
+        raise SystemExit(f"run_bench: `mojo-dllm tokenize` did not print token ids on its last line: {out[-200:]!r}")
+    return ids, len(ids.split(","))
+
+
+def select_runtimes(configured: list[str], only: str, reps: int) -> list[str]:
+    """The runtimes to run, refusing a selection that would write a result file with nothing measured."""
+    if reps < 1:
+        raise SystemExit(f"run_bench: --reps must be 1 or more, got {reps}")
+    wanted = [n for n in only.split(",") if n] if only else []
+    if only and not wanted:
+        raise SystemExit(f"run_bench: --only {only!r} names no runtime")
+    unknown = [n for n in wanted if n not in configured]
+    if unknown:
+        raise SystemExit(f"run_bench: --only names {unknown}, which the config does not list: {configured}")
+    chosen = [r for r in configured if not wanted or r in wanted]
+    if not chosen:
+        raise SystemExit("run_bench: no runtime selected; the config lists none")
+    return chosen
 
 
 def median_or_none(xs: list[float]) -> float | None:
@@ -339,7 +379,7 @@ def main() -> int:
         c["models"][key] = os.path.expanduser(c["models"][key])
     c["llama_cpp"] = os.path.expanduser(c["llama_cpp"])
     c["diffuse_cpp"] = os.path.expanduser(c["diffuse_cpp"])
-    runtimes = [r for r in c["runtimes"] if not args.only or r in args.only.split(",")]
+    runtimes = select_runtimes(c["runtimes"], args.only, args.reps)
     for key in ("gguf", "diffuse_gguf"):
         if key in c["models"] and not pathlib.Path(c["models"][key]).exists():
             raise SystemExit(f"model file missing: {c['models'][key]}")
@@ -389,11 +429,11 @@ def main() -> int:
         """One timed run of one runtime on one prompt."""
         t_start = dt.datetime.now().isoformat(timespec="seconds")
         if rt == "mojo-dllm":
-            r = run_mojo(c, p, threads, [])
+            r = run_mojo(c, p, threads, [], n_prompt)
         elif rt == "mojo-dllm-gpu":
-            r = run_mojo(c, p, threads, ["--device", "gpu"])
+            r = run_mojo(c, p, threads, ["--device", "gpu"], n_prompt)
         elif rt == "mojo-dllm-full-logits":
-            r = run_mojo(c, p, threads, ["--full-logits"])
+            r = run_mojo(c, p, threads, ["--full-logits"], n_prompt)
         elif rt == "llama.cpp":
             r = run_llama(c, p, threads, seq_len)
         elif rt == "llama.cpp-cuda":
@@ -430,8 +470,7 @@ def main() -> int:
                 [str(ROOT / "build/mojo-dllm"), "tokenize", "--model", c["models"]["gguf"], "--prompt", p],
                 capture_output=True, text=True, check=True,
             ).stdout
-            ids = out.strip().splitlines()[-1].strip("[]").replace(" ", "")
-            tok_cache[p] = (ids, len(ids.split(",")))
+            tok_cache[p] = parse_token_ids(out)
         for rep in range(args.reps):
             for pi, p in enumerate(c["prompts"]):
                 ids, n_prompt = tok_cache[p]
