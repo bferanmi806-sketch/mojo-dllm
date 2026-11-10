@@ -25,20 +25,38 @@ echo "systemctl $*" >> "$FAKE_DIR/calls"
 verb="$1"; shift
 case "$verb" in
   is-active) [ "$1" = --quiet ] && shift; [ -e "$FAKE_DIR/active/$1" ] ;;
-  stop)  [ "${FAKE_FAIL_STOP:-}" = "$1" ] && exit 1; rm -f "$FAKE_DIR/active/$1" ;;
+  stop)  grep -qx "timer ${1%.timer}" "$BENCH_QUIET_STATE" 2>/dev/null && echo "$1" >> "$FAKE_DIR/recorded_before_stop"
+         [ "${FAKE_FAIL_STOP:-}" = "$1" ] && exit 1; rm -f "$FAKE_DIR/active/$1" ;;
   start) [ "${FAKE_FAIL_START:-}" = "$1" ] && exit 1; touch "$FAKE_DIR/active/$1" ;;
   *) exit 2 ;;
 esac
 """
 FAKE_NVIDIA = r"""#!/usr/bin/env bash
-# fake nvidia-smi: persistence in $FAKE_DIR/persistence, clock lock in $FAKE_DIR/locked.
+# fake nvidia-smi with $FAKE_GPUS cards (default 1). Card 0 keeps its state in $FAKE_DIR/persistence and
+# $FAKE_DIR/locked, card N in persistence.N and locked.N. A call without `-i N` acts on every card, which the
+# script under test must never do for a write: the call is logged as `ALL` and fails.
 echo "nvidia-smi $*" >> "$FAKE_DIR/calls"
+n="${FAKE_GPUS:-1}"
+idx=""
+if [ "$1" = -i ]; then idx="$2"; shift 2; fi
+suffix=""; [ -n "$idx" ] && [ "$idx" != 0 ] && suffix=".$idx"
 case "$1" in
-  --query-gpu=persistence_mode) cat "$FAKE_DIR/persistence" ;;
-  --query-gpu=clocks.max.sm) echo 2100 ;;
-  -pm) if [ "$2" = 1 ]; then echo Enabled > "$FAKE_DIR/persistence"; else echo Disabled > "$FAKE_DIR/persistence"; fi ;;
-  -lgc) [ -n "${FAKE_REFUSE_LGC:-}" ] && { echo "not supported" >&2; exit 4; }; echo "$2" > "$FAKE_DIR/locked" ;;
-  -rgc) rm -f "$FAKE_DIR/locked" ;;
+  --query-gpu=index) seq 0 $((n - 1)) ;;
+  --query-gpu=persistence_mode) [ "$FAKE_FAIL_QUERY" = "$idx" ] && exit 1; cat "$FAKE_DIR/persistence$suffix" ;;
+  --query-gpu=clocks.max.sm) echo $((2100 + ${idx:-0} * 100)) ;;
+  -pm)
+    [ -n "$idx" ] || { echo "ALL" >> "$FAKE_DIR/calls"; exit 5; }
+    [ "$2" = 1 ] && grep -qx "gpu-persistence $idx Disabled" "$BENCH_QUIET_STATE" 2>/dev/null && echo "pm $idx" >> "$FAKE_DIR/recorded_before_write"
+    [ "$FAKE_FAIL_PM" = "$idx" ] && exit 1
+    if [ "$2" = 1 ]; then echo Enabled > "$FAKE_DIR/persistence$suffix"; else echo Disabled > "$FAKE_DIR/persistence$suffix"; fi ;;
+  -lgc)
+    [ -n "$idx" ] || { echo "ALL" >> "$FAKE_DIR/calls"; exit 5; }
+    grep -qx "gpu-clocks $idx locked" "$BENCH_QUIET_STATE" 2>/dev/null && echo "lgc $idx" >> "$FAKE_DIR/recorded_before_write"
+    { [ -n "${FAKE_REFUSE_LGC:-}" ] || [ "${FAKE_REFUSE_LGC_INDEX:-}" = "$idx" ]; } && { echo "not supported" >&2; exit 4; }
+    echo "$2" > "$FAKE_DIR/locked$suffix" ;;
+  -rgc)
+    [ -n "$idx" ] || { echo "ALL" >> "$FAKE_DIR/calls"; exit 5; }
+    rm -f "$FAKE_DIR/locked$suffix" ;;
   *) exit 3 ;;
 esac
 """
@@ -51,7 +69,8 @@ exec "$@"
 FAKE_CRONTAB = "#!/usr/bin/env bash\necho \"crontab $*\" >> \"$FAKE_DIR/calls\"\n"
 # The only real programs the script may reach. PATH is this directory alone, so a real systemctl or nvidia-smi
 # can never be found: a test that forgets a shim fails with "command not found" instead of touching the machine.
-TOOLS = ("bash", "cat", "head", "id", "kill", "rm", "sed", "sleep", "tr", "touch", "true", "false", "env", "dirname")
+TOOLS = ("bash", "cat", "grep", "head", "id", "kill", "rm", "sed", "seq", "sleep", "tr", "touch", "true", "false", "env",
+         "dirname")
 TIMERS = ["sysstat-collect", "apt-daily", "apt-daily-upgrade", "fwupd-refresh", "anacron", "man-db", "motd-news"]
 
 
@@ -81,7 +100,8 @@ class Rig:
         for name, body in (("systemctl", FAKE_SYSTEMCTL), ("nvidia-smi", FAKE_NVIDIA), ("runuser", FAKE_RUNUSER),
                            ("crontab", FAKE_CRONTAB)):
             _script(self.bin / name, body)
-        (self.dir / "persistence").write_text("Disabled\n")
+        for i in range(4):
+            self.set_persistence(i, "Disabled")
         self.state = tmp / "state"
         self.env = {**os.environ, "PATH": str(self.bin), "FAKE_DIR": str(self.dir),
                     "BENCH_QUIET_ASSUME_ROOT": "1", "BENCH_QUIET_TESTING": "1", "BENCH_QUIET_STATE": str(self.state)}
@@ -104,11 +124,20 @@ class Rig:
 
     @property
     def persistence(self) -> str:
-        return (self.dir / "persistence").read_text().strip()
+        return self.persistence_of(0)
 
     @property
     def locked(self) -> bool:
-        return (self.dir / "locked").exists()
+        return self.locked_of(0)
+
+    def persistence_of(self, i: int) -> str:
+        return (self.dir / (f"persistence.{i}" if i else "persistence")).read_text().strip()
+
+    def locked_of(self, i: int) -> bool:
+        return (self.dir / (f"locked.{i}" if i else "locked")).exists()
+
+    def set_persistence(self, i: int, value: str) -> None:
+        (self.dir / (f"persistence.{i}" if i else "persistence")).write_text(value + "\n")
 
 
 @pytest.fixture
@@ -156,8 +185,8 @@ def test_stops_only_active_timers_runs_the_command_and_restores_everything(rig: 
     assert not rig.is_active("anacron") and not rig.is_active("fwupd-refresh")          # never started what it did not stop
     assert rig.persistence == "Disabled" and not rig.locked and not rig.state.exists()
     assert "changed:  stopped sysstat-collect.timer stopped apt-daily.timer stopped man-db.timer" in p.stdout
-    assert "persistence mode on" in p.stdout and "GPU clocks locked at 2100 MHz" in p.stdout
-    assert "restored: " in p.stdout and "started man-db.timer" in p.stdout and "GPU clocks reset" in p.stdout
+    assert "persistence mode on" in p.stdout and "GPU 0 clocks locked at 2100 MHz" in p.stdout
+    assert "restored: " in p.stdout and "started man-db.timer" in p.stdout and "GPU 0 clocks reset" in p.stdout
     assert not any(c.startswith("systemctl start anacron") for c in rig.calls())
 
 
@@ -165,13 +194,13 @@ def test_persistence_already_on_is_left_on(rig: Rig) -> None:
     (rig.dir / "persistence").write_text("Enabled\n")
     p = rig.run("--", "true")
     assert p.returncode == 0 and rig.persistence == "Enabled"
-    assert "nvidia-smi -pm 0" not in rig.calls() and "nvidia-smi -pm 1" not in rig.calls()
+    assert "nvidia-smi -i 0 -pm 0" not in rig.calls() and "nvidia-smi -i 0 -pm 1" not in rig.calls()
 
 
 def test_a_driver_that_refuses_the_clock_lock_is_reported_and_not_reset(rig: Rig) -> None:
     p = rig.run("--", "true", FAKE_REFUSE_LGC="1")
-    assert p.returncode == 0 and "refused to lock GPU clocks" in p.stdout
-    assert "nvidia-smi -rgc" not in rig.calls() and rig.persistence == "Disabled"
+    assert p.returncode == 0 and "refused to lock the clocks of GPU 0" in p.stdout
+    assert "nvidia-smi -i 0 -rgc" not in rig.calls() and rig.persistence == "Disabled"
 
 
 def test_no_nvidia_smi_leaves_the_gpu_alone(rig: Rig) -> None:
@@ -221,7 +250,7 @@ def test_a_failed_restore_is_reported_kept_in_the_state_file_and_exits_nonzero(r
 
 
 def test_a_stale_state_file_blocks_a_new_run_until_restored(rig: Rig) -> None:
-    rig.state.write_text("timer apt-daily\ngpu-persistence Disabled\ngpu-clocks locked\n")
+    rig.state.write_text("timer apt-daily\ngpu-persistence 0 Disabled\ngpu-clocks 0 locked\n")
     (rig.dir / "persistence").write_text("Enabled\n")
     (rig.dir / "locked").write_text("2100,2100\n")
     p = rig.run("--", "true")
@@ -249,8 +278,9 @@ def test_the_command_runs_as_the_invoking_user(rig: Rig) -> None:
 
 def test_the_command_sees_that_the_machine_was_quieted(rig: Rig) -> None:
     out = rig.dir / "env"
+    rig.active("man-db", "anacron")
     p = rig.run("--", "bash", "-c", f'printf "%s" "${{BENCH_QUIET_ACTIVE:-unset}}" > "{out}"')
-    assert p.returncode == 0 and out.read_text() == "1"
+    assert p.returncode == 0 and out.read_text() == "timers:2,pm:1,clocks:1,refused:0"
 
 
 @pytest.mark.parametrize("sig", [signal.SIGHUP, signal.SIGQUIT, signal.SIGUSR1])
@@ -294,3 +324,115 @@ def test_help_prints_the_whole_header_including_the_state_variable(rig: Rig) -> 
     assert "BENCH_QUIET_STATE=PATH" in p.stdout and "default /run/bench-quiet.state" in p.stdout
     assert "BENCH_QUIET_TESTING=1" in p.stdout and "SIGKILL" in p.stdout
     assert "set -uo pipefail" not in p.stdout                  # the header only, not the code
+
+
+# What was quieted is recorded, and every card is handled on its own (#247) ------------------------------------
+
+def exported(rig: Rig, **env: str) -> str:
+    out = rig.dir / "exported"
+    p = rig.run("--", "bash", "-c", f'printf "%s" "${{BENCH_QUIET_ACTIVE:-unset}}" > "{out}"', **env)
+    assert p.returncode == 0, p.stderr
+    return out.read_text()
+
+
+def test_a_refused_timer_stop_shows_in_the_exported_value(rig: Rig) -> None:
+    rig.active("man-db", "anacron", "apt-daily")
+    assert exported(rig, FAKE_FAIL_STOP="man-db.timer") == "timers:2,pm:1,clocks:1,refused:1"
+
+
+def test_a_refused_clock_lock_shows_in_the_exported_value(rig: Rig) -> None:
+    assert exported(rig, FAKE_REFUSE_LGC="1") == "timers:0,pm:1,clocks:0,refused:1"
+
+
+def test_a_failed_persistence_switch_shows_in_the_exported_value_and_is_not_restored(rig: Rig) -> None:
+    out = exported(rig, FAKE_FAIL_PM="0")
+    assert out == "timers:0,pm:0,clocks:1,refused:1"
+    assert "nvidia-smi -i 0 -pm 0" not in rig.calls()                 # it never switched it on, so it never switches it off
+
+
+def test_an_unreadable_persistence_state_is_counted_and_the_card_left_alone(rig: Rig) -> None:
+    assert exported(rig, FAKE_FAIL_QUERY="0") == "timers:0,pm:0,clocks:1,refused:1"
+    assert "nvidia-smi -i 0 -pm 1" not in rig.calls()
+
+
+def test_no_gpu_tool_exports_zero_changes(rig: Rig) -> None:
+    (rig.bin / "nvidia-smi").unlink()
+    rig.active("anacron")
+    assert exported(rig) == "timers:1,pm:0,clocks:0,refused:0"
+
+
+def test_every_timer_is_recorded_in_the_state_file_before_it_is_stopped(rig: Rig) -> None:
+    rig.active("man-db", "anacron")
+    assert exported(rig, FAKE_DEBUG="") == "timers:2,pm:1,clocks:1,refused:0"
+    assert sorted((rig.dir / "recorded_before_stop").read_text().split()) == ["anacron.timer", "man-db.timer"]
+
+
+def test_a_timer_that_will_not_stop_leaves_no_state_line(rig: Rig) -> None:
+    rig.active("man-db")
+    seen = rig.dir / "state-during"
+    p = rig.run("--", "bash", "-c", f'cat "$BENCH_QUIET_STATE" > "{seen}"', FAKE_FAIL_STOP="man-db.timer")
+    assert p.returncode == 0 and "timer man-db" not in seen.read_text().splitlines()
+    assert rig.is_active("man-db")
+
+
+def test_two_cards_are_each_restored_to_their_own_state(rig: Rig) -> None:
+    rig.set_persistence(0, "Enabled")                                     # an administrator turned this one on
+    rig.set_persistence(1, "Disabled")
+    during = rig.dir / "during"
+    cmd = f'echo "$(cat "{rig.dir}/persistence") $(cat "{rig.dir}/persistence.1")" > "{during}"'
+    p = rig.run("--", "bash", "-c", cmd, FAKE_GPUS="2")
+    assert p.returncode == 0, p.stderr
+    assert during.read_text().split() == ["Enabled", "Enabled"]          # both quieted while it ran
+    assert rig.persistence_of(0) == "Enabled" and rig.persistence_of(1) == "Disabled"
+    calls = rig.calls()
+    assert "nvidia-smi -i 0 -pm 0" not in calls and "nvidia-smi -i 1 -pm 0" in calls
+    assert "nvidia-smi -i 0 -pm 1" not in calls and "nvidia-smi -i 1 -pm 1" in calls
+    assert not rig.locked_of(0) and not rig.locked_of(1) and not rig.state.exists()
+    assert "nvidia-smi -i 0 -lgc 2100,2100" in calls and "nvidia-smi -i 1 -lgc 2200,2200" in calls
+    assert "GPU 1 clocks locked at 2200 MHz" in p.stdout and "GPU 1 persistence mode off" in p.stdout
+    assert "GPU 0 persistence mode was already on" in p.stdout
+
+
+def test_a_card_that_refuses_the_lock_is_not_reset_while_the_other_is(rig: Rig) -> None:
+    p = rig.run("--", "true", FAKE_GPUS="2", FAKE_REFUSE_LGC_INDEX="1")
+    assert p.returncode == 0 and "lock the clocks of GPU 1" in p.stdout
+    calls = rig.calls()
+    assert "nvidia-smi -i 0 -rgc" in calls and "nvidia-smi -i 1 -rgc" not in calls
+
+
+def test_the_exported_value_counts_every_card(rig: Rig) -> None:
+    rig.set_persistence(1, "Enabled")
+    assert exported(rig, FAKE_GPUS="3", FAKE_REFUSE_LGC_INDEX="2") == "timers:0,pm:2,clocks:2,refused:1"
+
+
+def test_the_script_never_writes_to_every_card_at_once(rig: Rig) -> None:
+    rig.run("--", "true", FAKE_GPUS="2")
+    assert "ALL" not in rig.calls()
+    writes = [c for c in rig.calls() if any(f" {flag}" in c for flag in ("-pm", "-lgc", "-rgc"))]
+    assert writes and all(c.startswith(("nvidia-smi -i 0 ", "nvidia-smi -i 1 ")) for c in writes)
+
+
+def test_a_stale_state_file_of_two_cards_restores_each(rig: Rig) -> None:
+    rig.state.write_text("gpu-persistence 1 Disabled\ngpu-clocks 1 locked\ngpu-persistence 0 Enabled\n")
+    rig.set_persistence(0, "Enabled")
+    rig.set_persistence(1, "Enabled")
+    (rig.dir / "locked.1").write_text("2200,2200\n")
+    p = rig.run("--restore")
+    assert p.returncode == 0 and rig.persistence_of(1) == "Disabled" and rig.persistence_of(0) == "Enabled"
+    assert not rig.locked_of(1) and not rig.state.exists()
+    assert "nvidia-smi -i 0 -pm 0" not in rig.calls()
+
+
+def test_a_failed_listing_of_the_cards_leaves_the_gpus_alone(rig: Rig) -> None:
+    (rig.bin / "nvidia-smi").write_text("#!/usr/bin/env bash\necho \"nvidia-smi $*\" >> \"$FAKE_DIR/calls\"\nexit 9\n")
+    out = rig.dir / "exported2"
+    p = rig.run("--", "bash", "-c", f'printf "%s" "$BENCH_QUIET_ACTIVE" > "{out}"')
+    assert p.returncode == 0 and "could not list the GPUs" in p.stderr
+    assert out.read_text() == "timers:0,pm:0,clocks:0,refused:1"
+    assert [c for c in rig.calls() if c.startswith("nvidia-smi")] == ["nvidia-smi --query-gpu=index --format=csv,noheader"]
+
+
+def test_each_gpu_change_is_recorded_in_the_state_file_before_it_is_made(rig: Rig) -> None:
+    p = rig.run("--", "true", FAKE_GPUS="2")
+    assert p.returncode == 0, p.stderr
+    assert sorted((rig.dir / "recorded_before_write").read_text().splitlines()) == ["lgc 0", "lgc 1", "pm 0", "pm 1"]

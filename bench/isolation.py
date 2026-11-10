@@ -34,6 +34,7 @@ import math
 import os
 import pathlib
 import platform
+import re
 import shutil
 import signal
 import stat
@@ -1138,6 +1139,27 @@ class Arm:
             self.log(f"!! could not write the closing snapshot to {self.env_path} ({type(e).__name__}: {e})")
 
 
+_BENCH_QUIET = re.compile(r"timers:(\d+),pm:(\d+),clocks:(\d+),refused:(\d+)")
+
+
+def bench_quiet_record(value: str | None) -> tuple[bool, dict | None]:
+    """`bench_quiet` and `bench_quiet_changes` of an env file, from BENCH_QUIET_ACTIVE.
+
+    scripts/bench-quiet.sh exports `timers:N,pm:N,clocks:N,refused:N`: the timers it stopped, the cards it put
+    into persistence mode and locked, and the changes it tried and could not make. Unset or empty means the run
+    was not started under the script. A value in another form (an older script exported `1`) is recorded as
+    started under it with no detail: the changes are unknown, never zero.
+    """
+    if not value:
+        return False, None
+    m = _BENCH_QUIET.fullmatch(value)
+    if m is None:
+        return True, None
+    timers, pm, clocks, refused = (int(g) for g in m.groups())
+    return True, {"timers_stopped": timers, "gpus_persistence_on": pm, "gpus_clocks_locked": clocks,
+                  "refused": refused}
+
+
 def begin_arm(arm: str, *, device: str, need_ram_gb: float | None, runs_dir: pathlib.Path | None,
               machine: Machine | None = None, thresholds: Thresholds | None = None, retries: int = 2,
               allow_noisy: bool = False, allow_battery: bool = False, allow: tuple[str, ...] = (),
@@ -1156,6 +1178,7 @@ def begin_arm(arm: str, *, device: str, need_ram_gb: float | None, runs_dir: pat
     if runs_dir is not None:
         runs_dir.mkdir(parents=True, exist_ok=True)
         env_path = runs_dir / f"{arm}.env.json"
+        quiet, quiet_changes = bench_quiet_record(os.environ.get("BENCH_QUIET_ACTIVE"))
         try:
             doc = json.loads(env_path.read_text()) if env_path.exists() else {"arm": arm, "sessions": []}
         except ValueError as e:
@@ -1164,7 +1187,7 @@ def begin_arm(arm: str, *, device: str, need_ram_gb: float | None, runs_dir: pat
             "session_id": session_id, "started": dt.datetime.fromtimestamp(m.wall()).isoformat(timespec="seconds"), "device": device,
             "preflight": report.to_dict(), "preflight_failed_allowed": bool(report.failed) and allow_noisy,
             "allow_noisy": allow_noisy, "allow_battery": allow_battery,
-            "bench_quiet": os.environ.get("BENCH_QUIET_ACTIVE") == "1", "retries": retries,
+            "bench_quiet": quiet, "bench_quiet_changes": quiet_changes, "retries": retries,
             "need_ram_gb": need_ram_gb, "thresholds": dataclasses.asdict(th), "tuned": tuned,
             "snapshot_start": report.snapshot, "tool_versions": {**_tool_versions(m), **(versions or {})}})
         env_path.write_text(json.dumps(doc, indent=2) + "\n")

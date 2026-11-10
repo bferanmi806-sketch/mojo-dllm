@@ -250,7 +250,9 @@ and `max_quiet_wait_s` config keys for this wait, and records `cpu_busy_before` 
 **Reading `ARM.env.json`.** The eval runners write `bench/eval/runs/ARM.env.json` and `run_bench.py` writes
 `bench/results/env/NAME.env.json`. It holds one entry per start of the arm under `sessions`: the preflight report
 (each check with its status and detail), `snapshot_start` and `snapshot_end`, the `thresholds` used, `tuned` (the
-profile before and after `--tune`), `bench_quiet` (true when the run was started under `scripts/bench-quiet.sh`),
+profile before and after `--tune`), `bench_quiet` (true when the run was started under `scripts/bench-quiet.sh`) and `bench_quiet_changes` (what that
+script changed: `timers_stopped`, `gpus_persistence_on`, `gpus_clocks_locked`, and `refused`, the changes it tried and
+could not make, a refused clock lock among them; null when the script gave no detail),
 `preflight_failed_allowed` (true when `--allow-noisy` continued past a FAIL), a `session_id`, the retry limit and tool
 versions. Each row of an arm file carries `isolation`: the window values above, `clean`, `reasons`, `retries` (how
 many repeats this problem took), `noisy`, `cpu_busy_before`, `waited_s`, `session` (the `session_id` of the start
