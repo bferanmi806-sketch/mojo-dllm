@@ -95,18 +95,6 @@ script_lock() {
     # The lock `uv run --script` uses; fails when it is missing or does not match the script header.
     need uv && uv lock --script mojo-dllm --check
 }
-extra_group_tests() {
-    # These files need numpy, gguf and PyYAML (the fixtures and lint groups) and skip themselves without them;
-    # a skip means they did not run, so a skip fails.
-    need uv || return 1
-    local out rc
-    out="$(uv run --frozen --only-group test --only-group fixtures --only-group lint pytest \
-        tests/python/test_parity_compare.py tests/python/test_action_pins.py tests/python/test_dg_bound.py \
-        tests/python/test_gen_fixtures.py -q -rs 2>&1)"
-    rc=$?
-    printf '%s\n' "$out"
-    [ "$rc" -eq 0 ] && ! grep -q 'skipped' <<<"$out"
-}
 claims() {
     need uv && uv run --no-project python scripts/bench_table.py --check &&
         uv run --no-project python bench/eval_gsm8k.py --self-test &&
@@ -145,7 +133,7 @@ if [ "$mode" = full ]; then
     step "markdownlint" md_lint
     step "launcher tests" launcher_tests
     step "launcher script lock is current" script_lock
-    step "tests that need the fixtures and lint groups" extra_group_tests
+    step "tests that need the fixtures and lint groups" bash scripts/run_extra_group_tests.sh
     step "published numbers match their evidence (tables, GSM8K and checker self-tests)" claims
     step "fixtures match their generators" fixtures_match
     step "docs build + links" docs_build
