@@ -61,6 +61,14 @@ def test_the_three_functions_that_shared_a_stream_give_the_committed_bytes_in_an
             assert (out / name).read_bytes() == (FIXTURES / name).read_bytes(), (name, [f.__name__ for f in order])
 
 
+def same_fixture(rel: str, made: bytes, tracked: bytes) -> bool:
+    spec = importlib.util.spec_from_file_location("check_fixtures_t", ROOT / "scripts/check_fixtures.py")
+    assert spec is not None and spec.loader is not None
+    gate = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gate)
+    return gate._same(rel, made, tracked, gate.FLOAT_TSV)
+
+
 def test_a_function_run_twice_gives_the_same_bytes(out: Path) -> None:
     with redirect_stdout(io.StringIO()):
         gf.tiny_llada()
@@ -81,7 +89,8 @@ def test_a_full_regeneration_is_byte_identical_to_every_committed_fixture(out: P
     run_main()
     made = [line for line in (out / gf.MANIFEST).read_text().splitlines()]
     assert len(made) > 200 and made == sorted(made)
-    different = [rel for rel in made if (out / rel).read_bytes() != (FIXTURES / rel).read_bytes()]
+    # The float files compare by value, as scripts/check_fixtures.py does: a BLAS on another CPU moves their last bits.
+    different = [rel for rel in made if not same_fixture(rel, (out / rel).read_bytes(), (FIXTURES / rel).read_bytes())]
     assert different == []
     assert (FIXTURES / gf.MANIFEST).read_text() == (out / gf.MANIFEST).read_text()
     for rel in made:
