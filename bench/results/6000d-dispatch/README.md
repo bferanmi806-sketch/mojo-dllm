@@ -19,7 +19,7 @@ Three prompts, three measured rounds per length; a warmup pair per length is exc
 | dream | 512 | 55.695 | 52.176 | 1.067x | 1.064 to 1.068x |
 | dream | 1024 | 103.608 | 102.779 | 1.008x | 1.004 to 1.009x |
 
-The longest LLaDA case and its 256-token case are effectively unchanged. The benefit depends on shape; the Dream 128-token pair range also reflects prompt-length differences.
+LLaDA at 256 and 1024 generated tokens: effectively unchanged, the median paired speedup being within 0.5% of 1. The benefit depends on shape. The widest pair range is Dream at 128 generated tokens, 1.026 to 1.249x. The prompts give canvases of 155, 160, 161 tokens at that length.
 
 ## Preservation checks
 

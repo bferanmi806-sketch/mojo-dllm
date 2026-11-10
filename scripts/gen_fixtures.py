@@ -32,8 +32,10 @@ Outputs (deterministic, seed 1234 unless noted):
 
 from __future__ import annotations
 
+import os
 import pathlib
 import sys
+import tempfile
 
 import numpy as np
 from gguf import GGMLQuantizationType as Q
@@ -45,7 +47,23 @@ sys.path.insert(0, str(ROOT / "bench"))
 import spec  # noqa: E402  (bench/spec.py)
 
 OUT = ROOT / "tests" / "fixtures"
-RNG = np.random.default_rng(1234)
+SEED = 1234
+# These three fixtures once drew from one generator seeded with SEED, in the order below, so each one's values
+# depend on how many numbers the earlier ones drew. Each now starts its own generator at the position (in 64-bit
+# draws) where the shared stream stood when it began, which reproduces every committed byte and no longer depends
+# on the order the functions run in. The positions were found by stepping the generator until its state matched
+# the state recorded after the previous function; a test regenerates the three in reverse order and compares.
+KQUANTS_SKIP = 0
+TINY_LLADA_SKIP = 548
+TINY_DREAM_SKIP = 149284
+
+
+def stream(skip: int) -> np.random.Generator:
+    """A generator on the SEED stream, `skip` draws in."""
+    gen = np.random.default_rng(SEED)
+    gen.bit_generator.advance(skip)
+    return gen
+
 
 QK_K = 256
 Q4K_BYTES = 144
@@ -69,12 +87,8 @@ def f16_bytes(values: np.ndarray) -> np.ndarray:
     return values.astype(np.float16).view(np.uint8)
 
 
-def random_q4k(rows: int, cols: int, d_scale: float, rng: np.random.Generator | None = None) -> np.ndarray:
-    """Valid Q4_K bytes: small positive f16 d/dmin, random 6-bit scales, random nibbles.
-
-    `rng` is a separate stream for generators added after the first fixtures,
-    so that they leave every earlier fixture byte for byte unchanged."""
-    gen = RNG if rng is None else rng
+def random_q4k(rows: int, cols: int, d_scale: float, gen: np.random.Generator) -> np.ndarray:
+    """Valid Q4_K bytes: small positive f16 d/dmin, random 6-bit scales, random nibbles, drawn from `gen`."""
     nb = rows * cols // QK_K
     blocks = np.zeros((nb, Q4K_BYTES), dtype=np.uint8)
     blocks[:, 0:2] = f16_bytes(gen.uniform(0.2, 1.0, nb) * d_scale).reshape(nb, 2)
@@ -84,8 +98,7 @@ def random_q4k(rows: int, cols: int, d_scale: float, rng: np.random.Generator | 
     return blocks.reshape(rows, cols // QK_K * Q4K_BYTES)
 
 
-def random_q6k(rows: int, cols: int, d_scale: float, rng: np.random.Generator | None = None) -> np.ndarray:
-    gen = RNG if rng is None else rng
+def random_q6k(rows: int, cols: int, d_scale: float, gen: np.random.Generator) -> np.ndarray:
     nb = rows * cols // QK_K
     blocks = np.zeros((nb, Q6K_BYTES), dtype=np.uint8)
     blocks[:, 0:192] = gen.integers(0, 256, (nb, 192), dtype=np.uint8)
@@ -104,9 +117,10 @@ def kquants() -> None:
     w.add_array("test.strs", ["a", "bc", "déf"])
     w.add_array("test.ints", [1, -2, 3])
 
-    q4 = random_q4k(4, 512, 0.01)
-    q6 = random_q6k(4, 512, 0.01)
-    f16 = RNG.standard_normal((2, 64)).astype(np.float16)
+    rng = stream(KQUANTS_SKIP)
+    q4 = random_q4k(4, 512, 0.01, rng)
+    q6 = random_q6k(4, 512, 0.01, rng)
+    f16 = rng.standard_normal((2, 64)).astype(np.float16)
     w.add_tensor("q4k", q4, raw_shape=q4.shape, raw_dtype=Q.Q4_K)
     w.add_tensor("q6k", q6, raw_shape=q6.shape, raw_dtype=Q.Q6_K)
     w.add_tensor("f16", f16)
@@ -161,6 +175,7 @@ def rope_norm(x: np.ndarray, theta: float) -> np.ndarray:
 def tiny_llada() -> None:
     c = TINY
     h, f, v = c["hidden"], c["ffn"], c["vocab"]
+    rng = stream(TINY_LLADA_SKIP)
     w = GGUFWriter(str(OUT / "tiny-llada.gguf"), "llada")
     w.add_uint32("llada.block_count", c["layers"])
     w.add_uint32("llada.context_length", 4096)
@@ -177,17 +192,17 @@ def tiny_llada() -> None:
     weights: dict[str, np.ndarray] = {}
 
     def q4(name: str, rows: int, cols: int, scale: float) -> None:
-        raw = random_q4k(rows, cols, scale)
+        raw = random_q4k(rows, cols, scale, rng)
         w.add_tensor(name, raw, raw_shape=raw.shape, raw_dtype=Q.Q4_K)
         weights[name] = dequantize(raw, Q.Q4_K).astype(np.float32)
 
     def q6(name: str, rows: int, cols: int, scale: float) -> None:
-        raw = random_q6k(rows, cols, scale)
+        raw = random_q6k(rows, cols, scale, rng)
         w.add_tensor(name, raw, raw_shape=raw.shape, raw_dtype=Q.Q6_K)
         weights[name] = dequantize(raw, Q.Q6_K).astype(np.float32)
 
     def f32(name: str, n: int) -> None:
-        arr = RNG.uniform(0.8, 1.2, n).astype(np.float32)
+        arr = rng.uniform(0.8, 1.2, n).astype(np.float32)
         w.add_tensor(name, arr)
         weights[name] = arr
 
@@ -247,6 +262,7 @@ def tiny_dream() -> None:
     c = DREAM
     h, f, v = c["hidden"], c["ffn"], c["vocab"]
     kvd = c["kv_heads"] * c["head_dim"]
+    rng = stream(TINY_DREAM_SKIP)
     w = GGUFWriter(str(OUT / "tiny-dream.gguf"), "dream")
     w.add_uint32("dream.block_count", c["layers"])
     w.add_uint32("dream.context_length", 4096)
@@ -262,17 +278,17 @@ def tiny_dream() -> None:
     weights: dict[str, np.ndarray] = {}
 
     def q4(name: str, rows: int, cols: int, scale: float) -> None:
-        raw = random_q4k(rows, cols, scale)
+        raw = random_q4k(rows, cols, scale, rng)
         w.add_tensor(name, raw, raw_shape=raw.shape, raw_dtype=Q.Q4_K)
         weights[name] = dequantize(raw, Q.Q4_K).astype(np.float32)
 
     def q6(name: str, rows: int, cols: int, scale: float) -> None:
-        raw = random_q6k(rows, cols, scale)
+        raw = random_q6k(rows, cols, scale, rng)
         w.add_tensor(name, raw, raw_shape=raw.shape, raw_dtype=Q.Q6_K)
         weights[name] = dequantize(raw, Q.Q6_K).astype(np.float32)
 
     def f32(name: str, n: int, lo: float = 0.8, hi: float = 1.2) -> None:
-        arr = RNG.uniform(lo, hi, n).astype(np.float32)
+        arr = rng.uniform(lo, hi, n).astype(np.float32)
         w.add_tensor(name, arr)
         weights[name] = arr
 
@@ -1021,8 +1037,8 @@ def dg_cases() -> None:
         (OUT / f"tiny-diffusion-gemma.{name}.case").write_bytes(b"".join(blob))
 
 
-def main() -> None:
-    OUT.mkdir(parents=True, exist_ok=True)
+def generate_all() -> None:
+    """Every fixture, in dependency order: gemma4_tiny and gpt2_tiny come last because they read nothing earlier."""
     kquants()
     tiny_llada()
     tiny_dream()
@@ -1036,8 +1052,61 @@ def main() -> None:
     diffusion_gemma()
     gemma4_tiny()
     gpt2_tiny()
-    for p in sorted(OUT.iterdir()):
-        print(f"{p.stat().st_size:>9}  {p.relative_to(ROOT)}")
+
+
+MANIFEST = "gen_fixtures.manifest"
+
+
+def sync(staging: pathlib.Path, final: pathlib.Path) -> list[str]:
+    """Make `final` hold the files of `staging`, and remove the ones an earlier run made that this one does not.
+
+    The files a run makes are listed in `final/gen_fixtures.manifest`. Other generators write into the same folder
+    (scripts/gen_tokenizer_fixture.py, scripts/gen_moe_fixture.py), so only a file named by the previous manifest
+    and absent from this run is removed. A file whose bytes already match is not touched, so a regeneration that
+    changes nothing leaves no trace in `git status`. Returns the relative names it removed.
+    """
+    made = sorted(str(p.relative_to(staging)) for p in staging.rglob("*") if p.is_file() and p.name != MANIFEST)
+    manifest = final / MANIFEST
+    previous = manifest.read_text().splitlines() if manifest.is_file() else []
+    removed = []
+    for rel in previous:
+        target = final / rel
+        if rel not in made and target.is_file():
+            target.unlink()
+            removed.append(rel)
+            for parent in target.parents:
+                if parent == final or any(parent.iterdir()):
+                    break
+                parent.rmdir()
+    for rel in made:
+        target = final / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        data = (staging / rel).read_bytes()
+        if not target.is_file() or target.read_bytes() != data:
+            target.write_bytes(data)
+    text = "\n".join(made) + "\n"
+    if not manifest.is_file() or manifest.read_text() != text:
+        manifest.write_text(text)
+    return removed
+
+
+def main() -> None:
+    """Generate into a staging folder and make OUT match it, so a fixture that is no longer made does not linger."""
+    global OUT
+    final = OUT
+    final.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="fixtures-", dir=final.parent) as tmp:
+        OUT = pathlib.Path(tmp) / final.name
+        OUT.mkdir()
+        try:
+            generate_all()
+        finally:
+            staging, OUT = OUT, final
+        removed = sync(staging, final)
+    for name in removed:
+        print(f"removed stale {os.path.relpath(final / name, ROOT)}")
+    for p in sorted(final.iterdir()):
+        print(f"{p.stat().st_size:>9}  {os.path.relpath(p, ROOT)}")
 
 
 GEMMA4_TINY_BYTE0 = 9

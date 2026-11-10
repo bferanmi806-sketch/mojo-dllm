@@ -84,6 +84,17 @@ def check_summary(name: str, doc: dict) -> None:
         if ms and not math.isclose(sm["ms_per_step_median"], statistics.median(ms), rel_tol=1e-9):
             raise SystemExit(f"bench_table: {name}: the summary of {rt} says ms_per_step_median "
                              f"{sm['ms_per_step_median']}, its runs give {statistics.median(ms)}")
+        # The other three rendered figures are derived the way run_bench.summarize_runs derives them.
+        gen_length = doc["config"]["gen_length"]
+        starts = [r["startup_s"] for r in ok if "startup_s" in r]
+        rates = [gen_length / r["generate_s"] for r in ok if "generate_s" in r]
+        peak = max((r["peak_rss_bytes"] for r in ok), default=0) / 1e9 or None
+        for field, value in (("tokens_per_s_median", statistics.median(rates) if rates else None),
+                             ("startup_s_median", statistics.median(starts) if starts else None),
+                             ("peak_rss_gb_max", peak)):
+            stored = sm.get(field)
+            if (stored is None) != (value is None) or (value is not None and not math.isclose(stored, value, rel_tol=1e-9)):
+                raise SystemExit(f"bench_table: {name}: the summary of {rt} says {field} {stored}, its runs give {value}")
 
 
 def load() -> dict[str, dict]:
