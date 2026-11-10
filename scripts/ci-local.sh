@@ -91,6 +91,15 @@ md_lint() {
 launcher_tests() {
     need uv && uv run --frozen --only-group test pytest tests/python -q
 }
+parity_compare() {
+    # parity.compare needs numpy (the fixtures group); a skip means it did not run, so a skip fails.
+    need uv || return 1
+    local out rc
+    out="$(uv run --frozen --only-group test --only-group fixtures pytest tests/python/test_parity_compare.py -q -rs 2>&1)"
+    rc=$?
+    printf '%s\n' "$out"
+    [ "$rc" -eq 0 ] && ! grep -q 'skipped' <<<"$out"
+}
 claims() {
     need uv && uv run --no-project python scripts/bench_table.py --check &&
         uv run --no-project python bench/eval_gsm8k.py --self-test &&
@@ -121,6 +130,7 @@ if [ "$mode" = full ]; then
     step "yamllint" yaml_lint
     step "markdownlint" md_lint
     step "launcher tests" launcher_tests
+    step "parity.compare on known values (numpy)" parity_compare
     step "README numbers match bench/results" claims
     step "docs build + links" docs_build
     step "action pins match their tags" action_pins

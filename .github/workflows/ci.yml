@@ -38,6 +38,15 @@ jobs:
       - name: Launcher tests
         run: uv run --frozen --only-group test pytest tests/python -q
 
+      - name: parity.compare on known values (numpy, the fixtures group)
+        # A skip here means numpy was missing and nothing ran, so a skipped test fails the step.
+        run: |
+          rc=0
+          out="$(uv run --frozen --only-group test --only-group fixtures \
+            pytest tests/python/test_parity_compare.py -q -rs 2>&1)" || rc=$?
+          printf '%s\n' "$out"
+          [ "$rc" -eq 0 ] && ! grep -q 'skipped' <<<"$out"
+
       - name: Install markdownlint at its exact version
         run: npm install --global markdownlint-cli2@0.23.2
 

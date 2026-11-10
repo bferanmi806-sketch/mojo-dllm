@@ -95,8 +95,24 @@ def result_path(model: str, arch: str, device: str, day: dt.date) -> pathlib.Pat
 
 
 def compare(a: np.ndarray, b: np.ndarray, first_mask: int) -> Metrics:
+    """Row-wise agreement of two logit matrices (b is the reference), refusing what would make a number meaningless.
+
+    A NaN or infinity, a row of zeros (its cosine is 0/0), two matrices of different shape, no rows, or a
+    `first_mask` that leaves no masked row (the median of nothing is NaN) is refused by name: a NaN in these
+    metrics would slip past every `>` comparison against the bound and read as a pass.
+    """
     import numpy as np
 
+    if a.ndim != 2 or a.shape != b.shape or a.shape[0] == 0:
+        raise SystemExit(f"compare: the logit matrices must be non-empty with one shape, got {a.shape} and {b.shape}")
+    if not (np.isfinite(a).all() and np.isfinite(b).all()):
+        raise SystemExit("compare: refusing logits with a non-finite value (NaN or infinity)")
+    for name, m in (("first", a), ("second", b)):
+        zero = np.flatnonzero(~m.any(axis=1))
+        if zero.size:
+            raise SystemExit(f"compare: row {int(zero[0])} of the {name} matrix is all zeros, so its cosine is undefined")
+    if not 0 <= first_mask < a.shape[0]:
+        raise SystemExit(f"compare: first_mask {first_mask} leaves no masked row among {a.shape[0]} rows")
     cos = np.array([float(x @ y / (np.linalg.norm(x) * np.linalg.norm(y))) for x, y in zip(a, b)])
     rel = np.array([float(np.sqrt(np.mean((x - y) ** 2)) / np.sqrt(np.mean(y**2))) for x, y in zip(a, b)])
     top5 = [len(set(np.argsort(-x)[:5]) & set(np.argsort(-y)[:5])) for x, y in zip(a, b)]
@@ -237,6 +253,8 @@ def dg_top1_error(top_a: list[float], top_b: list[float]) -> float:
     """The worst |a - b| / |b| over rows, from each row's largest logit (b is the reference)."""
     if not top_a or len(top_a) != len(top_b):
         raise SystemExit("refusing: the row maxima are empty or differ in length")
+    if any(y == 0 for y in top_b):
+        raise SystemExit("refusing: a reference row's largest logit is zero, so the relative error is undefined")
     return max(abs(x - y) / abs(y) for x, y in zip(top_a, top_b))
 
 

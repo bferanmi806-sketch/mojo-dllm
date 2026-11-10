@@ -189,13 +189,13 @@ def test_record_values_for_llamacpp(rig: Rig) -> None:
 
 
 def test_scores_with_the_shared_extractor(rig: Rig, monkeypatch: pytest.MonkeyPatch) -> None:
-    first, second = _first_problems(2)
-    monkeypatch.setenv("FAKE_ANSWER", f"so it is cheap. The answer is {first['answer']}.")
+    # The first two problems of gsm8k-200.jsonl have gold answers 70000 and 460 (the file is pinned at 200 rows).
+    assert [p["answer"] for p in _first_problems(2)] == ["70000", "460"]
+    monkeypatch.setenv("FAKE_ANSWER", "so it is cheap. The answer is 70000.")
     assert rig.run() == 0
     r0, r1 = rig.rows()
-    assert r0["pred"] == eval_gsm8k.canon(first["answer"]) and r0["correct"] is True
-    assert r0["gold"] == first["answer"]
-    assert r1["correct"] is (eval_gsm8k.canon(second["answer"]) == r0["pred"])
+    assert r0["pred"] == "70000" and r0["correct"] is True and r0["gold"] == "70000"
+    assert r1["pred"] == "70000" and r1["gold"] == "460" and r1["correct"] is False
 
 
 def test_wrong_answer_is_scored_wrong(rig: Rig, monkeypatch: pytest.MonkeyPatch) -> None:
