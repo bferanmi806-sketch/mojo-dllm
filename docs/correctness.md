@@ -283,6 +283,15 @@ uv run --only-group fixtures python bench/parity.py --arch dream --threads 4 --m
 uv run --no-project python scripts/bench_table.py --write
 ```
 
+`llada_ref` refuses a token, a row or a count that is not an integer, a row
+outside the tokens, a token outside the vocabulary, an output it cannot write
+and any non-finite logit in a row it reads. Each refusal prints a line that
+begins `llada_ref:` and exits non-zero (1 for the arguments, 2 for the model
+or a file, 3 for llama.cpp or a NaN). It writes `OUT.part` and moves it to
+`OUT` only after every row passed, so a failed run leaves no file under the
+name `bench/parity.py` reads. `tests/python/test_llada_ref.py` builds it with
+the host compiler against a stand-in for llama.cpp and runs each refusal.
+
 The GPU tables need `--device gpu` and a second reference. Compile
 `llada_ref` once more against the CUDA build of llama.cpp (`build-cuda/`, see
 [Development](development.md#benchmarks)), name the result
