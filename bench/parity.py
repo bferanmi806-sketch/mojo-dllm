@@ -233,6 +233,67 @@ def dg_metrics(a: np.ndarray, b: np.ndarray, first_mask: int) -> dict:
     return m
 
 
+def dg_case_hash(meta: dict) -> str:
+    """The identity of a case: its prompt, its prompt tokens and its canvas. `ref_spread` is added later and is not part of it."""
+    body = {k: meta[k] for k in ("prompt", "prompt_tokens", "canvas_tokens")}
+    return hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest()
+
+
+def dg_sidecar_path(mojo: pathlib.Path) -> pathlib.Path:
+    return mojo.with_name(mojo.name + ".json")
+
+
+def dg_check_sidecar(case_name: str, mojo: pathlib.Path, meta: dict) -> str:
+    """The commit that built `mojo`, after checking that it was written for this case.
+
+    `mojo-dllm logits` writes `<variant>.mojo.f32.json` beside its dump: {"case_sha256", "mojo_dllm_commit"}.
+    A dump left over from an older prompt set or canvas has a different hash and is refused by name.
+    """
+    side = dg_sidecar_path(mojo)
+    if not side.is_file():
+        raise SystemExit(
+            f"refusing: {case_name}: {side} is missing, so {mojo} cannot be tied to this case or to a build"
+        )
+    try:
+        info = json.loads(side.read_text())
+    except ValueError as e:
+        raise SystemExit(f"refusing: {case_name}: {side} is not JSON ({e})") from None
+    if not isinstance(info, dict):
+        raise SystemExit(f"refusing: {case_name}: {side} is not a JSON object")
+    if info.get("case_sha256") != dg_case_hash(meta):
+        raise SystemExit(
+            f"refusing: {case_name}: {mojo} was written for a different case (hash {info.get('case_sha256')!r}, "
+            f"this case is {dg_case_hash(meta)!r}); run mojo-dllm logits again"
+        )
+    commit = info.get("mojo_dllm_commit")
+    if not isinstance(commit, str) or not commit.strip():
+        raise SystemExit(f"refusing: {case_name}: {side} has no mojo_dllm_commit")
+    return commit
+
+
+def dg_case_files(workdir: pathlib.Path) -> list[pathlib.Path]:
+    """The `case.json` of case0 to case{N-1}, N = len(LOGIT_CASES), each made for the prompt this file asks for.
+
+    A `--phase ref` run that stopped early, or a folder from an older prompt set, is refused by name.
+    """
+    found = {p.parent.name: p for p in workdir.glob("case*/case.json")}
+    if not found:
+        raise SystemExit(f"refusing: no reference cases under {workdir}; run --phase ref first")
+    want = [f"case{i}" for i in range(len(LOGIT_CASES))]
+    if sorted(found) != sorted(want):
+        raise SystemExit(
+            f"refusing: {workdir} holds {sorted(found)} but the case set is {want}; "
+            "run --phase ref again on an empty folder"
+        )
+    for name, case in zip(want, LOGIT_CASES):
+        prompt = json.loads(found[name].read_text()).get("prompt")
+        if prompt != case.prompt:
+            raise SystemExit(
+                f"refusing: {name} was made for the prompt {prompt!r}, not {case.prompt!r}; run --phase ref again"
+            )
+    return [found[n] for n in want]
+
+
 def dg_compare(
     workdir: pathlib.Path,
     bound: dict,
@@ -244,9 +305,8 @@ def dg_compare(
     Every file is checked before the first number is computed, so a half-finished set never produces a
     partial table. `load` and `compare_fn` default to numpy; tests pass plain stand-ins.
     """
-    cases = sorted(workdir.glob("case*/case.json"))
-    if not cases:
-        raise SystemExit(f"refusing: no reference cases under {workdir}; run --phase ref first")
+    cases = dg_case_files(workdir)
+    commits: set[str] = set()
     plan = []
     for case_json in cases:
         d = case_json.parent
@@ -259,15 +319,22 @@ def dg_compare(
                     f"refusing: mojo-dllm's output {mojo} is missing. The DiffusionGemma forward pass is #64 "
                     "and has to write this file; the reference's own output is never compared with itself."
                 )
+            meta = json.loads(case_json.read_text())
+            commits.add(dg_check_sidecar(d.name, mojo, meta))
             if mojo.read_bytes() == ref.read_bytes():
                 raise SystemExit(
                     f"refusing: {mojo} is byte-identical to {ref}. Two runtimes that quantize differently "
                     "do not agree to the last bit, so this is a copy, not a result."
                 )
-            meta = json.loads(case_json.read_text())
             if "ref_spread" not in meta:
                 raise SystemExit(f"refusing: {case_json} has no ref_spread; run --phase ref again")
             plan.append((meta, v, ref, mojo))
+    if len(commits) != 1:
+        raise SystemExit(
+            f"refusing: the mojo-dllm outputs come from {len(commits)} different builds {sorted(commits)}; "
+            "run one build for every case"
+        )
+    (commit,) = commits
     if compare_fn is None:
         compare_fn = dg_metrics
     entries, violations = [], []
@@ -282,7 +349,7 @@ def dg_compare(
         m = compare_fn(a, b, 0)
         entries.append(
             dict(prompt=case["prompt"], variant=v, seq_len=len(case["prompt_tokens"]) + m["rows"],
-                 reference_spread=case["ref_spread"], **m)
+                 reference_spread=case["ref_spread"], mojo_dllm_commit=commit, **m)
         )
         violations += [f"{case['prompt'][:40]!r} {v}: {x}" for x in dg_violations(m, bound)]
     return entries, violations
@@ -341,6 +408,8 @@ def dg_reference(args: argparse.Namespace, workdir: pathlib.Path, llama_src: pat
     for i, case in enumerate(LOGIT_CASES):
         d = workdir / f"case{i}"
         d.mkdir(parents=True, exist_ok=True)
+        for stale in [*d.glob("*.mojo.f32"), *d.glob("*.mojo.f32.json")]:
+            stale.unlink()  # a dump from the previous reference no longer matches this one
         prompt = dg_tokenize(llama_src, args.model, case.prompt)
         canvas = dg_canvas(vocab, canvas_len, DG_CANVAS_SEED + i)
         meta = dict(
@@ -387,10 +456,10 @@ def dgemma_main(args: argparse.Namespace) -> int:
             "outside the LLaDA bound:\n  " + "\n  ".join(violations)
             + "\nthe reference against itself, for reading these numbers:\n  " + "\n  ".join(context)
         )
-    meta = json.loads(next(iter(sorted(workdir.glob("case*/case.json")))).read_text())
+    meta = json.loads(dg_case_files(workdir)[0].read_text())
     doc = dict(
         date=dt.datetime.now().isoformat(timespec="seconds"), arch=DG_ARCH, device="cpu", model=meta["model"],
-        versions={"mojo-dllm": run(["git", "-C", str(ROOT), "rev-parse", "--short", "HEAD"]).strip(),
+        versions={"mojo-dllm": entries[0]["mojo_dllm_commit"],
                   "llama.cpp": meta["llama_cpp_commit"]},
         reference="llama.cpp libllama (ggml-org/llama.cpp#24423 branch) via tools/ref/dg_ref.cpp",
         model_sha256=meta["model_sha256"], bound=bound, logits=entries, generation=[],
