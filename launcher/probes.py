@@ -7,7 +7,6 @@ hand them any machine they like.
 from __future__ import annotations
 
 import platform
-import re
 import shutil
 import subprocess
 import tomllib
@@ -15,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from launcher import build
+from launcher.build import read_mojo_pin
 from launcher.errors import LauncherError
 from launcher.gpu import QUERY
 from launcher.hub import Hub
@@ -38,13 +38,7 @@ class Probes:
     driver_text: str | None
     cached_model: Path | None
     verified: bool = True  # whether cached_model has passed its sha256 check
-
-
-def read_mojo_pin(pyproject: str) -> str:
-    match = re.search(r'"mojo==([0-9][^"]*)"', pyproject)
-    if match is None:
-        raise LauncherError("pyproject.toml has no mojo==X pin; restore it from git, then run ./mojo-dllm doctor again.")
-    return match.group(1)
+    stamp_problem: str | None = None  # why the binary's build stamp is out of date
 
 
 def read_project_version(pyproject: str) -> str:
@@ -80,6 +74,13 @@ def cached_default_model(hub: Hub) -> Path | None:
         return None
 
 
+def _source_mtimes() -> tuple[float, ...]:
+    try:
+        return tuple(build.source_mtimes())
+    except LauncherError:
+        return ()  # check_binary reports the empty tree
+
+
 def real_probes() -> Probes:
     libc, version = platform.libc_ver()
     uv = shutil.which("uv")
@@ -98,7 +99,8 @@ def real_probes() -> Probes:
         ),
         mojo_pin=read_mojo_pin((build.ROOT / "pyproject.toml").read_text()),
         binary_mtime=build.binary_mtime(),
-        source_mtimes=tuple(build.source_mtimes()),
+        source_mtimes=_source_mtimes(),
+        stamp_problem=build.stamp_problem() if build.binary_mtime() is not None else None,
         gpu_text=_capture(["nvidia-smi", f"--query-gpu={QUERY}", "--format=csv,noheader,nounits"])
         if smi
         else None,

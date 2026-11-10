@@ -419,6 +419,10 @@ semantic versioning (0.y: minor bumps may break things).
   snapshot directory), not at the newest `main` (#257). A file that another tool cached at commit A, and that upstream
   re-uploaded later, is kept. A file that fails its check loses its snapshot link and its blob, and a link whose target
   lies outside the Hugging Face cache loses only the link.
+- The launcher rebuilds the binary when `pyproject.toml`, `uv.lock` or `scripts/build.sh` is newer than it, and when
+  the pinned Mojo version or the GPU architecture differs from the stamp `build/mojo-dllm.stamp` that a launcher build
+  writes (#258). A binary without a stamp is rebuilt once. A `src/` with no `.mojo` file is an error instead of a
+  fresh binary, and `doctor` says which of these made the binary stale.
 
 ## [0.1.0] - 2026-10-04
 

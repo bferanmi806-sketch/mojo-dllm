@@ -104,6 +104,19 @@ def test_missing_binary_fails_and_stale_binary_warns() -> None:
     assert "  → ./mojo-dllm setup" in lines
 
 
+def test_a_stale_stamp_warns_that_the_binary_needs_a_rebuild() -> None:
+    code, lines = doctor(stamp_problem="built for sm_80, this machine now builds for sm_86")
+    line = next(line for line in lines if " binary " in line)
+    assert code == 0 and line.startswith("!") and "sm_80" in line
+    assert lines[lines.index(line) + 1] == "  → ./mojo-dllm setup"
+
+
+def test_a_tree_with_no_sources_fails_the_binary_check() -> None:
+    code, lines = doctor(source_mtimes=())
+    line = next(line for line in lines if " binary " in line)
+    assert code == 1 and line.startswith("✗") and "no sources" in line
+
+
 def test_missing_model_warns_with_the_pull_command() -> None:
     code, lines = doctor(cached_model=None)
     assert code == 0

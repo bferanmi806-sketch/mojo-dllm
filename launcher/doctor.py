@@ -89,8 +89,14 @@ def check_toolchain(p: Probes) -> Check:
 def check_binary(p: Probes) -> Check:
     if p.binary_mtime is None:
         return Check("fail", "binary", "build/mojo-dllm does not exist", "./mojo-dllm setup")
+    if not p.source_mtimes:
+        return Check("fail", "binary", "no sources found under src/, so the binary cannot be compared with them",
+                     "restore src/ from git")
     if build.is_stale(p.binary_mtime, p.source_mtimes):
-        return Check("warn", "binary", "build/mojo-dllm is older than src/", "./mojo-dllm setup")
+        return Check("warn", "binary", "build/mojo-dllm is older than its sources (src/, pyproject.toml, uv.lock, scripts/build.sh)",
+                     "./mojo-dllm setup")
+    if p.stamp_problem is not None:
+        return Check("warn", "binary", p.stamp_problem, "./mojo-dllm setup")
     return _ok("binary", "build/mojo-dllm is up to date")
 
 

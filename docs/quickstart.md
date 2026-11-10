@@ -22,7 +22,7 @@ afterwards, open a new terminal or run `source ~/.local/bin/env`.
 1. **Toolchain.** It checks the platform, glibc and AVX2, stops
    on anything that cannot work, and runs `uv sync --frozen`.
 2. **Build.** It compiles `build/mojo-dllm`, or reports that the binary is
-   newer than the sources.
+   newer than its inputs and was built for this Mojo version and GPU architecture.
 3. **Model.** It asks before downloading LLaDA-8B-Instruct Q4_K_M (4.9 GB)
    into the Hugging Face cache, and checks the file's sha256 against the one
    the hub publishes. `--yes` answers the question for you; `--no-model` skips
@@ -47,7 +47,9 @@ missing GPU it says that the CPU will be used.
 ```
 
 The prompt is the first word that is not a flag; quote it. `run` rebuilds the
-binary if a source file changed, finds the model, picks the device and hands
+binary if a source file, `pyproject.toml`, `uv.lock` or `scripts/build.sh` changed, or if the
+Mojo pin or the GPU architecture (`MOJO_DLLM_GPU_ARCH`, else the local GPU) differs from the one
+recorded in `build/mojo-dllm.stamp`, finds the model, picks the device and hands
 the rest of the flags to `build/mojo-dllm run`. [Command line](cli.md) lists
 them all.
 

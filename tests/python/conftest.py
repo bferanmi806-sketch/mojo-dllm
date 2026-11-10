@@ -52,6 +52,7 @@ def make_probes(**overrides: object) -> Probes:
         driver_text="580.65.06\n",
         cached_model=Path("/cache/llada.gguf"),
         verified=True,
+        stamp_problem=None,
     )
     return dataclasses.replace(base, **overrides)
 
