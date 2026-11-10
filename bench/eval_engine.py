@@ -35,7 +35,7 @@ import isolation  # noqa: E402  (bench/isolation.py)
 from engines import EngineError, GenConfig  # noqa: E402
 
 
-DEFAULT_TIMEOUT_S = 1800.0     # a 256-step LLaDA problem takes about 1 to 2 minutes on the GPU, CPU about 25
+DEFAULT_TIMEOUT_S = eval_gsm8k.DEFAULT_TIMEOUT_S
 
 
 def cmd_run(args: argparse.Namespace, extra: list[str]) -> int:

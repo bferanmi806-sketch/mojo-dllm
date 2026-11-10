@@ -3,7 +3,8 @@
 
 usage:
   python3 bench/eval_gsm8k.py run --model M.gguf --arm NAME [--device gpu] [--gen-length 256]
-                                  [--block-length 32] [--steps N] [--limit K] [-- extra mojo-dllm flags]
+                                  [--block-length 32] [--steps N] [--limit K] [--timeout-s 1800]
+                                  [-- extra mojo-dllm flags]
   python3 bench/eval_gsm8k.py compare ARM_A ARM_B [--across-weights]
   python3 bench/eval_gsm8k.py --self-test
 
@@ -64,6 +65,7 @@ PROMPT = (
     "{question}\n\nSolve the problem step by step. End with a line of the form "
     '"The answer is N." where N is the final number.'
 )
+DEFAULT_TIMEOUT_S = 1800.0     # per problem; a 256-step LLaDA problem takes 1 to 2 minutes on the GPU, CPU about 25
 NUMBER = r"-?\d[\d,]*(?:\.\d+)?"
 # Wrappers a model puts between "answer is" and the number: \( \[ \boxed{ ** $ (each may be followed by spaces).
 WRAPPERS = r"(?:(?:\\\(|\\\[|\\boxed\{|\*\*|\$)\s*)*"
@@ -153,8 +155,19 @@ def answered(out: pathlib.Path, arm: str, flags: object, version: str, model: st
     """
     done: set[int] = set()
     if out.exists():
-        for l in out.read_text().splitlines():
-            r = json.loads(l)
+        for lineno, l in enumerate(out.read_text().splitlines(), 1):
+            try:
+                r = json.loads(l)
+            except ValueError as e:
+                raise SystemExit(
+                    f"arm {arm!r}: {out} line {lineno} is not JSON ({e}); a killed run can leave its last line "
+                    "cut short. Delete that line (the problem is answered again) and run again.") from None
+            if not isinstance(r, dict) or "flags" not in r or "index" not in r:
+                raise SystemExit(f"arm {arm!r}: {out} line {lineno} has no 'flags' or no 'index'; "
+                                 "it was not written by this tool")
+            if r["index"] in done:
+                raise SystemExit(f"arm {arm!r}: {out} line {lineno} repeats problem {r['index']}; "
+                                 "remove the duplicate line before resuming")
             if (r.get("flags"), r.get("version"), r.get("model")) != (flags, version, model):
                 raise SystemExit(
                     f"arm {arm!r} was started with flags={r.get('flags')} version={r.get('version')} "
@@ -196,7 +209,12 @@ def cmd_run(args: argparse.Namespace, extra: list[str]) -> int:
             wait_if_paused()
             cmd = [str(ROOT / "build/mojo-dllm"), "run", "--model", args.model,
                    "--prompt", PROMPT.format(question=p["question"])] + flags
-            r, pinfo = arm.run(lambda: subprocess.run(cmd, capture_output=True, text=True))
+            try:
+                r, pinfo = arm.run(lambda: subprocess.run(cmd, capture_output=True, text=True,
+                                                          timeout=args.timeout_s))
+            except subprocess.TimeoutExpired:
+                raise SystemExit(f"problem {p['index']}: mojo-dllm ran longer than --timeout-s {args.timeout_s:g} s "
+                                 "and was stopped; the arm resumes at this problem") from None
             line = next((l for l in r.stdout.splitlines() if l.startswith("{")), None)
             if r.returncode != 0 or line is None:
                 raise SystemExit(f"problem {p['index']}: mojo-dllm failed (rc={r.returncode}): {r.stderr[-400:]}")
@@ -220,7 +238,16 @@ def load_arm(name: str) -> dict[int, dict]:
     path = RUNS / f"{name}.jsonl"
     if not path.exists():
         raise SystemExit(f"no runs for arm {name!r} at {path}")
-    return {r["index"]: r for r in map(json.loads, path.read_text().splitlines())}
+    rows: dict[int, dict] = {}
+    for lineno, l in enumerate(path.read_text().splitlines(), 1):
+        try:
+            r = json.loads(l)
+        except ValueError as e:
+            raise SystemExit(f"arm {name!r}: {path} line {lineno} is not JSON ({e})") from None
+        if r["index"] in rows:
+            raise SystemExit(f"arm {name!r}: {path} line {lineno} repeats problem {r['index']}")
+        rows[r["index"]] = r
+    return rows
 
 
 def arm_config(name: str, rows: dict[int, dict]) -> dict:
@@ -377,6 +404,8 @@ def main() -> int:
     r.add_argument("--steps", type=int, default=0)
     r.add_argument("--limit", type=int, default=0)
     r.add_argument("--allow-battery", action="store_true", help="answer on battery instead of pausing")
+    r.add_argument("--timeout-s", type=float, default=DEFAULT_TIMEOUT_S,
+                   help="stop a problem that runs longer than this (default %(default)s)")
     isolation.add_arguments(r)
     c = sub.add_parser("compare")
     c.add_argument("a")
