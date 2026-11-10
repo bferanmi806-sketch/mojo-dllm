@@ -460,6 +460,21 @@ def isolation_sentence(docs: list[dict]) -> str:
             "times average over the clean rows only where the table says so.")
 
 
+CI_NAMES = {
+    "newcombe-hybrid": "Newcombe hybrid score intervals",
+    "wald": "Wald intervals, which are too narrow when the arms disagree on few problems",
+}
+
+
+def ci_sentence(full: dict) -> str:
+    """Which interval each compare document holds; a file without `ci95_method` predates the choice and is Wald."""
+    methods = sorted({d.get("ci95_method", "wald") for _, d in full.values()})
+    unknown = [m for m in methods if m not in CI_NAMES]
+    if unknown:
+        raise SystemExit(f"bench_table: unknown ci95_method {unknown}")
+    return "The 95% CIs are " + " and ".join(CI_NAMES[m] for m in methods) + "."
+
+
 def refuse_unclean_timing(f: pathlib.Path, d: dict) -> None:
     """A timed round whose clean rows are fewer than its problems is not published unless the caller says so."""
     if "clean_rows" in d and d["clean_rows"] < d["problems"]:
@@ -514,7 +529,7 @@ def eval_table(allow_noisy: bool = False) -> str:
     other_weights: list[str] = []
     for pair, (f, d) in full.items():
         arm = pair[1]
-        lo, hi = d["ci95"]
+        ci = "not estimable" if d["ci95"] is None else f"{d['ci95'][0] * 100:+.1f} to {d['ci95'][1] * 100:+.1f} pt"
         if d.get("weights_differ"):
             other_weights.append(f"{arm} ran {d['models'][arm]}, the baseline {d['models'][base]}")
             arm_cell = f"{arm} \u2021"
@@ -522,14 +537,15 @@ def eval_table(allow_noisy: bool = False) -> str:
             arm_cell = arm
         out.append(
             f"| {arm_cell} | {d['accuracy'][arm]:.1%} | {d['difference'] * 100:+.1f} pt | "
-            f"{lo * 100:+.1f} to {hi * 100:+.1f} pt | {d['discordant']['a_only']} / {d['discordant']['b_only']} | "
+            f"{ci} | {d['discordant']['a_only']} / {d['discordant']['b_only']} | "
             f"{d['mcnemar_p']:.2f} | {count(d['forward_passes_mean'][arm])} | {secs(pair, arm)} |"
         )
     limits = sorted({d["limit"] for _, d in timed.values()})
     files = [f for f, _ in full.values()] + [f for f, _ in timed.values()]
     out += [
         "",
-        f"Discordant counts problems only the baseline solved / only the arm solved. Time per problem is "
+        f"Discordant counts problems only the baseline solved / only the arm solved. {ci_sentence(full)} "
+        f"Time per problem is "
         f"the mean over the first {', '.join(map(str, limits))} problems of each arm. "
         + isolation_sentence([d for _, d in timed.values()]),
         "",

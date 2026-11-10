@@ -426,7 +426,7 @@ def test_compare_keeps_its_other_keys(rig: Rig) -> None:
     assert eval_gsm8k.cmd_compare("a", "b") == 0
     doc = json.loads(next((rig.root / "bench" / "eval").glob("*-a-vs-b.json")).read_text())
     assert set(doc) == {"date", "problems", "arms", "limit", "problems_in_arm", "config", "accuracy", "difference",
-                        "ci95", "discordant", "mcnemar_p", "forward_passes_mean", "forward_passes_rows",
+                        "ci95", "ci95_method", "discordant", "mcnemar_p", "forward_passes_mean", "forward_passes_rows",
                         "generate_s_mean", "generate_s_mean_clean", "clean_rows", "noisy_rows", "unchecked_rows",
                         "models", "weights_differ"}
 

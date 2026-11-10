@@ -123,3 +123,16 @@ def test_a_timed_round_with_noisy_rows_is_refused_unless_allowed(
 def test_a_fully_clean_timed_round_needs_no_flag(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     text = render(tmp_path, monkeypatch, compare_doc(), compare_doc(50, **isolation(0, 0, 50)), allow_noisy=False)
     assert "came back clean" in text
+
+
+def test_a_null_interval_prints_not_estimable_and_the_method_is_named(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    full = compare_doc(ci95=None, ci95_method="newcombe-hybrid")
+    text = render(tmp_path, monkeypatch, full, None)
+    assert "not estimable" in text and "Newcombe hybrid score intervals" in text and "Wald" not in text
+
+
+def test_a_document_without_a_method_is_labelled_wald(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    text = render(tmp_path, monkeypatch, compare_doc(), None)
+    assert "Wald intervals, which are too narrow" in text
