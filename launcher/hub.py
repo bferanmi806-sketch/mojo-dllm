@@ -60,7 +60,7 @@ class Hub:
             return files
         from huggingface_hub import HfApi
 
-        with _hub_errors(repo):
+        with _hub_errors(repo, self.cache_dir):
             return {
                 f.path: f.size
                 for f in HfApi().list_repo_tree(repo, recursive=True)
@@ -70,13 +70,13 @@ class Hub:
     def download(self, repo: str, filename: str) -> Path:
         from huggingface_hub import hf_hub_download
 
-        with _hub_errors(repo):
+        with _hub_errors(repo, self.cache_dir):
             return Path(hf_hub_download(repo, filename, cache_dir=self.cache_dir))
 
     def expected_sha256(self, repo: str, filename: str) -> str | None:
         from huggingface_hub import HfApi
 
-        with _hub_errors(repo):
+        with _hub_errors(repo, self.cache_dir):
             (info,) = HfApi().get_paths_info(repo, [filename])
         return info.lfs.sha256 if getattr(info, "lfs", None) else None
 
@@ -84,8 +84,9 @@ class Hub:
 class _hub_errors:
     """Turn the hub's exceptions into launcher errors that name the next command."""
 
-    def __init__(self, repo: str) -> None:
+    def __init__(self, repo: str, cache_dir: Path | None = None) -> None:
         self.repo = repo
+        self.cache_dir = cache_dir
 
     def __enter__(self) -> None:
         return None
@@ -94,7 +95,7 @@ class _hub_errors:
         if exc is None:
             return False
         import httpx2
-        from huggingface_hub.errors import GatedRepoError, RepositoryNotFoundError
+        from huggingface_hub.errors import GatedRepoError, HfHubHTTPError, RepositoryNotFoundError
 
         if isinstance(exc, GatedRepoError):
             raise LauncherError(
@@ -106,11 +107,23 @@ class _hub_errors:
                 f"{self.repo} was not found on Hugging Face, or it is private. "
                 "Check the name, or set HF_TOKEN for a private repo."
             ) from exc
-        # httpx2 is the hub's HTTP client. Its transport errors (refused, timed out)
-        # are not OSError, and HfHubHTTPError is one of its HTTPError subclasses.
-        if isinstance(exc, (httpx2.HTTPError, OSError)):
+        # httpx2 is the hub's HTTP client. HfHubHTTPError is one of its HTTPError subclasses and
+        # also an OSError, so the status errors come first; a bare OSError is a local failure.
+        if isinstance(exc, HfHubHTTPError) or isinstance(exc, httpx2.HTTPStatusError):
+            status = exc.response.status_code
+            raise LauncherError(
+                f"Hugging Face answered HTTP {status} for {self.repo}: {exc}\n"
+                "Check the repo name and HF_TOKEN, or try again later."
+            ) from exc
+        if isinstance(exc, httpx2.HTTPError):
             raise LauncherError(
                 f"could not reach Hugging Face for {self.repo}: {exc}\n"
                 "Check the network, or add --offline to use files already in the cache."
+            ) from exc
+        if isinstance(exc, OSError):
+            where = self.cache_dir if self.cache_dir is not None else "the Hugging Face cache"
+            raise LauncherError(
+                f"cannot write to {where} for {self.repo}: {exc.strerror or exc}\n"
+                "Free space or fix the permissions there, or set HF_HOME to a writable directory."
             ) from exc
         return False

@@ -405,6 +405,10 @@ semantic versioning (0.y: minor bumps may break things).
 
 - The samplers' per-row confidence pass runs on `--threads` workers. Each
   row's arithmetic is unchanged, so tokens do not depend on the thread count.
+- The launcher tells the causes of a Hugging Face failure apart (#254). A gated repo and a missing repo keep their
+  messages. Any other HTTP status error reports the status code and says to check the repo name and `HF_TOKEN`. A
+  failure to write into the cache (a full disk, a read-only `HF_HOME`) names the cache directory. Only a transport
+  failure (refused, timed out) says "could not reach Hugging Face" and suggests `--offline`.
 
 ## [0.1.0] - 2026-10-04
 
