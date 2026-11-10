@@ -271,6 +271,10 @@ semantic versioning (0.y: minor bumps may break things).
   listed in `tests/fixtures/gen_fixtures.manifest`.
 - Comments, usage lines and one generated report in `bench/`, `scripts/` and `tools/` match the code and the data
   (issue #252); the en dashes of `bench/results/6000d-dispatch/README.md` and `6000d-q6-standalone/README.md` are gone.
+- `scripts/check_links.py` closes a code fence only on a line of the same character and at least the same length, so a
+  longer fence that holds a shorter one no longer lets a real link go unchecked. `scripts/check_gpu_test_count.sh` also
+  compares each GPU test file's count with `tests/gpu/test-counts.txt`, without a GPU, and
+  `scripts/run_extra_group_tests.sh` (one step in CI and `ci-local.sh`) runs the `llada_ref` tests too and fails on a skip.
 
 - The transposed embedding table of DiffusionGemma's self-conditioning is no longer zeroed before it is written, and the
   `soft_embed` partial sums and the CPU attention scores are not zeroed where every element is written first
