@@ -150,3 +150,187 @@ def test_hygiene_refuses_when_grep_itself_fails(tmp_path: Path) -> None:
     env = {**os.environ, "PATH": f"{stub}:{os.environ['PATH']}"}
     result = run_hygiene(tmp_path, "nothing to see\n", env=env)
     assert result.returncode == 1 and "nothing was checked" in result.stderr
+
+
+# ---- ci.yml against ci-local.sh -------------------------------------------------------------------------------
+
+# Commands CI runs that ci-local.sh does not: they set up the runner, or finish a step ci-local.sh does another way.
+CI_ONLY = (
+    "npm install --global markdownlint-cli2@",
+    "uv sync --frozen",
+    "git diff --exit-code",
+    "set -euo pipefail",
+    "curl ",
+    "echo ",
+    "tar ",
+)
+# Commands ci-local.sh runs that ci.yml does not (the runner has no GPU, so CI only builds the suite).
+LOCAL_ONLY = ("scripts/run-gpu-tests.sh",)
+# What names a gate: a script of the repository or the tool a step runs.
+GATE = re.compile(
+    r"(?:scripts|bench)/[\w.-]+\.(?:sh|py)|shellcheck|yamllint|markdownlint-cli2|pytest|mdbook build|uv lock --script|mojo format"
+)
+
+
+def ci_commands() -> list[str]:
+    """Every command of every `run:` step in ci.yml, one per `&&` part and per line, with `uv run --frozen mojo`
+    written as ci-local.sh's $MOJO."""
+    commands = []
+    for job in read_jobs(WORKFLOWS / "ci.yml").values():
+        for step in job["steps"]:
+            for line in step["run"].replace("\\\n", " ").splitlines():
+                for part in line.split("&&"):
+                    part = part.strip().replace("uv run --frozen mojo", "$MOJO")
+                    if part and not part.startswith("#"):
+                        commands.append(part)
+    return commands
+
+
+def gates(text: str) -> set[str]:
+    """The gates a text names. ci-local.sh's own path (its usage line) is not one."""
+    return set(GATE.findall(text.replace("$MOJO", "mojo"))) - {"scripts/ci-local.sh"}
+
+
+def test_every_command_ci_runs_is_in_ci_local() -> None:
+    local = " ".join(CI_LOCAL.read_text().split())
+    checked = [c for c in ci_commands() if not c.startswith(CI_ONLY)]
+    assert len(checked) >= 15, checked
+    # ci-local.sh lays a long command out over lines; both sides compare with the whitespace collapsed.
+    missing = [c for c in checked if " ".join(c.split()) not in local]
+    assert missing == []
+
+
+def test_ci_local_runs_no_gate_that_ci_lacks() -> None:
+    ci = gates(" ".join(ci_commands()))
+    local = gates(CI_LOCAL.read_text())
+    extra = {g for g in local - ci if not g.startswith(LOCAL_ONLY)}
+    assert extra == set()
+    assert gates(" ".join(ci_commands())) - local == set()
+
+
+# ---- scripts/ci-local.sh itself, with every tool replaced by a stub ---------------------------------------------
+
+STUB = """#!/bin/bash
+# Records the call, and fails when the call contains $STUB_FAIL.
+echo "$(basename "$0") $*" >> "$STUB_LOG"
+if [ -n "${STUB_FAIL:-}" ] && [[ "$(basename "$0") $*" == *"$STUB_FAIL"* ]]; then exit 1; fi
+if [ "$(basename "$0")" = nvidia-smi ]; then printf '%s' "${STUB_GPU:-}"; fi
+exit 0
+"""
+STUB_TOOLS = ("uv", "fakemojo", "shellcheck", "markdownlint-cli2", "mdbook", "gh", "nvidia-smi", "python3")
+STUB_SCRIPTS = (
+    "check_hygiene.sh",
+    "build.sh",
+    "run-tests.sh",
+    "check_no_gpu.sh",
+    "check_visual.sh",
+    "run-gpu-tests.sh",
+    "verify-action-pins.sh",
+)
+REAL_TOOLS = ("bash", "basename", "dirname", "git", "sha256sum", "grep", "timeout", "cat", "sed")
+
+
+def run_ci_local(
+    tmp_path: Path, *args: str, fail: str = "", gpu: str = "", without: tuple[str, ...] = ()
+) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+    """scripts/ci-local.sh copied into a scratch repository whose scripts and tools are stubs. Returns the result
+    and the stub log, one line per call."""
+    repo = tmp_path / "repo"
+    (repo / "scripts").mkdir(parents=True)
+    (repo / "scripts" / "ci-local.sh").write_bytes(CI_LOCAL.read_bytes())
+    stubs = tmp_path / "bin"
+    stubs.mkdir()
+    for name in STUB_SCRIPTS:
+        (repo / "scripts" / name).write_text(STUB)
+    for name in STUB_TOOLS:
+        if name not in without:
+            (stubs / name).write_text(STUB)
+            (stubs / name).chmod(0o755)
+    for name in REAL_TOOLS:
+        (stubs / name).symlink_to(subprocess.run(["which", name], capture_output=True, text=True, check=True).stdout.strip())
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    log = tmp_path / "calls.log"
+    log.touch()
+    env = {
+        "PATH": str(stubs),
+        "HOME": str(tmp_path / "home"),
+        "MOJO": "fakemojo",
+        "STUB_LOG": str(log),
+        "STUB_FAIL": fail,
+        "STUB_GPU": gpu,
+    }
+    result = subprocess.run(
+        ["bash", "scripts/ci-local.sh", *args], cwd=repo, env=env, capture_output=True, text=True, check=False, timeout=60
+    )
+    return result, log.read_text().splitlines()
+
+
+def summary(result: subprocess.CompletedProcess[str]) -> list[str]:
+    return result.stdout.split("==> summary", 1)[1].splitlines()[1:]
+
+
+def test_ci_local_passes_when_every_step_passes(tmp_path: Path) -> None:
+    result, calls = run_ci_local(tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+    lines = summary(result)
+    assert lines[-1] == "ci-local: 15 steps passed, 1 skipped"
+    assert "  PASS  launcher tests" in lines and not [l for l in lines if "FAIL" in l]
+    assert len(calls) >= 15
+
+
+def test_without_a_gpu_ci_local_builds_the_gpu_suite_and_records_a_skip(tmp_path: Path) -> None:
+    result, calls = run_ci_local(tmp_path)
+    assert "build.sh tests/gpu/test_gpu.mojo build/tests/test_gpu" in calls
+    assert not any(c.startswith("run-gpu-tests.sh") for c in calls)
+    lines = summary(result)
+    assert "  PASS  GPU test suite builds" in lines
+    assert any(l.startswith("  SKIP  GPU tests") for l in lines)
+    assert lines[-1] == "ci-local: 15 steps passed, 1 skipped"
+
+
+def test_with_a_gpu_ci_local_runs_the_gpu_suite_and_does_not_skip(tmp_path: Path) -> None:
+    result, calls = run_ci_local(tmp_path, gpu="GPU 0: NVIDIA GeForce RTX 3050 (UUID: GPU-x)\n")
+    assert any(c.startswith("run-gpu-tests.sh") for c in calls)
+    lines = summary(result)
+    assert "  PASS  GPU tests (count pinned)" in lines and lines[-1] == "ci-local: 15 steps passed, 0 skipped"
+
+
+def test_a_failing_step_does_not_stop_the_later_ones_and_the_exit_is_1(tmp_path: Path) -> None:
+    result, calls = run_ci_local(tmp_path, fail="pytest tests/python")
+    assert result.returncode == 1
+    lines = summary(result)
+    assert "  FAIL  launcher tests" in lines
+    assert "  PASS  docs build + links" in lines, "steps after the failure must still run"
+    assert lines[-1] == "ci-local: 1 step(s) failed"
+
+
+def test_a_missing_tool_is_a_failure_and_not_a_skip(tmp_path: Path) -> None:
+    result, _ = run_ci_local(tmp_path, without=("shellcheck",))
+    assert result.returncode == 1
+    lines = summary(result)
+    assert "  FAIL  shellcheck" in lines
+    assert not any(l.startswith("  SKIP") and "shellcheck" in l for l in lines)
+    assert "missing tool: shellcheck" in result.stderr
+
+
+def test_fast_mode_runs_only_the_pre_commit_set(tmp_path: Path) -> None:
+    result, calls = run_ci_local(tmp_path, "--fast")
+    assert result.returncode == 0, result.stdout
+    assert [l.strip() for l in summary(result)[:3]] == [
+        "PASS  hygiene (secrets, employer name)",
+        "PASS  mojo format",
+        "PASS  build -Werror",
+    ]
+    assert not any(c.startswith(("run-tests.sh", "shellcheck", "uv ")) for c in calls)
+
+
+def test_an_unknown_flag_exits_2_before_any_step(tmp_path: Path) -> None:
+    result, calls = run_ci_local(tmp_path, "--nope")
+    assert result.returncode == 2 and "unknown flag" in result.stderr and calls == []
+
+
+def test_the_launcher_tests_check_that_the_lock_matches_pyproject_in_both_gates() -> None:
+    """`uv run --frozen` trusts uv.lock without comparing it with pyproject.toml; `--locked` fails on a mismatch."""
+    command = "uv run --locked --only-group test pytest tests/python -q"
+    assert command in ci_commands()
+    assert command in " ".join(CI_LOCAL.read_text().split())

@@ -99,7 +99,7 @@ md_lint() {
     need markdownlint-cli2 && markdownlint-cli2 "*.md" "docs/**/*.md" "assets/*.md" ".github/*.md" "#docs/spec.md" "#node_modules"
 }
 launcher_tests() {
-    need uv && uv run --frozen --only-group test pytest tests/python -q
+    need uv && uv run --locked --only-group test pytest tests/python -q
 }
 script_lock() {
     # The lock `uv run --script` uses; fails when it is missing or does not match the script header.

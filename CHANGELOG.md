@@ -464,6 +464,11 @@ semantic versioning (0.y: minor bumps may break things).
   scan runs on `ubuntu-24.04`. `scripts/check_hygiene.sh` also refuses private key blocks and database URLs that carry
   a password (TruffleHog's verified-only scan cannot confirm either), and stops with an error when `grep` itself fails
   instead of reading that as a clean file.
+- The launcher tests run with `pytest -rs` and `uv run --locked` (#266). `tests/python/skip_policy.py` fails the run on
+  a skipped test that `tests/python/allowed-skips.txt` does not name (a test id and part of the skip reason), so a test
+  that stops running no longer looks like a pass. `tests/python/test_workflows.py` checks that every command `ci.yml`
+  runs is in `scripts/ci-local.sh` and the reverse (the GPU suite run aside), and runs `ci-local.sh` against stub tools to
+  check its exit code and summary lines. `docs/development.md` lists the four required checks.
 
 ## [0.1.0] - 2026-10-04
 

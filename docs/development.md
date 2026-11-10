@@ -25,9 +25,9 @@ machine with a GPU, the GPU tests that CI only builds:
 | format | `uv run --frozen mojo format -q src tests bench`, then `git diff` | `mojo format` changes any file (Mojo has no check mode) |
 | build | `scripts/build.sh` | any compiler warning (`-Werror`) |
 | tests | `scripts/run-tests.sh` | a test fails, a file runs zero tests, or the total differs from `tests/test-count.txt` |
-| launcher tests | `uv run --frozen --only-group test pytest tests/python -q` | a test of the `./mojo-dllm` launcher fails |
+| launcher tests | `uv run --locked --only-group test pytest tests/python -q` | a test of the `./mojo-dllm` launcher fails |
 | script lock | `uv lock --script mojo-dllm --check` | `mojo-dllm.lock` is missing, or the `# dependencies` header of `./mojo-dllm` no longer matches it. After you change the pin, run `uv lock --script mojo-dllm` and commit the lock |
-| shellcheck, yamllint, markdownlint | `shellcheck --severity=warning scripts/*.sh .githooks/*`; `uv run --frozen --only-group lint yamllint --strict .github`; `markdownlint-cli2 "*.md" "docs/**/*.md" "#docs/spec.md"` | any of the three reports a finding |
+| shellcheck, yamllint, markdownlint | `shellcheck --severity=warning scripts/*.sh .githooks/*`; `uv run --frozen --only-group lint yamllint --strict .github`; `markdownlint-cli2 "*.md" "docs/**/*.md" "assets/*.md" ".github/*.md" "#docs/spec.md" "#node_modules"` | any of the three reports a finding |
 | claims | `uv run --no-project python scripts/bench_table.py --check` | a table in the README, `docs/benchmarks.md` or `docs/correctness.md` differs from what `bench/results`, `bench/parity`, `bench/quality` and `bench/eval` render (a missing table marker, target file or quality or eval evidence passes, [#141](https://github.com/vladimirrott/mojo-dllm/issues/141); an unknown mode exits 0, [#142](https://github.com/vladimirrott/mojo-dllm/issues/142)) |
 | docs | `mdbook build` + `scripts/check_links.py` | a relative link is broken |
 | action pins | `scripts/verify-action-pins.sh` (needs an authenticated `gh`) | a pinned SHA is not the tag its comment names |
@@ -41,6 +41,19 @@ GitHub's runners have no GPU, so CI builds the GPU suite without running it.
 `ci-local.sh` runs it when `nvidia-smi` lists a GPU and otherwise prints a
 `SKIP` line, never a `PASS`; `run-gpu-tests.sh` on its own exits 1 without a
 GPU.
+
+The launcher tests run `pytest -rs`, so every skip is listed in the summary,
+and `tests/python/skip_policy.py` fails the run on a skip that
+`tests/python/allowed-skips.txt` does not name (a test id and the text of the
+reason). Add a line there in the commit that adds a skip. `--locked` makes
+`uv run` fail when `uv.lock` no longer matches `pyproject.toml`; `--frozen` does
+not compare them.
+
+Branch protection on `main` requires four checks: `checks`, `mojo` and `docs` of the CI
+workflow and `trufflehog` of the secret scan. The job `build` of the
+"Deploy docs to GitHub Pages" workflow skips while the repository is private,
+and a skipped job satisfies a required check, so it must not be required. CI
+already runs the same `mdbook build` in `docs`.
 
 The test count is pinned because Mojo's `TestSuite` exits 0 after running zero
 tests. If you add tests, run `UPDATE_TEST_COUNT=1 scripts/run-tests.sh` (for
