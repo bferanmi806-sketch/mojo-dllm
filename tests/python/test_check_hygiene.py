@@ -54,7 +54,7 @@ def check(repo: Path, mode: str = "--tracked") -> subprocess.CompletedProcess[st
 
 def commit_file(repo: Path, name: str, text: str) -> None:
     (repo / name).write_text(text)
-    git(repo, "add", name)
+    git(repo, "add", "--", name)
     git(repo, "commit", "-q", "-m", f"add {name}")
 
 
@@ -143,3 +143,70 @@ def test_every_pattern_of_the_script_has_a_case_here() -> None:
     block = SCRIPT.read_text().split("PATTERNS=(")[1].split("\n)")[0]
     entries = [line.strip().strip('"') for line in block.splitlines() if line.strip()]
     assert [e.split(":", 1)[0] for e in entries] == [s[0] for s in SHAPES]
+
+
+# file names that git prints quoted (#140) -------------------------------------------------------------------
+
+ODD_NAMES = ["café.txt", "sp ace.txt", "tab\there.txt", 'quote"d.txt', "new\nline.txt", "日本語.txt", "-dash.txt",
+             "back\\slash.txt", " leading.txt", "trailing.txt "]
+
+
+@pytest.mark.parametrize("name", ODD_NAMES, ids=lambda n: n.encode("unicode_escape").decode())
+def test_a_secret_in_a_file_whose_name_git_quotes_is_found_when_tracked(repo: Path, name: str) -> None:
+    commit_file(repo, name, "token = ghp_" + "A" * 40 + "\n")
+    p = check(repo)
+    assert p.returncode == 1, p.stdout
+    assert f"SECRET: GitHub PAT key in {name}" in p.stderr
+
+
+@pytest.mark.parametrize("name", ODD_NAMES, ids=lambda n: n.encode("unicode_escape").decode())
+def test_a_secret_in_a_staged_file_whose_name_git_quotes_is_found(repo: Path, name: str) -> None:
+    (repo / name).write_text("token = ghp_" + "A" * 40 + "\n")
+    git(repo, "add", "--", name)
+    p = check(repo, "--staged")
+    assert p.returncode == 1, (p.stdout, p.stderr)
+    assert f"SECRET: GitHub PAT key in {name}" in p.stderr and "could not read staged bytes" not in p.stderr
+
+
+def test_a_clean_staged_file_with_a_quoted_name_passes_and_is_counted(repo: Path) -> None:
+    (repo / "café.txt").write_text("fine\n")
+    git(repo, "add", "--", "café.txt")
+    p = check(repo, "--staged")
+    assert p.returncode == 0 and "1 file(s) clean (0 binary skipped)" in p.stdout
+
+
+def test_every_tracked_file_with_an_odd_name_is_counted(repo: Path) -> None:
+    for name in ODD_NAMES:
+        commit_file(repo, name, "fine\n")
+    p = check(repo)
+    assert p.returncode == 0 and f"{1 + len(ODD_NAMES)} file(s) clean" in p.stdout
+
+
+def test_the_employer_name_in_a_file_with_a_quoted_name_is_found(repo: Path) -> None:
+    commit_file(repo, "café.txt", f"at {EMPLOYER}\n")
+    p = check(repo)
+    assert p.returncode == 1 and "EMPLOYER: café.txt" in p.stderr
+
+
+def test_a_tracked_file_that_is_missing_from_the_tree_is_skipped_not_fatal(repo: Path) -> None:
+    commit_file(repo, "gone.txt", "fine\n")
+    (repo / "gone.txt").unlink()
+    p = check(repo)
+    assert p.returncode == 0 and "2 file(s) clean" in p.stdout
+
+
+def test_outside_a_git_repository_staged_mode_fails_and_does_not_pass(tmp_path: Path) -> None:
+    p = subprocess.run(["bash", str(SCRIPT), "--staged"], cwd=tmp_path, capture_output=True, text=True, timeout=60,
+                       env={**os.environ, "GIT_CEILING_DIRECTORIES": str(tmp_path.parent)})
+    assert p.returncode == 1 and "could not list staged files" in p.stderr
+
+
+def test_no_temporary_file_is_left_behind(repo: Path, tmp_path: Path) -> None:
+    scratch = tmp_path / "tmpdir"
+    scratch.mkdir()
+    commit_file(repo, "café.txt", "fine\n")
+    for mode in ("--tracked", "--staged"):
+        p = subprocess.run(["bash", str(SCRIPT), mode], cwd=repo, capture_output=True, text=True, timeout=60,
+                           env={**os.environ, "TMPDIR": str(scratch)})
+        assert p.returncode == 0, p.stderr
+    assert list(scratch.iterdir()) == []

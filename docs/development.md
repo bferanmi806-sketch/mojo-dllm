@@ -21,7 +21,7 @@ machine with a GPU, the GPU tests that CI only builds:
 
 | Step | Command | Fails when |
 |---|---|---|
-| hygiene | `scripts/check_hygiene.sh --tracked` | a credential pattern or the author's employer name appears in tracked text (files whose names git quotes are skipped, [#140](https://github.com/vladimirrott/mojo-dllm/issues/140)) |
+| hygiene | `scripts/check_hygiene.sh --tracked` | a credential pattern or the author's employer name appears in tracked text (file names are read NUL separated, so a name with non-ASCII or special characters is scanned too) |
 | format | `scripts/check_format.sh` (`mojo format -q src tests bench`, comparing every file before and after) | `mojo format` changes any file, an untracked one included (Mojo has no check mode) |
 | build | `scripts/build.sh` | any compiler warning (`-Werror`) |
 | tests | `scripts/run-tests.sh` | a test fails, a file runs zero tests, the total differs from `tests/test-count.txt`, or a file's count differs from `tests/test-counts.txt` |

@@ -52,15 +52,21 @@ scan() {
     fi
 }
 
+# File names are read NUL separated: git quotes a name with non-ASCII, tab, quote or newline characters in its
+# line-oriented output ("caf\303\251.txt"), and the quoted text is not a path, so such a file used to be skipped
+# (--tracked) or reported unreadable (--staged) while the summary counted it as clean.
+names="$(mktemp)"
+tmp="$(mktemp)"
+trap 'rm -f "$tmp" "$names"' EXIT
 case "${1:-}" in
     --staged)
-        if ! list="$(git diff --cached --name-only --diff-filter=ACMR)"; then
+        if ! git diff --cached --name-only -z --diff-filter=ACMR >"$names"; then
             echo "check_hygiene: git could not list staged files" >&2
             exit 1
         fi
         ;;
     --tracked)
-        if ! list="$(git ls-files)"; then
+        if ! git ls-files -z >"$names"; then
             echo "check_hygiene: git could not list tracked files" >&2
             exit 1
         fi
@@ -71,11 +77,9 @@ case "${1:-}" in
         ;;
 esac
 
-tmp="$(mktemp)"
-trap 'rm -f "$tmp"' EXIT
 n=0
 binary=0
-while IFS= read -r path; do
+while IFS= read -r -d '' path; do
     [ -n "$path" ] || continue
     n=$((n + 1))
     # The file name itself counts too, binary or not.
@@ -91,12 +95,12 @@ while IFS= read -r path; do
         src="$path"
     fi
     # Binary fixtures (GGUF files) are not text a person types a key into.
-    if [ -s "$src" ] && ! grep -Iq . "$src"; then
+    if [ -s "$src" ] && ! grep -Iq . -- "$src"; then
         binary=$((binary + 1))
         continue
     fi
     scan "$path" <"$src"
-done <<<"$list"
+done <"$names"
 
 if [ "$found" != 0 ]; then
     echo "check_hygiene: refusing. Remove the value (and rotate it if it was a real credential)." >&2
