@@ -19,8 +19,8 @@ arm starts with a preflight of the machine and writes bench/eval/runs/ARM.env.js
 saw other CPU, GPU, swap or thermal activity is run again up to `--isolation-retries` times, and each row
 records `isolation`. `--tune` sets the power profile to performance for the run; `--allow-noisy` continues
 after a failed preflight.
-Scoring takes the number after "The answer is", else the last number in
-the output, and compares it with the gold answer.
+Scoring takes the number after "The answer is" (optionally inside \\( \\), \\[ \\], \\boxed{}, ** or $), else the
+last number in the output, and compares it with the gold answer.
 
 `compare` pairs two arms problem by problem and writes
 bench/eval/DATE-ARM_A-vs-ARM_B.json: both accuracies, the difference with a
@@ -62,11 +62,13 @@ PROMPT = (
     '"The answer is N." where N is the final number.'
 )
 NUMBER = r"-?\d[\d,]*(?:\.\d+)?"
+# Wrappers a model puts between "answer is" and the number: \( \[ \boxed{ ** $ (each may be followed by spaces).
+WRAPPERS = r"(?:(?:\\\(|\\\[|\\boxed\{|\*\*|\$)\s*)*"
 
 
 def extract(text: str) -> str | None:
     """The model's final answer as a canonical number string, or None."""
-    m = re.findall(r"answer is\s*:?\s*\$?\s*(" + NUMBER + ")", text, flags=re.IGNORECASE)
+    m = re.findall(r"answer is\s*:?\s*" + WRAPPERS + "(" + NUMBER + ")", text, flags=re.IGNORECASE)
     if not m:
         m = re.findall(NUMBER, text)
     if not m:
@@ -75,12 +77,19 @@ def extract(text: str) -> str | None:
 
 
 def canon(s: str) -> str | None:
-    s = s.replace(",", "").rstrip(".")
-    try:
-        v = float(s)
-    except ValueError:
+    """The number as a canonical string, or None when `s` is not one; exact for any length, never raises.
+
+    Integers (and decimals that are whole, `18.00`) give their digits without a sign for zero; other decimals
+    give the digits with trailing zeros dropped. Nothing goes through a float, so `9` * 400 does not overflow
+    and a 20-digit answer keeps every digit.
+    """
+    m = re.fullmatch(r"(-?)(\d*)(?:\.(\d+))?", s.replace(",", "").rstrip("."))
+    if m is None or not (m.group(2) or m.group(3)):
         return None
-    return str(int(v)) if v == int(v) else repr(v)
+    sign, whole, frac = m.group(1), m.group(2).lstrip("0") or "0", (m.group(3) or "").rstrip("0")
+    if not frac:
+        return whole if whole == "0" else sign + whole
+    return f"{sign}{whole}.{frac}"
 
 
 def mcnemar_exact(b: int, c: int) -> float:
@@ -282,6 +291,8 @@ def self_test() -> int:
     ]
     bad = [(t, want, extract(t)) for t, want in cases if extract(t) != want]
     assert canon("18.00") == "18" and canon("1,000") == "1000", "canon"
+    assert canon("-0") == "0" and canon("") is None and canon("9" * 400) == "9" * 400, "canon is total and exact"
+    assert extract("The answer is \\(\\boxed{18}\\) after 2 days.") == "18", "wrapped answer"
     assert abs(mcnemar_exact(0, 10) - 2 / 1024) < 1e-12, "mcnemar 0/10"
     assert mcnemar_exact(5, 5) == 1.0 and mcnemar_exact(0, 0) == 1.0, "mcnemar ties"
     d, lo, hi = paired_ci(2, 6, 200)
