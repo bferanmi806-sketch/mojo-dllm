@@ -106,7 +106,7 @@ def test_the_existing_goldens_keep_their_flags(workdir: Path) -> None:
     gen.golden(workdir / "model.gguf", str(tok), "llada")
     rows = (workdir / "out" / "llada-tokenizer-golden.tsv").read_text().splitlines()
     assert len(rows) == len(gen.CASES) == 36
-    assert not (workdir / "out" / "llada-tokenizer-golden.provenance.json").exists()
+    assert (workdir / "out" / "llada-tokenizer-golden.provenance.json").exists()
     assert not (workdir / "out" / "gemma4-tokenizer-golden.provenance.json").exists()
 
 
@@ -150,7 +150,59 @@ def test_provenance_records_the_commit_the_model_and_the_command(workdir: Path) 
     assert "/home/" not in json.dumps(prov), "an absolute home path must not enter a tracked file"
 
 
+@pytest.mark.parametrize("prefix", ["llada", "dream"])
+def test_the_llada_and_dream_goldens_record_their_origin(workdir: Path, prefix: str) -> None:
+    tok = fake_tokenizer(workdir)
+    gen.golden(workdir / "model.gguf", str(tok), prefix)
+    prov = json.loads((workdir / "out" / f"{prefix}-tokenizer-golden.provenance.json").read_text())
+    assert prov["llama_cpp"] == {"commit": head(workdir)}
+    assert prov["model"] == {
+        "file": "model.gguf",
+        "size_bytes": len(b"not a real model"),
+        "sha256": hashlib.sha256(b"not a real model").hexdigest(),
+    }
+    assert prov["command"] == "llama-tokenize -m MODEL.gguf -f CASE.txt --ids --no-bos --log-disable"
+    assert prov["regenerate"].endswith(f"llama-tokenize {prefix}") and "--golden-only" in prov["regenerate"]
+    assert prov["cases"] == len(gen.CASES)
+    tsv = (workdir / "out" / f"{prefix}-tokenizer-golden.tsv").read_bytes()
+    assert prov["golden_sha256"] == hashlib.sha256(tsv).hexdigest()
+    assert "bos_id" not in prov and "/home/" not in json.dumps(prov)
+
+
+def test_the_generator_still_writes_the_committed_gemma4_provenance_in_its_form(workdir: Path) -> None:
+    """Key order, command and regenerate line: a regeneration changes the commit, the model and the hashes only."""
+    tok = fake_tokenizer(workdir)
+    gen.golden(workdir / "model.gguf", str(tok), "gemma4", expect_commit=head(workdir))
+    fresh = json.loads((workdir / "out" / "gemma4-tokenizer-golden.provenance.json").read_text())
+    committed = json.loads((FIXTURES / "gemma4-tokenizer-golden.provenance.json").read_text())
+    assert list(fresh) == list(committed)
+    assert list(fresh["llama_cpp"]) == list(committed["llama_cpp"]) and list(fresh["model"]) == list(committed["model"])
+    for key in ("command", "regenerate", "bos_id", "bos_check", "cases"):
+        assert fresh[key] == committed[key], key
+
+
+def test_a_tokenizer_outside_a_git_checkout_is_refused_because_its_commit_is_unknown(workdir: Path) -> None:
+    tok = workdir / "bin" / "llama-tokenize"
+    tok.parent.mkdir()
+    tok.write_text(FAKE)
+    tok.chmod(tok.stat().st_mode | stat.S_IXUSR)
+    with pytest.raises(SystemExit, match="git checkout"):
+        gen.golden(workdir / "model.gguf", str(tok), "llada")
+    assert not (workdir / "out" / "llada-tokenizer-golden.tsv").exists()
+
+
 # What is committed ---------------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("prefix", ["llada", "dream", "gemma4"])
+def test_each_committed_golden_has_provenance_that_describes_it(prefix: str) -> None:
+    tsv = FIXTURES / f"{prefix}-tokenizer-golden.tsv"
+    prov = json.loads((FIXTURES / f"{prefix}-tokenizer-golden.provenance.json").read_text())
+    assert prov["golden_sha256"] == hashlib.sha256(tsv.read_bytes()).hexdigest(), "the golden changed after it was recorded"
+    assert prov["cases"] == len(tsv.read_text().splitlines())
+    assert re.fullmatch(r"[0-9a-f]{40}", prov["llama_cpp"]["commit"])
+    assert re.fullmatch(r"[0-9a-f]{64}", prov["model"]["sha256"]) and prov["model"]["size_bytes"] > 1_000_000
+    assert prov["regenerate"].endswith(prefix) and "--golden-only" in prov["regenerate"]
+    assert "/home/" not in json.dumps(prov)
 
 TSV = FIXTURES / "gemma4-tokenizer-golden.tsv"
 PROVENANCE = FIXTURES / "gemma4-tokenizer-golden.provenance.json"

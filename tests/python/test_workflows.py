@@ -275,9 +275,9 @@ def test_ci_local_passes_when_every_step_passes(tmp_path: Path) -> None:
     result, calls = run_ci_local(tmp_path)
     assert result.returncode == 0, result.stdout + result.stderr
     lines = summary(result)
-    assert lines[-1] == "ci-local: 16 steps passed, 1 skipped"
+    assert lines[-1] == "ci-local: 17 steps passed, 1 skipped"
     assert "  PASS  launcher tests" in lines and not [l for l in lines if "FAIL" in l]
-    assert len(calls) >= 16
+    assert len(calls) >= 17
 
 
 def test_without_a_gpu_ci_local_builds_the_gpu_suite_and_records_a_skip(tmp_path: Path) -> None:
@@ -287,7 +287,7 @@ def test_without_a_gpu_ci_local_builds_the_gpu_suite_and_records_a_skip(tmp_path
     lines = summary(result)
     assert "  PASS  GPU test suite builds" in lines
     assert any(l.startswith("  SKIP  GPU tests") for l in lines)
-    assert lines[-1] == "ci-local: 16 steps passed, 1 skipped"
+    assert lines[-1] == "ci-local: 17 steps passed, 1 skipped"
 
 
 def test_the_gpu_test_count_is_compared_with_its_pin_on_every_machine(tmp_path: Path) -> None:
@@ -303,7 +303,15 @@ def test_with_a_gpu_ci_local_runs_the_gpu_suite_and_does_not_skip(tmp_path: Path
     result, calls = run_ci_local(tmp_path, gpu="GPU 0: NVIDIA GeForce RTX 3050 (UUID: GPU-x)\n")
     assert any(c.startswith("run-gpu-tests.sh") for c in calls)
     lines = summary(result)
-    assert "  PASS  GPU tests (count pinned)" in lines and lines[-1] == "ci-local: 16 steps passed, 0 skipped"
+    assert "  PASS  GPU tests (count pinned)" in lines and lines[-1] == "ci-local: 17 steps passed, 0 skipped"
+
+
+def test_the_fixture_gate_is_a_step_and_its_failure_is_reported(tmp_path: Path) -> None:
+    result, calls = run_ci_local(tmp_path)
+    assert "  PASS  fixtures match their generators" in summary(result)
+    assert any(c.startswith("uv ") and "scripts/check_fixtures.py" in c for c in calls)
+    failing, _ = run_ci_local(tmp_path / "fail", fail="scripts/check_fixtures.py")
+    assert failing.returncode == 1 and "  FAIL  fixtures match their generators" in summary(failing)
 
 
 def test_a_failing_step_does_not_stop_the_later_ones_and_the_exit_is_1(tmp_path: Path) -> None:

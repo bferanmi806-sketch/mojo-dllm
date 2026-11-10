@@ -1,0 +1,14 @@
+{
+  "llama_cpp": {
+    "commit": "2e715c0639c6f07c57c943f8d5a7919953af8f7c"
+  },
+  "model": {
+    "file": "Dream-v0-Instruct-7B-Q4_K_M.gguf",
+    "size_bytes": 4683073888,
+    "sha256": "9067645ad6c85ae3daa8fa75a1831b9c77d59086d08a04d2bbbd27cb38475a7d"
+  },
+  "command": "llama-tokenize -m MODEL.gguf -f CASE.txt --ids --no-bos --log-disable",
+  "regenerate": "uv run --only-group fixtures python scripts/gen_tokenizer_fixture.py --golden-only MODEL.gguf $LLAMA_SRC/build/bin/llama-tokenize dream",
+  "cases": 36,
+  "golden_sha256": "734bd0ac7f53a83a24ed9f92f47169a98061f0dd6626dfb6abc78395479a538a"
+}

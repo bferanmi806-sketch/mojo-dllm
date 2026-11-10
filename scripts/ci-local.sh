@@ -110,6 +110,10 @@ claims() {
         uv run --no-project python bench/eval_gsm8k.py --self-test &&
         timeout 300 uv run --frozen --only-group fixtures python scripts/check_weights.py --self-test
 }
+fixtures_match() {
+    # Regenerates every fixture a script makes into a scratch directory and compares the bytes.
+    need uv && uv run --frozen --only-group fixtures python scripts/check_fixtures.py
+}
 action_pins() {
     # Resolves each pinned SHA's tag through the GitHub API, so it needs gh.
     need gh && bash scripts/verify-action-pins.sh
@@ -140,6 +144,7 @@ if [ "$mode" = full ]; then
     step "launcher tests" launcher_tests
     step "launcher script lock is current" script_lock
     step "README numbers match bench/results" claims
+    step "fixtures match their generators" fixtures_match
     step "docs build + links" docs_build
     step "action pins match their tags" action_pins
 fi

@@ -79,6 +79,11 @@ jobs:
         timeout-minutes: 5
         run: uv run --frozen --only-group fixtures python scripts/check_weights.py --self-test
 
+      - name: Fixtures match their generators
+        # scripts/gen_fixtures.py and gen_moe_fixture.py regenerate into a scratch directory; every byte must match.
+        if: ${{ !cancelled() }}
+        run: uv run --frozen --only-group fixtures python scripts/check_fixtures.py
+
       - name: Action pins match the tags in their comments
         if: ${{ !cancelled() }}
         env:

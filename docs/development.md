@@ -35,6 +35,7 @@ machine with a GPU, the GPU tests that CI only builds:
 | checker self-test | `uv run --frozen --only-group fixtures python scripts/check_weights.py --self-test` | a safetensors or index guard in `check_weights.py` stops rejecting its case, or stops naming it |
 | no GPU | `scripts/check_no_gpu.sh` | `--device gpu` without a GPU does anything but exit 1 with a message |
 | visual options | `scripts/check_visual.sh` | an invalid `--visual-interval` does not exit 1, or `--json` with `--visual` does not exit 2, with a message naming the flag before model loading |
+| fixtures | `uv run --frozen --only-group fixtures python scripts/check_fixtures.py` | `scripts/gen_fixtures.py` or `scripts/gen_moe_fixture.py` writes a file that differs from the tracked one (they run into a scratch directory), a file that is not tracked, or a tracked fixture that no generator writes and that is not a tokenizer fixture, a tokenizer golden or `golden-generation.tsv` |
 | GPU test count | `scripts/check_gpu_test_count.sh` | the `def test_` functions of `tests/gpu/test_*.mojo` number other than `tests/gpu/test-count.txt` pins, or a file defines none; needs no GPU, runs in CI and `ci-local.sh` |
 | GPU tests | `scripts/run-gpu-tests.sh` (local only) | a GPU kernel or the GPU forward pass disagrees with the CPU or the f32 reference, or the count differs from `tests/gpu/test-count.txt` |
 
@@ -70,8 +71,11 @@ live in `tests/fixtures/` and come from scripts, never from hand:
 |---|---|---|
 | `kquants.gguf`, `bad-magic.gguf`, `tiny-llada.gguf`, `tiny-llada.expected.f32`, `tiny-dream.gguf`, `tiny-dream.expected.f32`, `malformed/`, `metadata/` | `scripts/gen_fixtures.py` | GGUF parsing and rejection, decoders, `ModelConfig` validation, the forward pass against a numpy reference |
 | `tiny-diffusion-gemma.gguf`, `diffusion-gemma/` | `scripts/gen_fixtures.py` | the `diffusion-gemma` config (seed 610061): a 2-layer model with one sliding and one global layer, 4 experts, the tensor names and types of the real file, and one file per refusal (metadata only, or zero-filled tensors) |
+| `tiny-diffusion-gemma.p0sc.case`, `.p9.case`, `.p9sc.case`, `.p150.case`, `.p150sc.case` (`tiny-diffusion-gemma.*.case`) | `scripts/gen_fixtures.py` (the forward pass is `scripts/dg_numpy.py`) | the tokens and numpy logits that `logits` on the tiny DiffusionGemma file must reproduce, for a prompt of 0, 9 and 150 tokens, with and without self-conditioning (`sc`) |
+| `entropy-rows.tsv` | `scripts/gen_fixtures.py` (seed 65065, so no other fixture changes) | logits rows with the numpy f64 argmax, entropy and inverse-CDF draw that `tests/test_entropy_bound.mojo` pins |
+| `utf8-cases.tsv` | `scripts/gen_fixtures.py` | byte strings with the code points and the first invalid offset that Python's own UTF-8 decoder gives, for `utf8_decode` |
 | `dequant-types.gguf`, `unsupported-embedding.gguf` | `scripts/gen_fixtures.py` | Q8_0/Q5_K/BF16/Q5_0 references (seed 340034) and embedding rejection before CPU/GPU allocation (no RNG) |
-| `llada-tokenizer.gguf`, `llada-tokenizer-golden.tsv`, `dream-tokenizer.gguf`, `dream-tokenizer-golden.tsv` | `scripts/gen_tokenizer_fixture.py` | tokenizer ids against `llama-tokenize` |
+| `llada-tokenizer.gguf`, `llada-tokenizer-golden.tsv`, `llada-tokenizer-golden.provenance.json`, `dream-tokenizer.gguf`, `dream-tokenizer-golden.tsv`, `dream-tokenizer-golden.provenance.json` | `scripts/gen_tokenizer_fixture.py` (`--golden-only` rewrites the golden and its provenance) | tokenizer ids against `llama-tokenize`. Each provenance file records the llama.cpp commit, the model file and its sha256, the command and the golden's sha256. The two goldens were committed with the first import, and regenerating them with llama.cpp `2e715c0639` on 2026-11-09 gave the same bytes |
 | `gemma4-tokenizer.gguf` | `scripts/gen_tokenizer_fixture.py ... gemma4` | the 262,144 tokens of the DiffusionGemma file and the 472 of its 514,906 merges that apply to the 54 golden strings, tokenizer keys only and without the scores (5.5 MB) |
 | `gemma4-tiny/` | `scripts/gen_fixtures.py` | a 279-token gemma4 vocabulary whose ids can be worked out by hand, and variants with one thing wrong or unusual each (a missing byte token, a merge with no space, mismatched counts, nested special tokens, an unknown-type token, an end-of-turn token the vocabulary lacks) |
 | `gpt2-tiny/` | `scripts/gen_fixtures.py` | a six-token byte-level BPE vocabulary with padding, unknown and EOS ids and no end-of-turn token: the ids that LLaDA's and Dream's files leave out |
@@ -106,7 +110,10 @@ build/tests/test_golden
 UPDATE_GOLDEN=1 build/tests/test_golden
 ```
 
-Only `UPDATE_GOLDEN=1` writes the file. Normal runs reject missing, empty,
+Only `UPDATE_GOLDEN=1` writes the file, and `scripts/run-tests.sh` drops that variable
+from the environment (and says so) unless you run `scripts/run-tests.sh --update-golden`:
+the test rewrites the golden and then compares against what it wrote, so an exported
+variable would make every run pass. Normal runs reject missing, empty,
 duplicate, unknown or incomplete cases and compare tokens and schedule metadata
 exactly. A mismatch names the case, the first differing token position (including
 the prompt), both token lists and both complete rows. A golden diff in a PR needs

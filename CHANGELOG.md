@@ -489,6 +489,16 @@ semantic versioning (0.y: minor bumps may break things).
   line. `docs/spec.md` had 18 and no longer does, so it joins the markdownlint run. Filler adverbs went from
   `docs/development.md` and `ci.yml`, an en dash from `docs/model-porting.md`, and a coding tool's name from the
   list of noisy processes in `docs/benchmarks.md`.
+- Fixtures are checked against their generators (#230). `scripts/check_fixtures.py`, a step of both gates, runs
+  `scripts/gen_fixtures.py` and `scripts/gen_moe_fixture.py` into a scratch directory (they read `FIXTURES_OUT`) and
+  fails on a file that differs by one byte, a generated file that is not tracked, or a tracked fixture that no
+  generator writes and that is not a tokenizer fixture, a tokenizer golden or `golden-generation.tsv`. All 239 files
+  regenerate byte for byte today. The LLaDA and Dream tokenizer goldens now have the provenance file the gemma4 golden
+  had (llama.cpp commit, model file and sha256, command, golden sha256), written by `scripts/gen_tokenizer_fixture.py
+  --golden-only`; regenerating them from the local models gave the committed bytes. `scripts/run-tests.sh` drops an
+  exported `UPDATE_GOLDEN` and says so (the golden test rewrites its file and passes against its own output), unless it
+  gets `--update-golden`. `docs/development.md` lists `entropy-rows.tsv`, `utf8-cases.tsv` and
+  `tiny-diffusion-gemma.*.case`, and a test fails when a fixture is missing from its table.
 
 ## [0.1.0] - 2026-10-04
 

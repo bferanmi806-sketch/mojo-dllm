@@ -4,6 +4,10 @@
 #   scripts/run-tests.sh            run all, compare with tests/test-count.txt
 #   UPDATE_TEST_COUNT=1 scripts/run-tests.sh   rewrite the pin after adding tests
 #   TEST_DIR=tests/gpu scripts/run-tests.sh     another directory, with its own pin
+#   scripts/run-tests.sh --update-golden        let tests/test_golden.mojo rewrite golden-generation.tsv
+#
+# An UPDATE_GOLDEN=1 in the environment is dropped (and said so): test_golden.mojo rewrites its golden and then
+# compares against what it wrote, so with the variable exported every run would pass by construction.
 #
 # Why the pin: Mojo's TestSuite exits 0 when it runs zero tests, and a renamed
 # or mis-imported test file can silently drop out. A suite that passed and a
@@ -13,6 +17,20 @@
 # be re-run without recompiling. TestSuite reports per-test times in
 # milliseconds.
 set -uo pipefail
+
+case "${1:-}" in
+    "")
+        if [ -n "${UPDATE_GOLDEN:-}" ]; then
+            echo "run-tests: ignoring UPDATE_GOLDEN=$UPDATE_GOLDEN (pass --update-golden to rewrite the golden file)" >&2
+        fi
+        unset UPDATE_GOLDEN
+        ;;
+    --update-golden) export UPDATE_GOLDEN=1 ;;
+    *)
+        echo "usage: run-tests.sh [--update-golden]" >&2
+        exit 2
+        ;;
+esac
 
 cd "$(dirname "$0")/.." || exit 1
 # The compiler is the one uv.lock pins; MOJO replaces it (see scripts/build.sh).
