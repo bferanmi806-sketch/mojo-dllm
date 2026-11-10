@@ -8,6 +8,7 @@ import pytest
 from launcher import runcmd
 from launcher.errors import LauncherError, UsageError
 from launcher.gpu import Gpu
+from launcher.models import ModelResult
 from launcher.runcmd import BOOLEAN_FLAGS, RunArgs, parse_run_args, run_argv
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -232,3 +233,143 @@ def test_a_repeated_device_flag_keeps_the_last_one() -> None:
 
 def test_an_empty_prompt_is_a_prompt() -> None:
     assert parse_run_args([""]).prompt == ""
+
+
+class _Wiring:
+    """Monkeypatches the seams of cmd_run and records what reaches each of them."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, gpus: object = ([], None)) -> None:
+        self.model = tmp_path / "models" / ".." / "m.gguf"
+        (tmp_path / "models").mkdir()
+        self.tmp = tmp_path
+        self.execv: list[tuple[str, list[str]]] = []
+        self.hubs: list[bool] = []
+        self.ensure: list[tuple[str, bool]] = []
+        self.detect_calls = 0
+        monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+        monkeypatch.setattr(runcmd, "BINARY", tmp_path / "mojo-dllm")
+        monkeypatch.setattr(runcmd, "ensure_built", lambda: False)
+
+        def hub(offline: bool = False) -> object:
+            self.hubs.append(offline)
+            return object()
+
+        def ensure_model(text: str, hub: object, out: object, *, announce_cached: bool, store: object) -> Path:
+            self.ensure.append((text, announce_cached))
+            assert out is runcmd.sys.stderr, "progress must go to stderr so stdout stays the model's text"
+            return self.model
+
+        def detect() -> object:
+            self.detect_calls += 1
+            return gpus
+
+        monkeypatch.setattr(runcmd, "Hub", hub)
+        monkeypatch.setattr(runcmd, "ensure_model", ensure_model)
+        monkeypatch.setattr(runcmd, "detect_gpus", detect)
+        monkeypatch.setattr(runcmd, "default_store", lambda: None)
+        monkeypatch.setattr(runcmd.os, "environ", {"PATH": "/usr/bin"})
+        monkeypatch.setattr(runcmd.os, "execv", lambda path, argv: self.execv.append((path, argv)))
+
+
+def test_run_hands_the_binary_the_resolved_model_the_chosen_device_and_the_other_flags(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    w = _Wiring(monkeypatch, tmp_path, gpus=([Gpu("NVIDIA RTX", 8.6, 5120)], None))
+    runcmd.cmd_run(["Say hi", "--max-tokens", "64", "--verbose", "-m", "a/b:Q4_K_M", "--steps", "8"])
+    binary = str(tmp_path / "mojo-dllm")
+    assert w.execv == [(binary, [
+        binary, "run", "--model", str((tmp_path / "m.gguf").resolve()), "--prompt", "Say hi",
+        "--device", "gpu", "--max-tokens", "64", "--verbose", "--steps", "8",
+    ])]
+    assert w.ensure == [("a/b:Q4_K_M", False)]
+    captured = capsys.readouterr()
+    assert captured.out == "" and captured.err.startswith("device: gpu (NVIDIA RTX")
+
+
+def test_run_on_cpu_never_asks_nvidia_smi(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    w = _Wiring(monkeypatch, tmp_path, gpus=([Gpu("NVIDIA RTX", 8.6, 5120)], None))
+    runcmd.cmd_run(["hi", "--device", "cpu"])
+    assert w.detect_calls == 0 and w.execv[0][1][w.execv[0][1].index("--device") + 1] == "cpu"
+
+
+def test_run_auto_asks_nvidia_smi_once_and_falls_back_to_cpu(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    w = _Wiring(monkeypatch, tmp_path)
+    runcmd.cmd_run(["hi"])
+    assert w.detect_calls == 1 and w.execv[0][1][w.execv[0][1].index("--device") + 1] == "cpu"
+
+
+@pytest.mark.parametrize(
+    ("argv", "env", "offline"),
+    [
+        (["hi"], {}, False),
+        (["hi", "--offline"], {}, True),
+        (["hi"], {"HF_HUB_OFFLINE": "1"}, True),
+        (["hi"], {"HF_HUB_OFFLINE": "0"}, False),
+    ],
+    ids=["online", "flag", "variable", "variable-off"],
+)
+def test_run_builds_an_offline_hub_for_the_flag_and_the_variable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, argv: list[str], env: dict[str, str], offline: bool
+) -> None:
+    w = _Wiring(monkeypatch, tmp_path)
+    runcmd.os.environ.update(env)
+    runcmd.cmd_run([*argv, "--device", "cpu"])
+    assert w.hubs == [offline]
+
+
+def test_pull_with_no_arguments_pulls_the_default_model_and_announces_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    w = _Wiring(monkeypatch, tmp_path)
+    seen: list[tuple[str, bool, object]] = []
+
+    def ensure_status(text: str, hub: object, out: object, *, announce_cached: bool, store: object) -> object:
+        seen.append((text, announce_cached, out))
+        return ModelResult(w.model, True)
+
+    monkeypatch.setattr(runcmd, "ensure_model_status", ensure_status)
+    assert runcmd.cmd_pull([]) == 0
+    assert seen == [("llada-8b", True, runcmd.sys.stdout)] and w.hubs == [False]
+
+
+def test_pull_offline_by_flag_or_variable_builds_an_offline_hub(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    w = _Wiring(monkeypatch, tmp_path)
+    monkeypatch.setattr(runcmd, "ensure_model_status", lambda *a, **k: ModelResult(w.model, True))
+    runcmd.cmd_pull(["--offline"])
+    runcmd.os.environ["HF_HUB_OFFLINE"] = "true"
+    runcmd.cmd_pull([])
+    assert w.hubs == [True, True]
+
+
+def test_pull_of_a_named_model_passes_it_through(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    w = _Wiring(monkeypatch, tmp_path)
+    seen: list[str] = []
+    monkeypatch.setattr(
+        runcmd, "ensure_model_status", lambda text, *a, **k: seen.append(text) or ModelResult(w.model, True)
+    )
+    runcmd.cmd_pull(["a/b:Q6_K"])
+    assert seen == ["a/b:Q6_K"]
+
+
+def _smi_result(monkeypatch: pytest.MonkeyPatch, code: int, out: str, err: str) -> None:
+    monkeypatch.setattr(runcmd.shutil, "which", lambda name: "/usr/bin/nvidia-smi")
+    monkeypatch.setattr(runcmd.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, code, out, err))
+
+
+def test_nvidia_smi_failing_without_stderr_still_says_the_exit_code(monkeypatch: pytest.MonkeyPatch) -> None:
+    _smi_result(monkeypatch, 9, "", "")
+    assert runcmd.detect_gpus() == ([], "exit 9")
+
+
+@pytest.mark.parametrize("out", ["", "\n", "  \n"])
+def test_nvidia_smi_succeeding_with_no_output_is_no_gpu_and_no_failure(monkeypatch: pytest.MonkeyPatch, out: str) -> None:
+    _smi_result(monkeypatch, 0, out, "")
+    assert runcmd.detect_gpus() == ([], None)
+
+
+def test_nvidia_smi_succeeding_with_garbage_aborts_run_and_names_cpu(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Intended today: an unreadable listing stops `run --device auto` (the message says to pass --device cpu).
+    # Issue #81 covers whether it should fall back to the CPU instead.
+    _smi_result(monkeypatch, 0, "garbage\n", "")
+    with pytest.raises(LauncherError, match="--device cpu"):
+        runcmd.detect_gpus()

@@ -165,7 +165,11 @@ def _setup(args: SetupArgs, env: SetupEnv) -> int:
             # Missing, failed or timed out: no GPU was checked, which is not the same as no GPU.
             device = Device("cpu", "nvidia-smi missing or could not be read; GPU not checked")
         else:
-            device = choose_device("auto", parse_nvidia_smi(env.probes.gpu_text))
+            try:
+                device = choose_device("auto", parse_nvidia_smi(env.probes.gpu_text))
+            except LauncherError as e:
+                # doctor only warns about an unreadable listing: the download is done, so use the CPU.
+                device = Device("cpu", f"nvidia-smi output is unreadable: {str(e).splitlines()[0]}")
         print(device.line, file=out, flush=True)
         seconds = env.smoke(model, device.kind, device.env)
         print(f"smoke test ok in {seconds:.1f} s", file=out)

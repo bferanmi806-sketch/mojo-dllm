@@ -382,3 +382,13 @@ def test_an_os_error_during_setup_is_an_error_line_and_status_1(hub: FakeHub, st
     assert e.run(["--yes"]) == 1
     err = e.err.getvalue()
     assert err.startswith("error: ") and "/repo/.venv" in err and "Permission denied" in err
+
+
+def test_garbage_from_nvidia_smi_means_cpu_after_the_download_not_a_failure(hub: FakeHub, store: VerifiedStore) -> None:
+    # doctor only warns about an unreadable listing; setup must not fail after a multi-gigabyte download for it.
+    e = Env(hub, store, gpu_text="garbage\n")
+    assert e.run(["--yes"]) == 0
+    text = e.out.getvalue()
+    assert hub.downloads == [(REPO, FILE)] and e.calls[-1] == "smoke:cpu"
+    assert "device: cpu (nvidia-smi output is unreadable: nvidia-smi printed a line the launcher cannot read" in text
+    assert e.smoke_env == {}

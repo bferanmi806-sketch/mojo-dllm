@@ -451,6 +451,9 @@ semantic versioning (0.y: minor bumps may break things).
 - The launcher refuses `--flag=value` (for example `--device=cpu` or `--steps=8`) with a message that shows the
   two-argument form, instead of swallowing the next word as the flag's value, and `-h` and `--help` after a bare `--`
   are part of the prompt instead of a help request, so `./mojo-dllm run -- "-h"` runs with the prompt `-h` (#264).
+- `./mojo-dllm setup` uses the CPU, and says why in the `device:` line, when `nvidia-smi` prints a listing the launcher
+  cannot read, instead of stopping with an error after the model download (`doctor` already treated that case as a
+  warning) (#267).
 
 ## [0.1.0] - 2026-10-04
 
