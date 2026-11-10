@@ -21,6 +21,8 @@ import sys
 from typing import NamedTuple
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "bench"))
+from parity_schema import ParityError, validate_parity  # noqa: E402  (bench/parity_schema.py)
 TARGETS = [ROOT / "README.md", ROOT / "docs" / "benchmarks.md", ROOT / "docs" / "correctness.md"]
 START, END = "<!-- bench:start -->", "<!-- bench:end -->"
 
@@ -345,6 +347,10 @@ def parity() -> tuple[str, str]:
     newest: dict[tuple[str, str, str], tuple[pathlib.Path, dict]] = {}
     for f in files:
         doc = json.loads(f.read_text())
+        try:
+            validate_parity(doc)
+        except ParityError as e:
+            raise SystemExit(f"bench_table: bench/parity/{f.name} is not a valid parity file: {e}") from None
         arch = doc.get("arch", "llada")
         key = (arch, doc.get("device", "cpu"), doc.get("model", arch))
         previous = newest.get(key)

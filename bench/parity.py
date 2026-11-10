@@ -30,7 +30,9 @@ import argparse
 import datetime as dt
 import hashlib
 import json
+import os
 import pathlib
+import platform
 import random
 import re
 import subprocess
@@ -44,6 +46,9 @@ if TYPE_CHECKING:
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "bench"))
 import atomic_write  # noqa: E402  (bench/atomic_write.py)
+from parity_schema import (  # noqa: E402  (bench/parity_schema.py)
+    BOUND_KEYS, VIOLATION_KEYS, Bound, DgMetrics, Metrics, ParityError, require_keys, validate_parity,
+)
 
 SPECS = {"llada": dict(vocab=126464, mask=126336), "dream": dict(vocab=152064, mask=151666)}
 
@@ -87,7 +92,7 @@ def result_path(model: str, arch: str, device: str, day: dt.date) -> pathlib.Pat
     return ROOT / "bench" / "parity" / f"{day.isoformat()}-{arch}-{pathlib.Path(model).stem}{suffix}.json"
 
 
-def compare(a: np.ndarray, b: np.ndarray, first_mask: int) -> dict:
+def compare(a: np.ndarray, b: np.ndarray, first_mask: int) -> Metrics:
     import numpy as np
 
     cos = np.array([float(x @ y / (np.linalg.norm(x) * np.linalg.norm(y))) for x, y in zip(a, b)])
@@ -168,7 +173,7 @@ def dg_require_commit(src: pathlib.Path, pinned: str) -> str:
     return head
 
 
-def llada_bound(root: pathlib.Path) -> dict:
+def llada_bound(root: pathlib.Path) -> Bound:
     """No worse than the worst case of the committed LLaDA comparison, on each metric.
 
     The numbers come from LLADA_EVIDENCE, never typed here: if that file is replaced the bound moves
@@ -193,7 +198,10 @@ def llada_bound(root: pathlib.Path) -> dict:
     )
 
 
-def dg_violations(m: dict, bound: dict) -> list[str]:
+def dg_violations(m: DgMetrics, bound: Bound) -> list[str]:
+    """What is outside the bound. A key either side lacks raises ParityError by name, before any number is read."""
+    require_keys(m, VIOLATION_KEYS, "the metrics")
+    require_keys(bound, BOUND_KEYS, "the bound")
     out = []
     if not m["min_cosine"] >= bound["min_cosine"]:
         out.append(f"min_cosine {m['min_cosine']:.5f} < {bound['min_cosine']:.5f}")
@@ -230,11 +238,10 @@ def dg_top1_error(top_a: list[float], top_b: list[float]) -> float:
     return max(abs(x - y) / abs(y) for x, y in zip(top_a, top_b))
 
 
-def dg_metrics(a: np.ndarray, b: np.ndarray, first_mask: int) -> dict:
+def dg_metrics(a: np.ndarray, b: np.ndarray, first_mask: int) -> DgMetrics:
     """`compare`, plus the worst relative error of a row's largest logit (b is the reference)."""
     m = compare(a, b, first_mask)
-    m["top1_max_rel_err"] = dg_top1_error(a.max(axis=1).tolist(), b.max(axis=1).tolist())
-    return m
+    return DgMetrics(**m, top1_max_rel_err=dg_top1_error(a.max(axis=1).tolist(), b.max(axis=1).tolist()))
 
 
 def dg_case_hash(meta: dict) -> str:
@@ -300,7 +307,7 @@ def dg_case_files(workdir: pathlib.Path) -> list[pathlib.Path]:
 
 def dg_compare(
     workdir: pathlib.Path,
-    bound: dict,
+    bound: Bound,
     load: Callable[[pathlib.Path], object] | None = None,
     compare_fn: Callable[[object, object, int], dict] | None = None,
 ) -> tuple[list[dict], list[str]]:
@@ -452,6 +459,7 @@ def dgemma_main(args: argparse.Namespace) -> int:
     out = result_path(args.model, DG_ARCH, "cpu", dt.date.today())
     atomic_write.refuse_existing(out, args.force)   # before the comparison, not after it
     bound = llada_bound(ROOT)
+    require_keys(bound, BOUND_KEYS, "the LLaDA bound")
     entries, violations = dg_compare(workdir, bound)
     for e in entries:
         print("logits", e)
@@ -470,9 +478,26 @@ def dgemma_main(args: argparse.Namespace) -> int:
         reference="llama.cpp libllama (ggml-org/llama.cpp#24423 branch) via tools/ref/dg_ref.cpp",
         model_sha256=meta["model_sha256"], bound=bound, logits=entries, generation=[],
     )
-    atomic_write.write_new(out, json.dumps(doc, indent=2, ensure_ascii=False) + "\n", args.force)
+    write_doc(out, doc, args.force)
     print(f"wrote {out.relative_to(ROOT)}")
     return 0
+
+
+def machine_info() -> dict:
+    """What the run can read about the machine it ran on (the rest of a hand-written `machine` entry is not known here)."""
+    cpu = next((l.split(":", 1)[1].strip() for l in pathlib.Path("/proc/cpuinfo").read_text().splitlines()
+                if l.startswith("model name")), None) if pathlib.Path("/proc/cpuinfo").is_file() else None
+    return dict(os=platform.platform(), cpu=cpu, logical_cpus=os.cpu_count(),
+                memory_bytes=os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES"))
+
+
+def write_doc(path: pathlib.Path, doc: dict, force: bool) -> None:
+    """Write a parity file only if it is one: a document that breaks the schema is refused before it is written."""
+    try:
+        validate_parity(doc)
+    except ParityError as e:
+        raise SystemExit(f"refusing to write {path}: {e}") from None
+    atomic_write.write_new(path, json.dumps(doc, indent=2, ensure_ascii=False) + "\n", force)
 
 
 def main() -> int:
@@ -556,15 +581,15 @@ def main() -> int:
         first = next((i for i, (p, q) in enumerate(zip(mine, ref)) if p != q), None)
         gens.append(dict(prompt=case.prompt, gen_length=case.gen, block_length=case.block,
                          steps=case.steps, matching_tokens=same, first_divergence=first,
-                         mojo_text=j["text"]))
+                         mojo_text=j["text"], mojo_generated_tokens=mine, reference_generated_tokens=ref))
         print("generate", gens[-1])
     doc = dict(date=dt.datetime.now().isoformat(timespec="seconds"), arch=args.arch, device=args.device,
-               model=pathlib.Path(args.model).name,
+               model=pathlib.Path(args.model).name, threads=int(args.threads), machine=machine_info(),
                versions={"mojo-dllm": run(["git", "-C", str(ROOT), "rev-parse", "--short", "HEAD"]).strip()},
                reference="llama.cpp libllama via tools/ref/llada_ref.cpp", logits=logits, generation=gens)
     if args.ref2:
         doc["reference2"] = args.ref2_label
-    atomic_write.write_new(result_file, json.dumps(doc, indent=2, ensure_ascii=False) + "\n", args.force)
+    write_doc(result_file, doc, args.force)
     print(f"wrote {result_file.relative_to(ROOT)}")
     return 0
 
