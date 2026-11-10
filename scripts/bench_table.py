@@ -5,6 +5,8 @@ usage: bench_table.py --write     rewrite the tables between the markers
        bench_table.py --check     exit 1 if a table differs from the evidence
        --allow-noisy              with either: publish a timed GSM8K round that has noisy or unchecked rows
 
+Exactly one of --write and --check is required; anything else prints the usage line and exits 2.
+
 No benchmark number in this repository is typed by hand. The tables live
 between `<!-- bench:start -->` and `<!-- bench:end -->` and are produced from
 the result files that bench/run_bench.py writes. A partial result file (a run
@@ -25,6 +27,7 @@ sys.path.insert(0, str(ROOT / "bench"))
 from parity_schema import ParityError, validate_parity  # noqa: E402  (bench/parity_schema.py)
 TARGETS = [ROOT / "README.md", ROOT / "docs" / "benchmarks.md", ROOT / "docs" / "correctness.md"]
 START, END = "<!-- bench:start -->", "<!-- bench:end -->"
+USAGE = "usage: bench_table.py --write | --check [--allow-noisy]"
 
 ROWS = [
     ("mojo-dllm-gpu", "**mojo-dllm** `--device gpu`", "Mojo"),
@@ -570,10 +573,14 @@ def splice(text: str, table: str, start: str = START, end: str = END) -> str:
     return f"{head}{start}\n{table}\n{end}{tail}"
 
 
-def main() -> int:
-    args = [a for a in sys.argv[1:] if a != "--allow-noisy"]
-    allow_noisy = len(args) != len(sys.argv) - 1
-    mode = args[0] if args else "--check"
+def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    allow_noisy = "--allow-noisy" in argv
+    modes = [a for a in argv if a != "--allow-noisy"]
+    if len(modes) != 1 or modes[0] not in ("--write", "--check"):
+        print(USAGE, file=sys.stderr)
+        return 2
+    mode = modes[0]
     table = render()
     logit_table, gen_table = parity()
     quality_table = quality()
