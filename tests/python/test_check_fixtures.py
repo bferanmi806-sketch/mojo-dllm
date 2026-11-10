@@ -158,3 +158,53 @@ def test_the_guide_names_the_provenance_of_all_three_tokenizer_goldens() -> None
     names = fixture_table_names()
     for prefix in ("llada", "dream", "gemma4"):
         assert f"{prefix}-tokenizer-golden.provenance.json" in names or "*-tokenizer-golden.provenance.json" in names
+
+
+def f32(*values: float) -> bytes:
+    import array
+
+    return array.array("f", values).tobytes()
+
+
+def test_a_float_file_that_differs_in_the_last_bits_passes(tmp_path: Path) -> None:
+    """A BLAS on another CPU sums in another order; the generator's f32 output then differs by a few ulp."""
+    import struct
+
+    base = f32(1.0, -2.5, 0.125)
+    nudged = struct.pack("<3I", *(struct.unpack("<I", base[i : i + 4])[0] + 1 for i in (0, 4, 8)))
+    assert base != nudged
+    generated = {**GENERATED, "c.f32": base}
+    root = make_repo(tmp_path, {**GENERATED, "c.f32": nudged})
+    (root / "scripts" / "gen.py").write_text(GENERATOR.format(files=generated))
+    assert check(root) == []
+
+
+def test_a_float_file_that_differs_in_value_fails(tmp_path: Path) -> None:
+    generated = {**GENERATED, "c.f32": f32(1.0, -2.5, 0.125)}
+    root = make_repo(tmp_path, {**GENERATED, "c.f32": f32(1.0, -2.5, 0.25)})
+    (root / "scripts" / "gen.py").write_text(GENERATOR.format(files=generated))
+    problems = check(root)
+    assert len(problems) == 1 and "c.f32" in problems[0]
+
+
+def test_a_float_file_with_another_length_fails(tmp_path: Path) -> None:
+    generated = {**GENERATED, "c.f32": f32(1.0, 2.0)}
+    root = make_repo(tmp_path, {**GENERATED, "c.f32": f32(1.0, 2.0, 3.0)})
+    (root / "scripts" / "gen.py").write_text(GENERATOR.format(files=generated))
+    assert len(check(root)) == 1
+
+
+def test_a_tsv_float_column_may_differ_in_the_last_digits_and_a_label_may_not(tmp_path: Path) -> None:
+    tracked = {"a.tsv": b"mixed40\t0.8\t1.7930739865919936\n"}
+    generated = {"a.tsv": b"mixed40\t0.8\t1.7930739865919940\n"}
+    root = make_repo(tmp_path, tracked)
+    (root / "scripts" / "gen.py").write_text(GENERATOR.format(files=generated))
+    assert gate.check(root, [["scripts/gen.py"]], (), float_files=("a.tsv",)) == []
+    (root / "tests" / "fixtures" / "a.tsv").write_bytes(b"mixed41\t0.8\t1.7930739865919936\n")
+    assert len(gate.check(root, [["scripts/gen.py"]], (), float_files=("a.tsv",))) == 1
+    assert len(gate.check(root, [["scripts/gen.py"]], ())) == 1
+
+
+def test_the_real_float_fixtures_are_the_ones_named() -> None:
+    names = {p.name for p in (ROOT / "tests" / "fixtures").rglob("*.f32")}
+    assert names and gate.FLOAT_TSV == ("entropy-rows.tsv",)

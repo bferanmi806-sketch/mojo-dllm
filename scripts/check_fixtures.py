@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Regenerate the test fixtures into a scratch directory and compare them with tests/fixtures byte for byte.
+"""Regenerate the test fixtures into a scratch directory and compare them with tests/fixtures byte for byte,
+except the float32 files, which compare by value within a small tolerance (see FLOAT_SUFFIXES).
 
 Run with:  uv run --frozen --only-group fixtures python scripts/check_fixtures.py
 
@@ -15,6 +16,8 @@ build, so they are listed in NOT_GENERATED and not compared here.
 
 from __future__ import annotations
 
+import array
+import math
 import os
 import pathlib
 import subprocess
@@ -29,6 +32,13 @@ NOT_GENERATED = (
     "*-tokenizer-golden.provenance.json",  # the same script, next to the golden it describes
     "golden-generation.tsv",  # UPDATE_GOLDEN=1 build/tests/test_golden
 )
+# Files that hold float32 results of a matrix product. A BLAS on another CPU sums in another order, so the last bits
+# differ from machine to machine (the CI runner regenerates different bytes than the maintainer's laptop). These
+# compare by value within RTOL and ATOL; a changed generator or a hand edit moves values far beyond that.
+FLOAT_SUFFIXES = (".f32",)
+FLOAT_TSV = ("entropy-rows.tsv",)
+RTOL = 1e-4
+ATOL = 1e-6
 
 
 class GeneratorFailed(Exception):
@@ -43,8 +53,58 @@ def _named(name: str, patterns: tuple[str, ...]) -> bool:
     return any(pathlib.PurePosixPath(name).match(pattern) for pattern in patterns)
 
 
-def check(root: pathlib.Path, generators: list[list[str]], not_generated: tuple[str, ...]) -> list[str]:
-    """The problems found, one line each; an empty list means every fixture regenerates byte for byte."""
+def _close(a: float, b: float) -> bool:
+    return a == b or abs(a - b) <= ATOL + RTOL * abs(b) or (math.isnan(a) and math.isnan(b))
+
+
+def _f32_close(made: bytes, tracked: bytes) -> bool:
+    if len(made) != len(tracked) or len(made) % 4:
+        return False
+    a, b = array.array("f"), array.array("f")
+    a.frombytes(made)
+    b.frombytes(tracked)
+    return all(_close(x, y) for x, y in zip(a, b))
+
+
+def _tsv_close(made: bytes, tracked: bytes) -> bool:
+    rows_a, rows_b = made.decode().split("\n"), tracked.decode().split("\n")
+    if len(rows_a) != len(rows_b):
+        return False
+    for row_a, row_b in zip(rows_a, rows_b):
+        cells_a, cells_b = row_a.replace("\t", " ").split(" "), row_b.replace("\t", " ").split(" ")
+        if len(cells_a) != len(cells_b):
+            return False
+        for x, y in zip(cells_a, cells_b):
+            if x == y:
+                continue
+            try:
+                if not _close(float(x), float(y)):
+                    return False
+            except ValueError:
+                return False
+    return True
+
+
+def _same(name: str, made: bytes, tracked: bytes, float_files: tuple[str, ...]) -> bool:
+    if made == tracked:
+        return True
+    if name.endswith(FLOAT_SUFFIXES):
+        return _f32_close(made, tracked)
+    if pathlib.PurePosixPath(name).name in float_files:
+        try:
+            return _tsv_close(made, tracked)
+        except UnicodeDecodeError:
+            return False
+    return False
+
+
+def check(
+    root: pathlib.Path,
+    generators: list[list[str]],
+    not_generated: tuple[str, ...],
+    float_files: tuple[str, ...] = FLOAT_TSV,
+) -> list[str]:
+    """The problems found, one line each; an empty list means every fixture regenerates (float files within tolerance)."""
     tracked = _files(root / "tests" / "fixtures")
     scratch_parent = root / "build"
     scratch_parent.mkdir(exist_ok=True)
@@ -61,7 +121,7 @@ def check(root: pathlib.Path, generators: list[list[str]], not_generated: tuple[
         for name, path in made.items():
             if name not in tracked:
                 problems.append(f"{name}: a generator writes it and it is not in tests/fixtures")
-            elif path.read_bytes() != tracked[name].read_bytes():
+            elif not _same(name, path.read_bytes(), tracked[name].read_bytes(), float_files):
                 problems.append(f"{name}: differs from what its generator writes")
         for name in tracked:
             if name not in made and not _named(name, not_generated):
@@ -81,7 +141,7 @@ def main() -> int:
             print(f"  {line}", file=sys.stderr)
         print("Regenerate with scripts/gen_fixtures.py and scripts/gen_moe_fixture.py and commit the result.", file=sys.stderr)
         return 1
-    print("check_fixtures: every generated fixture matches byte for byte")
+    print("check_fixtures: every generated fixture matches (float files within tolerance)")
     return 0
 
 
