@@ -367,6 +367,20 @@ def read_gpu_apps(m: Machine) -> list[tuple[int, float]] | None:
     return apps
 
 
+def split_gpu_apps(m: Machine, apps: list[tuple[int, float]],
+                   table: dict[int, tuple[int, int, str, int]] | None = None) -> tuple[list[tuple[int, float]], float]:
+    """(compute processes that are not ours, MiB the ones that are ours hold).
+
+    Ours is this process and its descendants, the tree `Window` also leaves out as the benchmark's own use. An
+    engine that loads its weights in this process (the hf adapter) is on the GPU before the preflight runs; it
+    is the benchmark, not contention. The table is read again when not given; if /proc cannot be listed, ours is
+    this pid alone.
+    """
+    table = table if table is not None else process_table(m)
+    own = (tree_of(table, m.self_pid) if table else set()) | {m.self_pid}
+    return ([(p, mib) for p, mib in apps if p not in own], sum(mib for p, mib in apps if p in own))
+
+
 def reason_names(bits: int) -> list[str]:
     return [name for mask, name in GPU_REASONS.items() if bits & mask]
 
@@ -696,15 +710,19 @@ def preflight(device: str, need_ram_gb: float | None, allow: tuple[str, ...] = (
         if len(rows) != len(gpu_rows) or apps is None:
             warn("gpu", "`nvidia-smi --query-gpu` / `--query-compute-apps`")
         else:
-            checks.append(Check("gpu-processes", "FAIL" if apps else "PASS",
-                                f"compute processes: {[p for p, _ in apps]}" if apps else "none"))
+            foreign, own_mib = split_gpu_apps(m, apps, proc1)
+            checks.append(Check("gpu-processes", "FAIL" if foreign else "PASS",
+                                f"compute processes: {[p for p, _ in foreign]}" if foreign else
+                                ("none besides this benchmark" if apps else "none")))
             mem_used = _num(rows[-1]["memory.used"])
             if mem_used is None:
                 warn("gpu-memory", "memory.used")
             else:
-                over = mem_used > th.gpu_mem_used_max_mib
+                other = max(mem_used - own_mib, 0.0)     # what this benchmark already holds is not contention
+                over = other > th.gpu_mem_used_max_mib
+                held = f" ({own_mib:.0f} MiB held by this benchmark excluded)" if own_mib else ""
                 checks.append(Check("gpu-memory", "FAIL" if over else "PASS",
-                                    f"{mem_used:.0f} MiB used (limit {th.gpu_mem_used_max_mib:g})"))
+                                    f"{other:.0f} MiB used{held} (limit {th.gpu_mem_used_max_mib:g})"))
             utils = [_num(r["utilization.gpu"]) for r in rows]
             if any(u is None for u in utils):
                 warn("gpu-utilization", "utilization.gpu")
@@ -788,8 +806,10 @@ def quiet_gate(device: str, *, machine: Machine | None = None, thresholds: Thres
             g1 = read_gpu_apps(m)
             if g0 is None or g1 is None:
                 reasons.append("gpu unmeasured")
-            elif g1:
-                reasons.append(f"gpu processes {[p for p, _ in g1]}")
+            else:
+                foreign = split_gpu_apps(m, g1)[0]
+                if foreign:
+                    reasons.append(f"gpu processes {[p for p, _ in foreign]}")
         waited = m.clock() - t0
         if not reasons or waited > max_wait_s:
             return {"ok": not reasons, "cpu_busy_before": round(busy, 3), "waited_s": round(waited, 1),
