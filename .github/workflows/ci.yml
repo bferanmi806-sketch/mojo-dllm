@@ -20,7 +20,8 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  checks:
+  # The name of this job is a required status check of branch protection on main; do not rename it.
+  hygiene:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:

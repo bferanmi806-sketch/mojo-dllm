@@ -69,15 +69,19 @@ def test_the_ci_jobs_are_read() -> None:
     assert all(job["steps"] for job in jobs.values())
 
 
-def test_the_job_that_runs_the_checks_is_named_for_what_it_does() -> None:
+def test_the_job_keeps_the_name_branch_protection_requires() -> None:
+    """`main` requires a status check named hygiene. A renamed job never reports it and blocks every merge."""
+    text = (WORKFLOWS / "ci.yml").read_text()
     jobs = read_jobs(WORKFLOWS / "ci.yml")
-    assert "checks" in jobs and "hygiene" not in jobs
+    assert set(jobs) == {"hygiene", "mojo", "docs"}
+    before = text.split("\n  hygiene:", 1)[0].splitlines()[-1]
+    assert before.lstrip().startswith("#") and "required status check" in before
 
 
 def test_no_step_after_the_first_command_is_skipped_when_an_earlier_one_fails() -> None:
-    """Every `run` step of the checks job after the first carries `!cancelled()`, the install of markdownlint
+    """Every `run` step of the hygiene job after the first carries `!cancelled()`, the install of markdownlint
     included: without it a failed launcher test skips the install and markdownlint then reports "command not found"."""
-    steps = [s for s in read_jobs(WORKFLOWS / "ci.yml")["checks"]["steps"] if s["run"]]
+    steps = [s for s in read_jobs(WORKFLOWS / "ci.yml")["hygiene"]["steps"] if s["run"]]
     assert len(steps) >= 10
     bare = [s["name"] for s in steps[1:] if s["if"] != "${{ !cancelled() }}"]
     assert bare == []
@@ -85,7 +89,7 @@ def test_no_step_after_the_first_command_is_skipped_when_an_earlier_one_fails() 
 
 def test_markdownlint_runs_over_the_same_files_in_both_gates() -> None:
     ci = md_lint_arguments(
-        "\n".join(s["run"] for s in read_jobs(WORKFLOWS / "ci.yml")["checks"]["steps"] if "markdownlint-cli2 " in s["run"])
+        "\n".join(s["run"] for s in read_jobs(WORKFLOWS / "ci.yml")["hygiene"]["steps"] if "markdownlint-cli2 " in s["run"])
     )
     local = md_lint_arguments(CI_LOCAL.read_text())
     assert ci == local

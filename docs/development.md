@@ -51,7 +51,7 @@ reason). Add a line there in the commit that adds a skip. `--locked` makes
 `uv run` fail when `uv.lock` no longer matches `pyproject.toml`; `--frozen` does
 not compare them.
 
-Branch protection on `main` requires four checks: `checks`, `mojo` and `docs` of the CI
+Branch protection on `main` requires four checks: `hygiene`, `mojo` and `docs` of the CI
 workflow and `trufflehog` of the secret scan. The job `build` of the
 "Deploy docs to GitHub Pages" workflow skips while the repository is private,
 and a skipped job satisfies a required check, so it must not be required. CI
