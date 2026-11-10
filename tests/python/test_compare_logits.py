@@ -86,12 +86,15 @@ def run_main(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, rows_for: dict[tup
         Path(cmd[cmd.index("--out") + 1]).write_bytes(array("f", [v for r in rows_for[(root, device)] for v in r]).tobytes())
         return ""
 
+    for name in ("base", "new"):
+        (tmp_path / name / "build").mkdir(parents=True, exist_ok=True)
+        (tmp_path / name / "build/mojo-dllm").write_bytes(f"binary of {name}".encode())
     monkeypatch.setattr(cl, "run", fake_run)
     out = tmp_path / "out" / "r.json"
     argv = ["compare_logits", "--model", "m.gguf", "--base", str(tmp_path / "base"), "--new", str(tmp_path / "new"),
             "--out", str(out), "--masked", "2"]
     monkeypatch.setattr(sys, "argv", argv)
-    monkeypatch.setattr(cl, "version", lambda root: "abc1234")
+    monkeypatch.setattr(cl, "version", lambda root: "head-of-" + root.name)
     assert cl.main() == 0
     return json.loads(out.read_text())
 

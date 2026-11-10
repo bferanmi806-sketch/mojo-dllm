@@ -52,6 +52,7 @@ from typing import Callable
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "bench"))
+import ab_evidence  # noqa: E402  (bench/ab_evidence.py)
 import atomic_write  # noqa: E402  (bench/atomic_write.py)
 import isolation  # noqa: E402  (bench/isolation.py)
 import power  # noqa: E402  (bench/power.py)
@@ -358,6 +359,24 @@ def check_runtime_names(names: list[str]) -> None:
                          f"known: {sorted(FIXED_RUNTIMES)} and llama.cpp:tN, llama-bench:tN")
 
 
+def collect_versions(c: dict, runtimes: list[str]) -> dict:
+    """The versions recorded with a result, and the SHA-256 of build/mojo-dllm when a mojo-dllm runtime runs.
+
+    The commit label says what the source was; the binary hash says which build actually ran, so a stale
+    binary cannot carry the label of a newer commit.
+    """
+    versions = {
+        "mojo-dllm": sh(f"git -C {shlex.quote(str(ROOT))} rev-parse --short HEAD")
+        + ("-dirty" if sh(f"git -C {shlex.quote(str(ROOT))} status --porcelain -- src") else ""),
+        "mojo": mojo_version(),
+        "llama.cpp": sh(f"git -C {shlex.quote(c['llama_cpp'])} rev-parse --short HEAD"),
+        "diffuse-cpp": sh(f"git -C {shlex.quote(c['diffuse_cpp'])} rev-parse --short HEAD"),
+    }
+    if any(r.startswith("mojo-dllm") for r in runtimes):
+        versions["mojo-dllm-binary-sha256"] = ab_evidence.binary_sha256_or_none(ROOT)
+    return versions
+
+
 def select_runtimes(configured: list[str], only: str, reps: int) -> list[str]:
     """The runtimes to run, refusing a selection that would write a result file with nothing measured."""
     check_runtime_names(configured)
@@ -456,13 +475,7 @@ def main() -> int:
     out_path = pathlib.Path(args.out or ROOT / f"bench/results/{dt.date.today().isoformat()}-cpu.json")
     atomic_write.refuse_existing(out_path, args.force)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    versions = {
-        "mojo-dllm": sh(f"git -C {shlex.quote(str(ROOT))} rev-parse --short HEAD")
-        + ("-dirty" if sh(f"git -C {shlex.quote(str(ROOT))} status --porcelain -- src") else ""),
-        "mojo": mojo_version(),
-        "llama.cpp": sh(f"git -C {shlex.quote(c['llama_cpp'])} rev-parse --short HEAD"),
-        "diffuse-cpp": sh(f"git -C {shlex.quote(c['diffuse_cpp'])} rev-parse --short HEAD"),
-    }
+    versions = collect_versions(c, runtimes)
 
     def summarize() -> dict:
         return summarize_runs(results, runtimes, c["gen_length"])

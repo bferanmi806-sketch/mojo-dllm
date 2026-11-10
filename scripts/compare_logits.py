@@ -26,6 +26,7 @@ import tempfile
 from array import array
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "bench"))
+import ab_evidence  # noqa: E402  (bench/ab_evidence.py)
 import spec  # noqa: E402  (bench/spec.py)
 
 MASK = spec.ARCH_IDS["llada"]["mask"]
@@ -39,9 +40,7 @@ def run(cmd: list[str]) -> str:
 
 
 def version(root: pathlib.Path) -> str:
-    v = run(["git", "-C", str(root), "rev-parse", "--short", "HEAD"]).strip()
-    dirty = run(["git", "-C", str(root), "status", "--porcelain", "--", "src"]).strip()
-    return v + ("-dirty" if dirty else "")
+    return ab_evidence.head_label(root, run, short=True)
 
 
 def require_finite(rows: list[array], label: str) -> None:
@@ -90,6 +89,10 @@ def main() -> int:
     model = os.path.expanduser(args.model)
     base = pathlib.Path(args.base).resolve()
     new = pathlib.Path(args.new).resolve()
+    roots = {"base": base, "new": new}
+    heads = {k: version(r) for k, r in roots.items()}
+    hashes = {k: ab_evidence.binary_sha256(r) for k, r in roots.items()}
+    ab_evidence.require_distinct_builds(roots, heads, hashes)
     toks = json.loads(run([str(base / "build/mojo-dllm"), "tokenize", "--model", model, "--prompt", args.prompt]).strip().splitlines()[-1])
     ids = toks + [MASK] * args.masked
     rows = list(range(len(ids)))
@@ -118,7 +121,8 @@ def main() -> int:
     doc = dict(
         date=dt.date.today().isoformat(), model=pathlib.Path(model).name, rows=len(rows), prompt_rows=len(toks),
         method="logits for every row of the prompt plus masked tokens; per-row cosine against the base checkout's f32 CPU run",
-        base=dict(version=version(base), **summary(A)), new=dict(version=version(new), **summary(B)),
+        base=dict(version=heads["base"], binary_sha256=hashes["base"], **summary(A)),
+        new=dict(version=heads["new"], binary_sha256=hashes["new"], **summary(B)),
         base_vs_new=dict(median_cosine=median(ab), min_cosine=min(ab),
                          argmax_agree=sum(argmax(A[r]) == argmax(B[r]) for r in rows)),
     )

@@ -3,19 +3,23 @@
 
 Usage: python3 bench/check_gpu_dispatch.py --base BASE --new NEW --model M.gguf
        --arch llada|dream --out evidence.json
-CUDA_VISIBLE_DEVICES selects the assigned GPU. No CPU or external-runtime parity
-is implied: this checks that dispatch preserves the base GPU computation.
+CUDA_VISIBLE_DEVICES selects the assigned GPU (set CUDA_DEVICE_ORDER=PCI_BUS_ID so the index matches
+nvidia-smi; both variables are recorded in the evidence). No CPU or external-runtime parity
+is implied: this checks that dispatch preserves the base GPU computation. A base and a new that are the same
+checkout, the same clean commit or byte-identical binaries are refused, and the SHA-256 of each binary is recorded.
 """
 import argparse
 from array import array
 import json
 import math
+import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import ab_evidence  # noqa: E402  (bench/ab_evidence.py)
 import spec  # noqa: E402  (bench/spec.py)
 
 ARCH_IDS = spec.ARCH_IDS
@@ -38,9 +42,15 @@ def main():
     mask, vocab = ARCH_IDS[args.arch]['mask'], ARCH_IDS[args.arch]['vocab']
     model = str(Path(args.model).resolve())
     prompts = json.loads((roots['new'] / 'bench/config-gpu.json').read_text())['prompts']
+    ab_evidence.require_prompts(prompts, 'bench/config-gpu.json')
+    versions = {k: ab_evidence.head_label(p, run) for k, p in roots.items()}
+    hashes = {k: ab_evidence.binary_sha256(p) for k, p in roots.items()}
+    ab_evidence.require_distinct_builds(roots, versions, hashes)
     doc = dict(arch=args.arch, model=Path(model).name, mask_id=mask,
                method='Exact base/new GPU logits and token lists; not independent model parity',
-               versions={k: run(['git', '-C', str(p), 'rev-parse', 'HEAD']).strip() for k, p in roots.items()},
+               versions=versions, binary_sha256=hashes,
+               cuda=dict(visible_devices=os.environ.get('CUDA_VISIBLE_DEVICES'),
+                         device_order=os.environ.get('CUDA_DEVICE_ORDER')),
                logits=[], generation=[])
     with tempfile.TemporaryDirectory(prefix='mojo-dispatch-') as tmp:
         for masked in [64, 128, 256, 512]:
@@ -70,7 +80,9 @@ def main():
             for variant, binary in bins.items():
                 output = run([binary, 'run', '--model', model, '--prompt', prompt, '--device', 'gpu',
                               '--threads', '8', '--max-tokens', '128', '--steps', '32',
-                              '--block-length', '32', '--no-early-stop', '--json'])
+                              # Dream has no blocks and ignores --block-length; the flag is for LLaDA only.
+                              *([] if args.arch == 'dream' else ['--block-length', '32']),
+                              '--no-early-stop', '--json'])
                 results[variant] = json.loads(next(l for l in output.splitlines() if l.startswith('{')))
             a, b = results['base'], results['new']
             same = a['tokens'] == b['tokens'] and a['forward_passes'] == b['forward_passes'] == 32

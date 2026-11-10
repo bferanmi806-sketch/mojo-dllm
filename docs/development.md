@@ -230,6 +230,18 @@ rejects failures or mismatched forward counts and canvas sizes. It leaves the
 system power profile and other processes alone. Keep each pair on the same
 GPU; another GPU can run a different model's independent comparison.
 
+Both tools, and `scripts/compare_logits.py`, refuse a base and a new that are
+the same checkout, the same clean commit or byte-identical binaries, and record
+the SHA-256 of each `build/mojo-dllm` in the evidence, because a stale build
+carries the label of whatever commit is checked out. `compare_gpu.py` sets
+`CUDA_DEVICE_ORDER=PCI_BUS_ID` so that `--gpu` (an index or a `GPU-` uuid)
+names the same card to CUDA and to `nvidia-smi`, records the index and the
+uuid read back from `nvidia-smi`, and runs the isolation preflight and a
+window around each run of `bench/isolation.py`
+(`--allow-noisy` continues after a failed preflight). `check_gpu_dispatch.py`
+records `CUDA_VISIBLE_DEVICES` and `CUDA_DEVICE_ORDER` as it found them, so
+export `CUDA_DEVICE_ORDER=PCI_BUS_ID` there too.
+
 ```bash
 python3 bench/compare_gpu.py --base ../base --new . --model MODEL.gguf \
   --gpu GPU-UUID --lengths 128,256,512 --reps 3 --prompts 3 \

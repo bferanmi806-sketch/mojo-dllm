@@ -55,6 +55,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 DATA = ROOT / "bench" / "eval" / "gsm8k-200.jsonl"
 RUNS = ROOT / "bench" / "eval" / "runs"
 sys.path.insert(0, str(ROOT / "bench"))
+import ab_evidence  # noqa: E402  (bench/ab_evidence.py)
 import atomic_write  # noqa: E402  (bench/atomic_write.py)
 import isolation  # noqa: E402  (bench/isolation.py)
 import power  # noqa: E402  (bench/power.py)
@@ -207,7 +208,8 @@ def cmd_run(args: argparse.Namespace, extra: list[str]) -> int:
     if not todo:
         return 0
     with isolation.arm_session(args, arm=args.arm, device=args.device, model=args.model, runs_dir=RUNS,
-                               versions={"mojo-dllm": version}) as arm:
+                               versions={"mojo-dllm": version,
+                                         "mojo-dllm-binary-sha256": ab_evidence.binary_sha256_or_none(ROOT)}) as arm:
         for k, p in todo:
             wait_if_paused()
             cmd = [str(ROOT / "build/mojo-dllm"), "run", "--model", args.model,
