@@ -175,7 +175,7 @@ CI_ONLY = (
 LOCAL_ONLY = ("scripts/run-gpu-tests.sh",)
 # What names a gate: a script of the repository or the tool a step runs.
 GATE = re.compile(
-    r"(?:scripts|bench)/[\w.-]+\.(?:sh|py)|shellcheck|yamllint|markdownlint-cli2|pytest|mdbook build|uv lock --script"
+    r"(?:scripts|bench)/[\w.-]+\.(?:sh|py)|shellcheck|yamllint|markdownlint-cli2|pytest|mdbook build|uv lock --script|mojo format"
 )
 
 
@@ -209,7 +209,7 @@ def test_every_command_ci_runs_is_in_ci_local() -> None:
 
 def test_ci_local_runs_no_gate_that_ci_lacks() -> None:
     ci = gates(" ".join(ci_commands()))
-    local = gates(CI_LOCAL.read_text())
+    local = gates(re.sub(r'step "[^"]*"', "step", CI_LOCAL.read_text()))      # a step label names no gate
     extra = {g for g in local - ci if not g.startswith(LOCAL_ONLY)}
     assert extra == set()
     assert gates(" ".join(ci_commands())) - local == set()
@@ -415,3 +415,8 @@ def test_hygiene_refuses_a_database_url_with_a_password_for_each_scheme(tmp_path
     """Each alternative of the pattern is a separate way to miss a secret."""
     result = run_hygiene(tmp_path, f"URL={scheme}://app:" + "s3cretvalue@db.example.com/app\n")
     assert result.returncode == 1 and "database url" in result.stderr.lower(), scheme
+
+
+def test_a_raw_mojo_format_step_counts_as_a_gate() -> None:
+    assert gates("uv run --frozen mojo format -q src tests bench") == {"mojo format"}
+    assert gates("bash scripts/check_format.sh") == {"scripts/check_format.sh"}
