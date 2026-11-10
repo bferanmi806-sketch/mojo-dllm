@@ -3,6 +3,7 @@
 
 usage: bench_table.py --write     rewrite the tables between the markers
        bench_table.py --check     exit 1 if a table differs from the evidence
+       --allow-noisy              with either: publish a timed GSM8K round that has noisy or unchecked rows
 
 No benchmark number in this repository is typed by hand. The tables live
 between `<!-- bench:start -->` and `<!-- bench:end -->` and are produced from
@@ -58,6 +59,11 @@ def check_summary(name: str, doc: dict) -> None:
         ok = [r for r in doc["runs"] if r["runtime"] == rt and r.get("ok")]
         if sm["runs_ok"] != len(ok):
             raise SystemExit(f"bench_table: {name}: the summary of {rt} says runs_ok {sm['runs_ok']}, its runs hold {len(ok)}")
+        for state in ("clean", "noisy", "unchecked"):
+            got = sum(1 for r in ok if window_state(r) == state)
+            if f"{state}_runs" in sm and sm[f"{state}_runs"] != got:
+                raise SystemExit(f"bench_table: {name}: the summary of {rt} says {state}_runs {sm[f'{state}_runs']}, "
+                                 f"its runs hold {got}")
         ms = [r["ms_per_step"] for r in ok if r.get("ms_per_step") is not None]
         if ms and not math.isclose(sm["ms_per_step_median"], statistics.median(ms), rel_tol=1e-9):
             raise SystemExit(f"bench_table: {name}: the summary of {rt} says ms_per_step_median "
@@ -203,29 +209,60 @@ def gpu_ratio(label: str, g: dict) -> PairedRatio | None:
     return pr
 
 
+def busy_before(r: dict) -> float:
+    """The CPU load a run started under; a run without it is refused, never read as a quiet machine."""
+    if "cpu_busy_before" not in r:
+        raise SystemExit(f"bench_table: run {r.get('runtime')} rep {r.get('rep')} has no cpu_busy_before")
+    return r["cpu_busy_before"]
+
+
+def window_state(r: dict) -> str:
+    """`clean`, `noisy` or `unchecked` for a run's isolation window (the same rule as bench/run_bench.py)."""
+    iso = r.get("isolation")
+    if not isinstance(iso, dict):
+        return "unchecked"
+    return "clean" if iso.get("clean") is True and not iso.get("noisy") else "noisy"
+
+
 def busy_note(runs: list[dict], threshold: float, rows: list) -> list[str]:
-    """Disclose runs that started on a busy CPU, with medians over the quiet ones.
+    """Disclose runs that started on a busy CPU or ended in a noisy window, with medians over the others.
 
     The harness waits for a quiet CPU but gives up after max_quiet_wait_s and
-    runs anyway, recording how busy the CPU was. Those runs stay in the table;
-    this note says how many there were and what the quiet runs alone give.
+    runs anyway, recording how busy the CPU was; a run whose isolation window
+    saw other CPU, swap, thermal or GPU activity is kept as `noisy`. Those runs
+    stay in the table; this note says how many there were and what the quiet
+    runs alone give. In a file where some runs have a window and some do not,
+    the runs without one are counted as unchecked.
     """
     ok = [r for r in runs if r.get("ok")]
-    busy = [r for r in ok if r.get("cpu_busy_before", 0) > threshold]
-    if not busy:
+    busy = [r for r in ok if busy_before(r) > threshold]
+    states = {id(r): window_state(r) for r in ok}
+    noisy = [r for r in ok if states[id(r)] == "noisy"]
+    has_windows = any(v != "unchecked" for v in states.values())
+    unchecked = [r for r in ok if states[id(r)] == "unchecked"] if has_windows else []
+    disturbed = [r for r in ok if busy_before(r) > threshold or states[id(r)] == "noisy"]
+    disturbed_ids = {id(r) for r in disturbed}
+    if not disturbed and not unchecked:
         return []
     parts = []
     for key, label, _ in rows:
-        quiet = [r for r in ok if r["runtime"] == key and r.get("cpu_busy_before", 0) <= threshold
-                 and r.get("ms_per_step") is not None]
-        if not quiet or not any(r["runtime"] == key for r in busy):
+        quiet = [r for r in ok if r["runtime"] == key and id(r) not in disturbed_ids and r.get("ms_per_step") is not None]
+        if not quiet or not any(r["runtime"] == key for r in disturbed):
             continue
         step = statistics.median(r["ms_per_step"] for r in quiet)
         start = statistics.median(r["startup_s"] for r in quiet)
         name = label.replace("**", "")
         parts.append(f"{name} {step:,.0f} ms / step and {start:.1f} s startup ({len(quiet)} runs)")
-    note = (f"{len(busy)} of {len(ok)} runs started with the CPU more than {threshold:.0%} busy "
-            "(the harness waits for a quiet CPU, then runs anyway and records the load).")
+    sentences = []
+    if busy:
+        sentences.append(f"{len(busy)} of {len(ok)} runs started with the CPU more than {threshold:.0%} busy "
+                         "(the harness waits for a quiet CPU, then runs anyway and records the load).")
+    if noisy:
+        sentences.append(f"{len(noisy)} of {len(ok)} runs ended in a noisy isolation window (other CPU, swap, "
+                         "thermal or GPU activity) and stay in the medians.")
+    if unchecked:
+        sentences.append(f"{len(unchecked)} of {len(ok)} runs carry no isolation window.")
+    note = " ".join(sentences)
     if parts:
         note += " The quiet runs alone give " + "; ".join(parts) + "."
     return ["", note]
@@ -423,7 +460,17 @@ def isolation_sentence(docs: list[dict]) -> str:
             "times average over the clean rows only where the table says so.")
 
 
-def eval_table() -> str:
+def refuse_unclean_timing(f: pathlib.Path, d: dict) -> None:
+    """A timed round whose clean rows are fewer than its problems is not published unless the caller says so."""
+    if "clean_rows" in d and d["clean_rows"] < d["problems"]:
+        raise SystemExit(
+            f"bench_table: {f.name} has {d['clean_rows']} clean rows for {d['problems']} problems "
+            f"(noisy {d.get('noisy_rows')}, unchecked {d.get('unchecked_rows')}); run the round again, "
+            "or pass --allow-noisy to publish it with those counts"
+        )
+
+
+def eval_table(allow_noisy: bool = False) -> str:
     """GSM8K paired comparisons from bench/eval/*-vs-*.json. Accuracy comes from the
     full comparison; time per problem from the `--limit` one, the shorter round
     (generate_s in the other rounds carries whatever else ran)."""
@@ -431,6 +478,8 @@ def eval_table() -> str:
     timed: dict[tuple, tuple] = {}
     for f in sorted((ROOT / "bench" / "eval").glob("*-vs-*.json")):
         doc = json.loads(f.read_text())
+        if doc.get("limit") and not allow_noisy:
+            refuse_unclean_timing(f, doc)
         (timed if doc.get("limit") else full)[tuple(doc["arms"])] = (f, doc)
     if not full:
         return ""
@@ -500,11 +549,13 @@ def splice(text: str, table: str, start: str = START, end: str = END) -> str:
 
 
 def main() -> int:
-    mode = sys.argv[1] if len(sys.argv) > 1 else "--check"
+    args = [a for a in sys.argv[1:] if a != "--allow-noisy"]
+    allow_noisy = len(args) != len(sys.argv) - 1
+    mode = args[0] if args else "--check"
     table = render()
     logit_table, gen_table = parity()
     quality_table = quality()
-    gsm8k_table = eval_table()
+    gsm8k_table = eval_table(allow_noisy)
     bad = []
     for t in TARGETS:
         if not t.exists():

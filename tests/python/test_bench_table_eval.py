@@ -38,14 +38,14 @@ def compare_doc(limit: int = 0, **over: object) -> dict:
     return doc
 
 
-def render(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, full: dict, timed: dict | None) -> str:
+def render(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, full: dict, timed: dict | None, allow_noisy: bool = True) -> str:
     folder = tmp_path / "bench" / "eval"
     folder.mkdir(parents=True)
     (folder / f"d-{BASE}-vs-{ARM}.json").write_text(json.dumps(full))
     if timed is not None:
         (folder / f"d-{BASE}-vs-{ARM}-first50.json").write_text(json.dumps(timed))
     monkeypatch.setattr(tables, "ROOT", tmp_path)
-    return tables.eval_table()
+    return tables.eval_table(allow_noisy)
 
 
 def isolation(noisy: int, unchecked: int, clean_rows: int, mean: float | None = 40.0) -> dict:
@@ -109,3 +109,17 @@ def test_different_weights_are_footnoted_with_both_models(tmp_path: Path, monkey
 def test_same_weights_carry_no_footnote(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     text = render(tmp_path, monkeypatch, compare_doc(weights_differ=False), None)
     assert "‡" not in text
+
+
+def test_a_timed_round_with_noisy_rows_is_refused_unless_allowed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    timed = compare_doc(50, **isolation(noisy=4, unchecked=2, clean_rows=44))
+    with pytest.raises(SystemExit) as e:
+        render(tmp_path, monkeypatch, compare_doc(), timed, allow_noisy=False)
+    assert "44 clean rows for 50 problems" in str(e.value) and "--allow-noisy" in str(e.value)
+
+
+def test_a_fully_clean_timed_round_needs_no_flag(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    text = render(tmp_path, monkeypatch, compare_doc(), compare_doc(50, **isolation(0, 0, 50)), allow_noisy=False)
+    assert "came back clean" in text

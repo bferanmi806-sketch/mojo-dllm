@@ -280,6 +280,45 @@ def median_or_none(xs: list[float]) -> float | None:
     return statistics.median(xs) if xs else None
 
 
+def window_state(r: dict) -> str:
+    """`clean`, `noisy` or `unchecked` for one run, from its isolation window.
+
+    A run with no window (a file from before the windows existed, or a runner that did not record one) is
+    `unchecked`: nothing says the machine was quiet, so it never counts as clean.
+    """
+    iso = r.get("isolation")
+    if not isinstance(iso, dict):
+        return "unchecked"
+    return "clean" if iso.get("clean") is True and not iso.get("noisy") else "noisy"
+
+
+def summarize_runs(results: list[dict], runtimes: list[str], gen_length: int) -> dict:
+    """The per-runtime medians over every ok run, and how many of those runs were clean, noisy or unchecked.
+
+    A noisy run stays in the medians (it is data, and dropping it would hide that the window was noisy);
+    `noisy_runs` and `unchecked_runs` say how many there were, so the table can disclose them.
+    """
+    summary = {}
+    for rt in runtimes:
+        ok = [r for r in results if r["runtime"] == rt and r["ok"]]
+        bad = [r for r in results if r["runtime"] == rt and not r["ok"]]
+        states = [window_state(r) for r in ok]
+        summary[rt] = dict(
+            runs_ok=len(ok), runs_failed=len(bad),
+            clean_runs=states.count("clean"), noisy_runs=states.count("noisy"),
+            unchecked_runs=states.count("unchecked"),
+            ms_per_step_median=median_or_none([r["ms_per_step"] for r in ok if "ms_per_step" in r]),
+            generate_s_median=median_or_none([r["generate_s"] for r in ok if "generate_s" in r]),
+            tokens_per_s_median=median_or_none(
+                [gen_length / r["generate_s"] for r in ok if "generate_s" in r]),
+            startup_s_median=median_or_none([r["startup_s"] for r in ok if "startup_s" in r]),
+            peak_rss_gb_max=max((r["peak_rss_bytes"] for r in ok), default=0) / 1e9 or None,
+            forward_passes_median=median_or_none([r["forward_passes"] for r in ok if "forward_passes" in r]),
+            forward_ms_median=median_or_none([r["forward_ms"] for r in ok if r.get("forward_ms") is not None]),
+        )
+    return summary
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default=str(ROOT / "bench/config.json"))
@@ -322,22 +361,7 @@ def main() -> int:
     }
 
     def summarize() -> dict:
-        summary = {}
-        for rt in runtimes:
-            ok = [r for r in results if r["runtime"] == rt and r["ok"]]
-            bad = [r for r in results if r["runtime"] == rt and not r["ok"]]
-            summary[rt] = dict(
-                runs_ok=len(ok), runs_failed=len(bad),
-                ms_per_step_median=median_or_none([r["ms_per_step"] for r in ok if "ms_per_step" in r]),
-                generate_s_median=median_or_none([r["generate_s"] for r in ok if "generate_s" in r]),
-                tokens_per_s_median=median_or_none(
-                    [c["gen_length"] / r["generate_s"] for r in ok if "generate_s" in r]),
-                startup_s_median=median_or_none([r["startup_s"] for r in ok if "startup_s" in r]),
-                peak_rss_gb_max=max((r["peak_rss_bytes"] for r in ok), default=0) / 1e9 or None,
-                forward_passes_median=median_or_none([r["forward_passes"] for r in ok if "forward_passes" in r]),
-                forward_ms_median=median_or_none([r["forward_ms"] for r in ok if r.get("forward_ms") is not None]),
-            )
-        return summary
+        return summarize_runs(results, runtimes, c["gen_length"])
 
     def write_doc(partial: bool) -> dict:
         summary = summarize()
