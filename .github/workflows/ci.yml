@@ -115,6 +115,11 @@ jobs:
       - name: GPU test suite builds
         run: bash scripts/build.sh tests/gpu/test_gpu.mojo build/tests/test_gpu
 
+      - name: GPU test count matches its pin
+        # The runner cannot run the suite, so a test added without re-pinning, or a file that stops defining
+        # tests, would pass the build above.
+        run: bash scripts/check_gpu_test_count.sh
+
       - name: --device gpu without a GPU fails cleanly
         run: bash scripts/check_no_gpu.sh
 

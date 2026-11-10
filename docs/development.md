@@ -35,11 +35,12 @@ machine with a GPU, the GPU tests that CI only builds:
 | checker self-test | `uv run --frozen --only-group fixtures python scripts/check_weights.py --self-test` | a safetensors or index guard in `check_weights.py` stops rejecting its case, or stops naming it |
 | no GPU | `scripts/check_no_gpu.sh` | `--device gpu` without a GPU does anything but exit 1 with a message |
 | visual options | `scripts/check_visual.sh` | an invalid `--visual-interval` does not exit 1, or `--json` with `--visual` does not exit 2, with a message naming the flag before model loading |
+| GPU test count | `scripts/check_gpu_test_count.sh` | the `def test_` functions of `tests/gpu/test_*.mojo` number other than `tests/gpu/test-count.txt` pins, or a file defines none; needs no GPU, runs in CI and `ci-local.sh` |
 | GPU tests | `scripts/run-gpu-tests.sh` (local only) | a GPU kernel or the GPU forward pass disagrees with the CPU or the f32 reference, or the count differs from `tests/gpu/test-count.txt` |
 
 GitHub's runners have no GPU, so CI builds the GPU suite without running it.
-`ci-local.sh` runs it when `nvidia-smi` lists a GPU and otherwise prints a
-`SKIP` line, never a `PASS`; `run-gpu-tests.sh` on its own exits 1 without a
+`ci-local.sh` runs it when `nvidia-smi` lists a GPU and otherwise builds it and
+prints a `SKIP` line for the run, never a `PASS`; `run-gpu-tests.sh` on its own exits 1 without a
 GPU.
 
 The launcher tests run `pytest -rs`, so every skip is listed in the summary,

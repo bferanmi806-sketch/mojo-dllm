@@ -469,6 +469,9 @@ semantic versioning (0.y: minor bumps may break things).
   that stops running no longer looks like a pass. `tests/python/test_workflows.py` checks that every command `ci.yml`
   runs is in `scripts/ci-local.sh` and the reverse (the GPU suite run aside), and runs `ci-local.sh` against stub tools to
   check its exit code and summary lines. `docs/development.md` lists the four required checks.
+- `scripts/check_gpu_test_count.sh` compares the number of `def test_` functions in `tests/gpu/test_*.mojo` with
+  `tests/gpu/test-count.txt` in CI and in `scripts/ci-local.sh`, on every machine (#145). Before, a GPU test added
+  without re-pinning, or a file that stopped defining tests, passed both gates wherever there was no GPU.
 
 ## [0.1.0] - 2026-10-04
 

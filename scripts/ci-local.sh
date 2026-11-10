@@ -125,6 +125,7 @@ if [ "$mode" = full ]; then
     step "tests (count pinned)" bash scripts/run-tests.sh
     step "--device gpu without a GPU fails cleanly" bash scripts/check_no_gpu.sh
     step "--visual-interval errors before model loading" bash scripts/check_visual.sh
+    step "GPU test count matches its pin" bash scripts/check_gpu_test_count.sh
     gpus="$(nvidia-smi -L 2>/dev/null)"
     if grep -q '^GPU ' <<<"$gpus"; then
         step "GPU tests (count pinned)" bash scripts/run-gpu-tests.sh
