@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 import time
@@ -15,12 +16,14 @@ from launcher import build
 from launcher.doctor import preflight, render
 from launcher.errors import LauncherError, UsageError
 from launcher.gpu import Device, choose_device, parse_nvidia_smi
+from launcher.hub import offline_requested
 from launcher.models import DEFAULT_MODEL, Hub, already_downloaded_line, fetch_model, parse_model_ref, plan_model, use_cached
 from launcher.probes import Probes
 from launcher.ui import Style, human_size
 from launcher.verified import VerifiedStore, default_store
 
 SMOKE_PROMPT = "Say hello."
+SMOKE_TIMEOUT_S = 300
 
 
 @dataclass(frozen=True)
@@ -28,11 +31,12 @@ class SetupArgs:
     model: str = DEFAULT_MODEL
     yes: bool = False
     no_model: bool = False
+    offline: bool = False
 
 
 class _Parser(argparse.ArgumentParser):
     def error(self, message: str) -> None:
-        raise UsageError(f"{message}. Usage: ./mojo-dllm setup [--model MODEL] [--yes] [--no-model]")
+        raise UsageError(f"{message}. Usage: ./mojo-dllm setup [--model MODEL] [--yes] [--no-model] [--offline]")
 
 
 def parse_setup_args(argv: list[str]) -> SetupArgs:
@@ -40,8 +44,9 @@ def parse_setup_args(argv: list[str]) -> SetupArgs:
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--yes", action="store_true")
     parser.add_argument("--no-model", action="store_true")
+    parser.add_argument("--offline", action="store_true")
     ns = parser.parse_args(argv)
-    return SetupArgs(model=ns.model, yes=ns.yes, no_model=ns.no_model)
+    return SetupArgs(model=ns.model, yes=ns.yes, no_model=ns.no_model, offline=ns.offline)
 
 
 @dataclass(frozen=True)
@@ -53,6 +58,7 @@ class SetupEnv:
     ask: Callable[[str], str]
     sync: Callable[[], None]
     build: Callable[[], bool]  # True when it compiled, False when the binary was current
+    binary_ready: Callable[[], bool]  # whether build/mojo-dllm exists after the build step
     smoke: Callable[[Path, str], float]
     style: Style
     out: TextIO
@@ -70,8 +76,19 @@ def real_smoke(model: Path, device: str) -> float:
         "--max-tokens", "16", "--steps", "8", "--device", device,
     ]
     start = time.monotonic()
-    if subprocess.run(cmd).returncode != 0:
+    try:
+        done = subprocess.run(cmd, stdout=subprocess.PIPE, text=True, timeout=SMOKE_TIMEOUT_S)
+    except subprocess.TimeoutExpired as e:
+        raise LauncherError(
+            f"the smoke test did not finish within {SMOKE_TIMEOUT_S} s. "
+            "Run ./mojo-dllm doctor to see what is wrong."
+        ) from e
+    if done.returncode != 0:
         raise LauncherError("the smoke test failed. Run ./mojo-dllm doctor to see what is wrong.")
+    if not done.stdout.strip():
+        # Exit 0 with no text is not a working model.
+        raise LauncherError("the smoke test printed nothing. Run ./mojo-dllm doctor to see what is wrong.")
+    sys.stdout.write(done.stdout)
     return time.monotonic() - start
 
 
@@ -104,6 +121,10 @@ def _setup(args: SetupArgs, env: SetupEnv) -> int:
     _step(env, 2, "Build")
     if not env.build():
         print("build/mojo-dllm is up to date", file=out)
+    if not env.binary_ready():
+        raise LauncherError(
+            "the build finished but build/mojo-dllm does not exist. Run bash scripts/build.sh and read its output."
+        )
 
     _step(env, 3, "Model")
     model: Path | None = None
@@ -150,7 +171,8 @@ def _setup(args: SetupArgs, env: SetupEnv) -> int:
         for cmd in outstanding:
             print(f"  {cmd}", file=out)
         return 3
-    print(f"\n{env.style.bold('Setup complete.')}\n\nTry it:", file=out)
+    done = "Setup complete (no smoke test)." if args.no_model else "Setup complete."
+    print(f"\n{env.style.bold(done)}\n\nTry it:", file=out)
     print('  ./mojo-dllm run "Explain speculative decoding in two sentences."', file=out)
     print("  ./mojo-dllm doctor", file=out)
     return 0
@@ -161,21 +183,27 @@ def _confirm(args: SetupArgs, env: SetupEnv, question: str) -> bool:
         return True
     if not env.is_tty:
         return False
-    return env.ask(question).strip().lower() in ("", "y", "yes")
+    try:
+        answer = env.ask(question)
+    except EOFError:  # Ctrl-D at the prompt is a refusal
+        print(file=env.out)
+        return False
+    return answer.strip().lower() in ("", "y", "yes")
 
 
-def real_env() -> SetupEnv:
+def real_env(offline: bool = False) -> SetupEnv:
     from launcher.hub import Hub as RealHub
     from launcher.probes import real_probes
 
     return SetupEnv(
         probes=real_probes(),
-        hub=RealHub(),
+        hub=RealHub(offline=offline_requested(offline, os.environ)),
         store=default_store(),
         is_tty=sys.stdin.isatty() and sys.stdout.isatty(),
         ask=input,
         sync=real_sync,
         build=build.ensure_built,
+        binary_ready=build.BINARY.is_file,
         smoke=real_smoke,
         style=Style.for_stream(sys.stdout),
         out=sys.stdout,

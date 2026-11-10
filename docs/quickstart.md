@@ -28,8 +28,11 @@ afterwards, open a new terminal or run `source ~/.local/bin/env`.
    the hub publishes. `--yes` answers the question for you; `--no-model` skips
    the step; `--model` picks another model.
 4. **Check.** It generates 16 tokens to prove the binary, the model and the
-   device work together.
+   device work together. The check fails when the binary exits non-zero, prints
+   nothing, or runs longer than 300 seconds. With `--no-model` the step is
+   skipped and setup ends with `Setup complete (no smoke test).`
 
+`setup --offline` (or `HF_HUB_OFFLINE=1`) uses the model cache only, as `run` and `pull` do.
 Without a terminal to ask on (a script, CI), `setup` does not download
 anything unless you pass `--yes`. It then exits 3 and prints the command that
 finishes the job.

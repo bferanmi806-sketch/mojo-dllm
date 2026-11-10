@@ -423,6 +423,11 @@ semantic versioning (0.y: minor bumps may break things).
   the pinned Mojo version or the GPU architecture differs from the stamp `build/mojo-dllm.stamp` that a launcher build
   writes (#258). A binary without a stamp is rebuilt once. A `src/` with no `.mojo` file is an error instead of a
   fresh binary, and `doctor` says which of these made the binary stale.
+- `./mojo-dllm setup` no longer reports success on paths where a step did not happen (#259). The smoke test must print
+  text and finish within 300 seconds (a binary that exits 0 with no output, or hangs, is an error). The build step
+  checks that `build/mojo-dllm` exists. `setup --no-model` ends with `Setup complete (no smoke test).`. `setup --offline`
+  and `HF_HUB_OFFLINE=1` use the cache only, as `run` and `pull` do. Ctrl-D at the download question declines it instead
+  of printing a traceback.
 
 ## [0.1.0] - 2026-10-04
 

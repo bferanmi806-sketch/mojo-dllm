@@ -71,6 +71,17 @@ def test_setup_usage_error_exits_2(capsys: pytest.CaptureFixture[str]) -> None:
     assert capsys.readouterr().err.startswith("error:")
 
 
+def test_setup_offline_reaches_the_environment_it_builds(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[object] = []
+    monkeypatch.setattr(cli, "real_env", lambda offline=False: seen.append(("env", offline)) or "ENV")
+    monkeypatch.setattr(cli, "run_setup", lambda args, env: seen.append(("run", args.offline, env)) or 0)
+    assert cli.main(["setup", "--offline"]) == 0
+    assert seen == [("env", True), ("run", True, "ENV")]
+    seen.clear()
+    assert cli.main(["setup"]) == 0
+    assert seen == [("env", False), ("run", False, "ENV")]
+
+
 @pytest.mark.parametrize(
     "argv",
     [

@@ -42,7 +42,7 @@ def help_text(style: Style) -> str:
         "  --version prints the version from pyproject.toml and exits.",
         "",
         b("Options"),
-        "  setup [--model MODEL] [--yes] [--no-model]",
+        "  setup [--model MODEL] [--yes] [--no-model] [--offline]",
         "  pull [MODEL] [--offline]",
         '  run "PROMPT" [-m MODEL] [--device auto|cpu|gpu] [--offline] [binary flags]',
         "",
@@ -90,7 +90,8 @@ def main(argv: list[str]) -> int:
             print(f"mojo-dllm {read_project_version(text)}")
             return 0
         if command == "setup":
-            return run_setup(parse_setup_args(rest), real_env())
+            setup_args = parse_setup_args(rest)
+            return run_setup(setup_args, real_env(offline=setup_args.offline))
         if command == "pull":
             return cmd_pull(rest)
         if command == "run":
