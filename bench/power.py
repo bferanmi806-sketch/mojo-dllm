@@ -146,11 +146,22 @@ class _Watch:
             self.saw_battery = True
 
 
+def power_source(on: bool, state: bool | None) -> str:
+    """`battery`, `mains` or `none`, from the run's own verdict (`on`) and one fresh reading (`state`).
+
+    A battery verdict from either wins: a charger that went between the run and the reading makes the row
+    `battery`, never a row that says `mains` while the machine reads battery. `none` is a machine with no
+    battery or charger to read.
+    """
+    if on or state:
+        return "battery"
+    return "none" if state is None else "mains"
+
+
 def _info(root: pathlib.Path, waited: float, retries: int, on: bool) -> dict:
-    state = on_battery(root)
-    info = {"power_waited_s": waited, "power_retries": retries, "on_battery": on,
-            "power_source": "battery" if on else ("none" if state is None else "mains"),
-            "power_supplies": snapshot(root)}
+    source = power_source(on, on_battery(root))        # read once; `on_battery` is derived from it
+    info = {"power_waited_s": waited, "power_retries": retries, "on_battery": source == "battery",
+            "power_source": source, "power_supplies": snapshot(root)}
     if root != DEFAULT_ROOT:
         info["power_root"] = str(root)
     return info

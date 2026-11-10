@@ -30,6 +30,7 @@ import dataclasses
 import datetime as dt
 import glob
 import json
+import math
 import os
 import pathlib
 import platform
@@ -41,7 +42,7 @@ import sys
 import threading
 import time
 import uuid
-from typing import Any, Callable, Iterator, TypeVar
+from typing import Any, Callable, Iterator, Literal, TypedDict, TypeVar
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import power  # noqa: E402  (bench/power.py)
@@ -88,6 +89,22 @@ class Thresholds:
     swap_pages_max: int = SWAP_PAGES_MAX
     thermal_events_max: int = THERMAL_EVENTS_MAX
     foreign_gpu_pids_max: int = FOREIGN_GPU_PIDS_MAX
+
+    def __post_init__(self) -> None:
+        """A negative or NaN limit makes every window noisy or none, so it is refused when the limits are made."""
+        shares = ("cpu_busy_max", "other_cpu_mean_max", "other_cpu_sample_max")      # a share of all CPUs: 0..1
+        percents = ("psi_avg10_max", "gpu_util_max")                                  # percent: 0..100
+        counts = ("swap_pages_max", "thermal_events_max", "foreign_gpu_pids_max")     # whole numbers from 0
+        for f in dataclasses.fields(self):
+            v = getattr(self, f.name)
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v < 0:
+                raise ValueError(f"threshold {f.name} is {v!r}: it must be a finite number of at least 0")
+            if f.name in shares and v > 1:
+                raise ValueError(f"threshold {f.name} is {v!r}: it is a share of the machine, 0 to 1")
+            if f.name in percents and v > 100:
+                raise ValueError(f"threshold {f.name} is {v!r}: it is a percentage, 0 to 100")
+            if f.name in counts and not isinstance(v, int):
+                raise ValueError(f"threshold {f.name} is {v!r}: it counts whole events or pages")
 
 
 class IsolationError(RuntimeError):
@@ -533,11 +550,19 @@ def present_sources(m: Machine, device: str) -> set[str]:
 # preflight
 
 
+Status = Literal["PASS", "WARN", "FAIL"]
+STATUSES: tuple[str, ...] = ("PASS", "WARN", "FAIL")
+
+
 @dataclasses.dataclass
 class Check:
     name: str
-    status: str          # PASS, WARN or FAIL
+    status: Status
     detail: str
+
+    def __post_init__(self) -> None:
+        if self.status not in STATUSES:
+            raise ValueError(f"check {self.name!r} has status {self.status!r}, not one of {STATUSES}")
 
 
 @dataclasses.dataclass
@@ -820,6 +845,42 @@ def quiet_gate(device: str, *, machine: Machine | None = None, thresholds: Thres
 # the window around one problem
 
 
+class WindowResult(TypedDict):
+    """What `Window.result` holds: one record per problem, read by run_isolated, the eval runners and bench_table."""
+
+    clean: bool
+    reasons: list[str]
+    other_cpu_share_max: float | None
+    other_cpu_share_mean: float | None
+    other_top_processes: list[dict]
+    psi_memory_stall_ms: float | None
+    psi_cpu_stall_ms: float | None
+    swap_pages: float | None
+    thermal_events: float | None
+    gpu_reasons_seen: list[str]
+    gpu_power_capped: bool
+    gpu_foreign_pids: list[int]
+    sm_clock_min_mhz: float | None
+    sm_clock_max_mhz: float | None
+    window_s: float
+    samples: int
+    unavailable: list[str]
+
+
+class IsolationRecord(WindowResult):
+    """A row's `isolation` field: the window plus what `run_isolated` adds. `noisy` is `not clean`, written once,
+    where the record is built, so a reader may use either and a test checks that they agree."""
+
+    retries: int
+    noisy: bool
+    cpu_busy_before: float
+    waited_s: float
+    gate_ok: bool
+    session: str | None
+    allow_noisy: bool
+    preflight_failed_allowed: bool
+
+
 class Window:
     """Samples the machine while one problem runs and reports whether anything else was using it.
 
@@ -844,7 +905,7 @@ class Window:
         self.readings: list[dict] = []
         self.error: BaseException | None = None
         self.stuck = False
-        self.result: dict = {}
+        self.result: WindowResult = {}  # type: ignore[typeddict-item]  # filled by _evaluate on exit
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._t0 = 0.0
@@ -915,7 +976,7 @@ class Window:
                 for pid, (n, t) in used.items()]
         return sorted((r for r in rows if r["percent"] >= 1.0), key=lambda r: -r["percent"])[:5]
 
-    def _evaluate(self) -> dict:
+    def _evaluate(self) -> WindowResult:
         th, rs = self.th, self.readings
         window_s = (rs[-1]["t"] - rs[0]["t"]) if len(rs) >= 2 else 0.0
         reasons: list[str] = []
@@ -1151,11 +1212,12 @@ def run_isolated(fn: Callable[[], T], *, device: str, retries: int = 2, arm: Arm
             break
         attempts += 1
         log(f"noisy window ({'; '.join(win['reasons'])}): repeating, {attempts} of {retries}")
-    iso = {**win, "retries": attempts, "noisy": not win["clean"], "cpu_busy_before": gate["cpu_busy_before"],
-           "waited_s": gate["waited_s"], "gate_ok": gate["ok"],
-           # which start of the arm wrote this row, and whether that start went on past a failed preflight
-           "session": arm.session_id if arm else None, "allow_noisy": bool(arm and arm.allow_noisy),
-           "preflight_failed_allowed": bool(arm and arm.allow_noisy and arm.report.failed)}
+    iso = IsolationRecord(
+        **win, retries=attempts, noisy=not win["clean"], cpu_busy_before=gate["cpu_busy_before"],
+        waited_s=gate["waited_s"], gate_ok=gate["ok"],
+        # which start of the arm wrote this row, and whether that start went on past a failed preflight
+        session=arm.session_id if arm else None, allow_noisy=bool(arm and arm.allow_noisy),
+        preflight_failed_allowed=bool(arm and arm.allow_noisy and arm.report.failed))
     return result, {**pinfo, "isolation": iso}
 
 
