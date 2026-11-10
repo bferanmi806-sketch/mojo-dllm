@@ -61,6 +61,7 @@ def help_text(style: Style) -> str:
         "  HF_TOKEN             Hugging Face token, for gated or private repos",
         "  HF_HOME              Hugging Face home; models live in $HF_HOME/hub",
         "  HF_HUB_CACHE         the model cache directory (overrides HF_HOME)",
+        "  XDG_CACHE_HOME       cache root when HF_HOME is unset; mojo-dllm keeps verified.json under it",
         "  HF_HUB_OFFLINE=1     same as --offline: use the cache only",
         "  MOJO_DLLM_GPU_ARCH   GPU architecture to build for, such as sm_86",
         "  NO_COLOR             turn colour off",

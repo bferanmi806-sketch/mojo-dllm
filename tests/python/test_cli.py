@@ -17,6 +17,28 @@ ROOT = Path(__file__).resolve().parents[2]
 ENV_VARS = ["HF_TOKEN", "HF_HOME", "HF_HUB_CACHE", "MOJO_DLLM_GPU_ARCH"]
 
 
+def _help_section(title: str) -> list[str]:
+    lines = cli.help_text(Style(False)).splitlines()
+    start = lines.index(title)
+    end = next((i for i in range(start + 1, len(lines)) if lines[i] and not lines[i].startswith(" ")), len(lines))
+    return lines[start + 1 : end]
+
+
+def test_the_command_rows_of_the_help_are_the_launcher_commands() -> None:
+    rows = [m.group(1) for line in _help_section("Commands") if (m := re.match(r"^  ([a-z]+) {2,}\S", line))]
+    assert rows == list(cli.LAUNCHER_COMMANDS)
+
+
+def test_the_help_names_every_environment_variable_the_launcher_reads() -> None:
+    reads: set[str] = set()
+    for source in sorted((ROOT / "launcher").glob("*.py")):
+        reads |= set(re.findall(r'(?:env|environ)(?:\.get\(|\[)\s*"([A-Z][A-Z0-9_]+)"', source.read_text()))
+    documented = {line.split()[0].split("=")[0] for line in _help_section("Environment")}
+    assert reads >= {"HF_HUB_CACHE", "HF_HOME", "XDG_CACHE_HOME", "HF_HUB_OFFLINE", "MOJO_DLLM_GPU_ARCH"}, reads
+    assert reads <= documented, sorted(reads - documented)
+    assert {"HF_TOKEN", "NO_COLOR"} <= documented  # read by the hub library and by ui
+
+
 def test_help_lists_every_command_and_the_environment() -> None:
     text = cli.help_text(Style(False))
     for name in COMMANDS:
@@ -145,13 +167,23 @@ def test_a_word_close_to_nothing_still_points_at_help(
     assert "did you mean" not in err and "./mojo-dllm help" in err
 
 
+class _Exec(Exception):
+    """Raised by the fake execv: the real one never returns, so main must not run on after it."""
+
+
 @pytest.mark.parametrize("command", ["inspect", "tokenize", "logits"])
 def test_each_binary_command_is_forwarded(command: str, monkeypatch: pytest.MonkeyPatch) -> None:
-    seen: list[list[str]] = []
+    seen: list[tuple[str, list[str]]] = []
+
+    def execv(path: str, argv: list[str]) -> None:
+        seen.append((path, argv))
+        raise _Exec
+
     monkeypatch.setattr(cli, "ensure_built", lambda: False)
-    monkeypatch.setattr(os, "execv", lambda path, argv: seen.append(argv))
-    cli.main([command, "--x"])
-    assert seen == [[str(cli.BINARY), command, "--x"]]
+    monkeypatch.setattr(os, "execv", execv)
+    with pytest.raises(_Exec):
+        cli.main([command, "--x"])
+    assert seen == [(str(cli.BINARY), [str(cli.BINARY), command, "--x"])]
 
 
 def test_binary_commands_match_src_main_mojo() -> None:

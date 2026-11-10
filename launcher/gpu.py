@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -48,6 +49,10 @@ def parse_nvidia_smi(text: str) -> list[Gpu]:
         parts = [p.strip() for p in line.rsplit(",", 4 if has_ids else 2)]
         try:
             if len(parts) != (5 if has_ids else 3) or not parts[0]:
+                raise ValueError
+            # float() accepts "nan" and "inf" ("inf" would pass the capability check), int() accepts "-5".
+            cap = float(parts[1])
+            if not math.isfinite(cap) or cap <= 0 or int(parts[2]) < 0:
                 raise ValueError
             if has_ids:
                 gpus.append(Gpu(parts[0], float(parts[1]), int(parts[2]), int(parts[3]), parts[4]))

@@ -87,7 +87,7 @@ def check_toolchain(p: Probes) -> Check:
         why = f"mojo {p.mojo_pin} could not be run in .venv: {p.mojo_failure}" if p.mojo_failure else (
             f"mojo {p.mojo_pin} is not installed in .venv")
         return Check("fail", "toolchain", why, "./mojo-dllm setup")
-    match = re.search(r"\d+\.\d+\.\d+", p.mojo_version_output)
+    match = re.search(r"\d+\.\d+\.\d+[0-9A-Za-z.+!-]*", p.mojo_version_output)
     found = match.group(0) if match else p.mojo_version_output.strip()
     if found != p.mojo_pin:
         return Check("fail", "toolchain", f"mojo {found} found, pyproject.toml pins {p.mojo_pin}", "uv sync --frozen")

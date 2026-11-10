@@ -119,9 +119,68 @@ def test_no_glibc_fails() -> None:
     assert code == 1 and next(line for line in lines if "glibc" in line).startswith("✗")
 
 
-def test_wrong_platform_fails() -> None:
-    assert doctor(system="Darwin")[0] == 1
-    assert doctor(machine="aarch64")[0] == 1
+@pytest.mark.parametrize("overrides", [{"system": "Darwin"}, {"machine": "aarch64"}, {"system": "Windows", "machine": "AMD64"}])
+def test_wrong_platform_fails_on_the_platform_line_alone(overrides: dict[str, str]) -> None:
+    code, lines = doctor(**overrides)
+    failed = [line.split()[1] for line in lines if line.startswith("✗")]
+    assert code == 1 and failed == ["platform"]
+    assert "needs Linux x86_64" in next(line for line in lines if line.startswith("✗"))
+
+
+@pytest.mark.parametrize(("glibc", "status"), [("2.33", "✗"), ("2.34", "✓"), ("2.35", "✓"), ("2.100", "✓"), ("3.0", "✓"), ("2.9", "✗")])
+def test_glibc_boundary(glibc: str, status: str) -> None:
+    _, lines = doctor(glibc=glibc)
+    assert next(line for line in lines if " glibc " in line).startswith(status)
+
+
+@pytest.mark.parametrize(("kb", "status"), [(6 * 1024 * 1024, "✓"), (6 * 1024 * 1024 - 1, "!"), (6 * 1024 * 1024 + 1, "✓")])
+def test_memory_boundary_is_exactly_6_gib(kb: int, status: str) -> None:
+    _, lines = doctor(meminfo=f"MemAvailable: {kb} kB\n")
+    assert next(line for line in lines if " memory " in line).startswith(status)
+
+
+def test_a_meminfo_without_memavailable_warns() -> None:
+    code, lines = doctor(meminfo="MemTotal: 16000000 kB\n")
+    line = next(line for line in lines if " memory " in line)
+    assert code == 0 and line.startswith("!") and "MemAvailable not readable" in line
+
+
+def test_an_empty_nvidia_smi_listing_warns_that_it_lists_no_device() -> None:
+    code, lines = doctor(gpu_text="", driver_text=None)
+    line = next(line for line in lines if " gpu " in line)
+    assert code == 0 and line.startswith("!") and "lists no device" in line
+
+
+def test_a_missing_driver_text_leaves_the_driver_out_of_a_good_gpu_line() -> None:
+    line = next(line for line in doctor(driver_text=None)[1] if " gpu " in line)
+    assert line.startswith("✓") and "driver" not in line
+    assert "driver" not in next(line for line in doctor(driver_text="\n")[1] if " gpu " in line)
+
+
+def test_a_mixed_gpu_list_uses_the_first_card_that_qualifies() -> None:
+    text = "GTX 1650, 7.5, 3900\nNVIDIA A100, 8.0, 40000\nRTX 4090, 8.9, 24000\n"
+    line = next(line for line in doctor(gpu_text=text)[1] if " gpu " in line)
+    assert line.startswith("✓") and "A100" in line and "4090" not in line and "1650" not in line
+
+
+def test_a_list_of_only_old_cards_names_the_first() -> None:
+    line = next(line for line in doctor(gpu_text="GTX 1650, 7.5, 3900\nGTX 1080, 6.1, 8000\n")[1] if " gpu " in line)
+    assert line.startswith("!") and "GTX 1650" in line and "7.5" in line
+
+
+def test_garbage_from_mojo_version_fails_and_shows_it() -> None:
+    code, lines = doctor(mojo_version_output="command not found\n")
+    line = next(line for line in lines if " toolchain " in line)
+    assert code == 1 and line.startswith("✗") and "command not found" in line and "1.1.0" in line
+
+
+def test_a_pin_with_a_suffix_matches_the_same_suffix_in_the_version_output() -> None:
+    _, lines = doctor(mojo_pin="1.1.0.dev1", mojo_version_output="Mojo 1.1.0.dev1 (abc123)\n")
+    assert next(line for line in lines if " toolchain " in line).startswith("✓")
+    _, lines = doctor(mojo_pin="1.1.0.dev1", mojo_version_output="Mojo 1.1.0 (abc123)\n")
+    assert next(line for line in lines if " toolchain " in line).startswith("✗")
+    _, lines = doctor(mojo_pin="1.1.0", mojo_version_output="Mojo 1.1.0.dev1 (abc123)\n")
+    assert next(line for line in lines if " toolchain " in line).startswith("✗")
 
 
 def test_no_avx2_fails() -> None:

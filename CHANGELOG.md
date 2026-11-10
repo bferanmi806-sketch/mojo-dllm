@@ -454,6 +454,10 @@ semantic versioning (0.y: minor bumps may break things).
 - `./mojo-dllm setup` uses the CPU, and says why in the `device:` line, when `nvidia-smi` prints a listing the launcher
   cannot read, instead of stopping with an error after the model download (`doctor` already treated that case as a
   warning) (#267).
+- The launcher's `doctor` accepts a pinned Mojo version with a suffix (`1.1.0.dev1`) when `mojo --version` prints the
+  same suffix; it compared only the first three numbers and reported a mismatch. `nvidia-smi` rows with a non-finite or
+  non-positive compute capability or a negative memory figure are treated as unreadable (`inf` used to pass the Ampere
+  check). `./mojo-dllm help` lists `XDG_CACHE_HOME`, which the launcher reads (#269).
 
 ## [0.1.0] - 2026-10-04
 
