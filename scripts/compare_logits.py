@@ -44,6 +44,40 @@ def version(root: pathlib.Path) -> str:
     return v + ("-dirty" if dirty else "")
 
 
+def require_finite(rows: list[array], label: str) -> None:
+    """Refuse a NaN or an infinity in any row: a broken kernel must not leave a healthy-looking record."""
+    for r, values in enumerate(rows):
+        if not all(map(math.isfinite, values)):
+            raise SystemExit(f"compare_logits: {label} logits hold a non-finite value in row {r}")
+
+
+def cos(x: array, y: array) -> float:
+    nx, ny = sum(p * p for p in x), sum(q * q for q in y)
+    if nx == 0.0 or ny == 0.0:
+        raise SystemExit("compare_logits: a logit row has zero norm, so its cosine is undefined")
+    return sum(p * q for p, q in zip(x, y)) / math.sqrt(nx * ny)
+
+
+def argmax(x: array) -> int:
+    return max(range(len(x)), key=x.__getitem__)
+
+
+def median(xs: list[float]) -> float:
+    """The middle value, or the mean of the middle pair for an even count."""
+    if not xs:
+        raise SystemExit("compare_logits: no values to take a median of")
+    s = sorted(xs)
+    mid = len(s) // 2
+    return s[mid] if len(s) % 2 else (s[mid - 1] + s[mid]) / 2
+
+
+def summarize(X: list[array], ref: list[array], prompt_rows: int) -> dict:
+    """Per-row cosine to the reference (median, minimum, minimum over the masked rows) and the argmax agreement."""
+    c = [cos(x, r) for x, r in zip(X, ref)]
+    return dict(median_cosine=median(c), min_cosine=min(c), masked_rows_min_cosine=min(c[prompt_rows:]),
+                argmax_agree_with_cpu=sum(argmax(x) == argmax(r) for x, r in zip(X, ref)))
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", required=True)
@@ -70,30 +104,22 @@ def main() -> int:
         if len(a) % len(rows):
             raise SystemExit(f"logits file holds {len(a)} floats, not a multiple of {len(rows)} rows")
         vocab = len(a) // len(rows)
-        return [a[r * vocab:(r + 1) * vocab] for r in rows]
-
-    def cos(x: array, y: array) -> float:
-        return sum(p * q for p, q in zip(x, y)) / math.sqrt(sum(p * p for p in x) * sum(q * q for q in y))
-
-    def argmax(x: array) -> int:
-        return max(range(len(x)), key=x.__getitem__)
+        out = [a[r * vocab:(r + 1) * vocab] for r in rows]
+        require_finite(out, f"{root.name} {device}")
+        return out
 
     ref = logits(base, "cpu")
-    ref_top = [argmax(r) for r in ref]
     A, B = logits(base, "gpu"), logits(new, "gpu")
 
     def summary(X: list[array]) -> dict:
-        c = [cos(X[r], ref[r]) for r in rows]
-        s = sorted(c)
-        return dict(median_cosine=s[len(s) // 2], min_cosine=s[0], masked_rows_min_cosine=min(c[len(toks):]),
-                    argmax_agree_with_cpu=sum(argmax(X[r]) == ref_top[r] for r in rows))
+        return summarize(X, ref, len(toks))
 
-    ab = sorted(cos(A[r], B[r]) for r in rows)
+    ab = [cos(A[r], B[r]) for r in rows]
     doc = dict(
         date=dt.date.today().isoformat(), model=pathlib.Path(model).name, rows=len(rows), prompt_rows=len(toks),
         method="logits for every row of the prompt plus masked tokens; per-row cosine against the base checkout's f32 CPU run",
         base=dict(version=version(base), **summary(A)), new=dict(version=version(new), **summary(B)),
-        base_vs_new=dict(median_cosine=ab[len(ab) // 2], min_cosine=ab[0],
+        base_vs_new=dict(median_cosine=median(ab), min_cosine=min(ab),
                          argmax_agree=sum(argmax(A[r]) == argmax(B[r]) for r in rows)),
     )
     out = pathlib.Path(args.out)
