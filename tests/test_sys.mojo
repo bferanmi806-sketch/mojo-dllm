@@ -1,3 +1,6 @@
+from std.ffi import c_int, external_call
+from std.os import remove
+from std.os.path import exists
 from std.testing import assert_equal, assert_true, assert_raises, TestSuite
 
 from mojo_dllm.sys.mem import Bytes, Floats, alloc_bytes, free_bytes
@@ -38,6 +41,17 @@ def test_impossible_allocation_raises() raises:
     # Exceeds the virtual address space on x86-64 Linux; never touch pages.
     with assert_raises(contains="out of memory: could not allocate"):
         var addr = alloc_bytes(1 << 50, zero=False)
+        free_bytes(addr)
+
+
+def test_sizes_that_overflow_raise_with_a_name() raises:
+    # n * 4 wraps to 0 for 2^62: the old code returned a 64-byte block for it.
+    with assert_raises(contains="cannot allocate 4611686018427387904 floats"):
+        _ = Floats(1 << 62)
+    with assert_raises(contains="cannot allocate 2305843009213693952 floats"):
+        _ = Floats(Int.MAX // 4 + 1)
+    with assert_raises(contains="cannot allocate 9223372036854775807 bytes"):
+        var addr = alloc_bytes(Int.MAX, zero=False)
         free_bytes(addr)
 
 
@@ -95,11 +109,40 @@ def test_mapping_reports_the_errno_of_the_failure() raises:
 
 def test_mapping_empty_file() raises:
     with assert_raises(
-        contains=(
-            "file is empty or unreadable: tests/fixtures/malformed/empty.gguf"
-        )
+        contains="file is empty: tests/fixtures/malformed/empty.gguf"
     ):
         _ = Mapping("tests/fixtures/malformed/empty.gguf")
+
+
+def test_mapping_reports_the_errno_when_mmap_fails() raises:
+    # A sysfs attribute reports a size of 4096 and cannot be mapped: mmap
+    # answers ENODEV, which the message must carry.
+    var path = "/sys/kernel/uevent_seqnum"
+    if not exists(path):
+        return
+    with assert_raises(contains="mmap failed for " + path + ": No such device"):
+        _ = Mapping(path)
+
+
+def test_mapping_reports_the_errno_when_the_size_cannot_be_read() raises:
+    # A FIFO opens and answers pread and lseek with ESPIPE. An open writer
+    # keeps the read-only open from blocking.
+    var path = String("build/tests/seek.fifo")
+    if exists(path):
+        remove(path)
+    var cpath = path
+    if (
+        external_call["mkfifo", c_int](cpath.as_c_string_span(), c_int(0o600))
+        != 0
+    ):
+        return
+    var keeper = open(path, "rw")
+    with assert_raises(
+        contains="cannot get the size of " + path + ": Illegal seek"
+    ):
+        _ = Mapping(path)
+    keeper.close()
+    remove(path)
 
 
 def test_mapping_rejects_directory() raises:
@@ -123,6 +166,67 @@ def test_page_ranges() raises:
     assert_equal(aligned_hi, 8192)
     # Read-back after madvise cannot establish whether a page was dropped:
     # file-backed mappings read the same bytes again. Test the range directly.
+
+
+def _refuses_advice(offset: Int, size: Int) raises:
+    # Every size here is under a page, so even a guard that is mutated away
+    # only reaches `madvise` with an empty range of whole pages for `drop`.
+    var m = Mapping("tests/fixtures/bad-magic.gguf")
+    assert_equal(m.size, 64)
+    var want = "outside the 64-byte mapping of tests/fixtures/bad-magic.gguf"
+    with assert_raises(
+        contains="drop range ["
+        + String(offset)
+        + ", +"
+        + String(size)
+        + ") is "
+        + want
+    ):
+        m.drop(offset, size)
+    with assert_raises(
+        contains="populate range ["
+        + String(offset)
+        + ", +"
+        + String(size)
+        + ") is "
+        + want
+    ):
+        m.populate(offset, size)
+
+
+def test_mapping_advice_refuses_a_range_below_zero() raises:
+    _refuses_advice(-1, 8)
+    _refuses_advice(0, -1)
+    _refuses_advice(-64, 64)
+
+
+def test_mapping_advice_refuses_a_range_past_the_end() raises:
+    _refuses_advice(0, 65)
+    _refuses_advice(1, 64)
+    _refuses_advice(65, 0)
+    _refuses_advice(64, 1)
+
+
+def test_mapping_advice_refuses_a_range_that_wraps() raises:
+    # offset + size wraps negative, so a check written as a sum accepts these.
+    _refuses_advice(8, Int.MAX)
+    _refuses_advice(Int.MAX, 8)
+    _refuses_advice(Int.MAX - 3, 8)
+
+
+def test_mapping_advice_accepts_ranges_inside_the_map() raises:
+    var m = Mapping("tests/fixtures/bad-magic.gguf")
+    m.populate(0, 64)
+    m.populate(32, 32)
+    m.populate(64, 0)
+    m.populate(0, 0)
+    m.drop(0, 64)
+    m.drop(32, 32)
+    m.drop(64, 0)
+    # The bytes are still readable after the advice.
+    var expected = "GGUX".as_bytes()
+    for i in range(4):
+        assert_equal(m.ptr().unsafe_load(i), expected[i])
 
 
 def check_parallel(n: Int, threads: Int) raises:

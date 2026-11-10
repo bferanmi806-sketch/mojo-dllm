@@ -1,0 +1,9 @@
+{
+  "sm_count": 156,
+  "mojo": "1.1.0 (8189361e)",
+  "max_core": "26.6.0",
+  "compiled_for": "sm_120",
+  "host_note": "Other GPUs on the shared host had existing workloads. No power or clock settings were changed.",
+  "source_note": "Both models use mradermacher Q4_K_M GGUF files. The raw files record their names, byte sizes, GPU identities, source commits and every run. The source URLs were the corresponding Hugging Face repository resolve/main endpoints, accessed through hf-mirror.com on 2026-10-30.",
+  "recorded": "These values were typed into bench/report_gpu_dispatch.py when the measurement was made; the timing files of that run did not hold them. This file records them beside the evidence they describe."
+}

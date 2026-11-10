@@ -32,7 +32,6 @@ dotted with the activation sums, as in `qgemm.mojo`.
 
 from std.memory import bitcast
 from std.sys import CompilationTarget, llvm_intrinsic
-from max.algorithm import parallelize
 
 from mojo_dllm.formats.gguf import (
     GGML_Q5_0,
@@ -45,7 +44,11 @@ from mojo_dllm.formats.gguf import (
 from mojo_dllm.kernels.qgemm import QActs
 from mojo_dllm.quant.kquants import load_f16, q4k_scale_min
 from mojo_dllm.sys.mem import Bytes, F32Ptr, I8Ptr, U8Ptr
-from mojo_dllm.sys.parallel import parallel_for
+from mojo_dllm.sys.parallel import (
+    parallel_for,
+    parallel_for_counted,
+    worker_count,
+)
 
 comptime QK = 256
 comptime P4_SB = 1216
@@ -54,10 +57,29 @@ comptime P32_SB = 288
 """Per 32 weights: f32 scales[8], then 8 steps x 4 bytes x 8 rows."""
 comptime TOK_TILE_Q4 = 8
 """Tokens per register tile for Q4_K: 8 independent vpdpbusd chains hide its
-5-cycle latency (measured +10% over 4 on an i5-13420H)."""
+latency."""
 comptime TOK_TILE_Q6 = 4
-"""Q6_K keeps 4: its unpacked byte layout needs more registers, and 8 measured 9% slower."""
+"""Tokens per register tile for Q6_K, Q5_0 and Q8_0. Q6_K keeps 4 because its
+unpacked byte layout needs more registers; the 32-wide types share the value."""
 comptime GROUPS_PER_ITEM = 2
+
+
+def matrix_bytes(row_bytes: Int, rows: Int) raises -> Int:
+    """Bytes of `rows` rows of `row_bytes` each; raises when they do not fit an
+    Int, so an untrusted shape cannot wrap into a small size."""
+    if (
+        rows < 0
+        or row_bytes < 0
+        or (row_bytes > 0 and rows > Int.MAX // row_bytes)
+    ):
+        raise Error(
+            "a matrix of "
+            + String(rows)
+            + " rows of "
+            + String(row_bytes)
+            + " bytes is too large to size"
+        )
+    return rows * row_bytes
 
 
 struct PackedMatrix(Movable):
@@ -68,8 +90,26 @@ struct PackedMatrix(Movable):
     var data: Bytes
     var group_bytes: Int
     """Bytes per 8-row group across all blocks."""
+    var repack_workers: Int
+    """Workers that ran the repack: the setting, capped by the 8-row groups."""
 
-    def __init__(out self, src_addr: Int, kind: Int, N: Int, K: Int) raises:
+    def __init__(
+        out self,
+        src_addr: Int,
+        src_bytes: Int,
+        kind: Int,
+        N: Int,
+        K: Int,
+        threads: Int = 0,
+    ) raises:
+        """Repacks `N` rows of `K` weights of type `kind` from `src_addr`, the
+        8-row groups in parallel on `worker_count(threads)` workers. Each
+        group is independent, so the count cannot change a byte.
+
+        `src_bytes` is what the caller knows the source to hold. It must equal
+        the bytes of N rows exactly, so a shape that disagrees with the tensor
+        it was taken from is an error and not a read past the tensor.
+        """
         if (
             kind != GGML_Q4_K
             and kind != GGML_Q6_K
@@ -91,6 +131,21 @@ struct PackedMatrix(Movable):
                 + "multiple of "
                 + String(block_size)
             )
+        var row_bytes = ggml_row_bytes(kind, K)
+        var want = matrix_bytes(row_bytes, N)
+        if src_bytes != want:
+            raise Error(
+                "the source holds "
+                + String(src_bytes)
+                + " bytes, but "
+                + String(N)
+                + " rows of "
+                + String(K)
+                + " "
+                + ggml_type_name(kind)
+                + " values take "
+                + String(want)
+            )
         self.kind = kind
         self.N = N
         self.K = K
@@ -104,7 +159,6 @@ struct PackedMatrix(Movable):
         self.data = Bytes((N // 8) * self.group_bytes, zero=False)
         var dst_base = self.data.addr
         var gb = self.group_bytes
-        var row_bytes = ggml_row_bytes(kind, K)
         var is_q4 = kind == GGML_Q4_K
 
         def work(grp: Int) {imm}:
@@ -125,7 +179,9 @@ struct PackedMatrix(Movable):
                     else:
                         _pack_32_row(src, dst, r, kind)
 
-        parallelize(work, N // 8)
+        self.repack_workers = parallel_for_counted(
+            work, N // 8, worker_count(threads)
+        )
 
 
 def _pack_32_row(blk: U8Ptr, dst: U8Ptr, r: Int, kind: Int):

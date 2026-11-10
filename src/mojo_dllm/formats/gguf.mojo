@@ -4,13 +4,18 @@ The header, the key/value block and the tensor directory are parsed once at
 open. Scalar values are decoded on demand from their recorded offset, and
 tensor data is never copied: a tensor is an absolute offset into the mapping.
 
-Every read is bounds-checked. A GGUF file is untrusted input, and an unchecked
-length prefix on a memory map turns into a segfault instead of an error.
-Integers are assembled from bytes, so no read depends on alignment.
+Every read of the header, the metadata and the tensor directory goes through
+`Reader`, which checks it against the bytes left in the file. A GGUF file is
+untrusted input, and an unchecked length prefix on a memory map turns into a
+segfault instead of an error. Integers are assembled from bytes, so no read
+depends on alignment. Tensor bytes are not read here: `GGUFFile.__init__`
+checks each tensor's extent against the file.
 """
 
+from std.collections import Dict
 from std.memory import bitcast
 
+from mojo_dllm.formats.utf8 import utf8_first_invalid
 from mojo_dllm.sys.mmap import Mapping
 from mojo_dllm.sys.mem import U8Ptr
 
@@ -94,38 +99,65 @@ def ggml_type_name(t: Int) -> String:
     return "type#" + String(t)
 
 
-def ggml_row_bytes(t: Int, n: Int) raises -> Int:
-    """Bytes that `n` elements of type `t` occupy. Unsupported types raise."""
+def ggml_block_bytes(t: Int) -> Int:
+    """Bytes in one block of type `t`, or 0 for a type this reader cannot size.
+
+    F32, F16 and BF16 have blocks of one element.
+    """
     if t == GGML_F32:
-        return n * 4
+        return 4
     if t == GGML_F16 or t == GGML_BF16:
-        return n * 2
+        return 2
     if t == GGML_Q5_0:
-        return n // 32 * 22
+        return 22
     if t == GGML_Q8_0:
-        return n // 32 * 34
+        return 34
     if t == GGML_Q4_K:
-        return n // 256 * 144
+        return 144
     if t == GGML_Q5_K:
-        return n // 256 * 176
+        return 176
     if t == GGML_Q6_K:
-        return n // 256 * 210
-    raise Error("unsupported GGUF tensor type: " + ggml_type_name(t))
-
-
-def _tensor_bytes(t: Int, ne0: Int, rows: Int) -> Int:
-    try:
-        return ggml_row_bytes(t, ne0) * rows
-    except:
-        return -1
+        return 210
+    return 0
 
 
 def ggml_block_size(t: Int) -> Int:
+    """Elements in one block of type `t`."""
     if t == GGML_Q5_0 or t == GGML_Q8_0:
         return 32
     if t == GGML_Q4_K or t == GGML_Q5_K or t == GGML_Q6_K:
         return 256
     return 1
+
+
+def ggml_row_bytes(t: Int, n: Int) raises -> Int:
+    """Bytes that `n` elements of type `t` occupy. Unsupported types raise, and
+    so does an `n` that ends in a partial block or whose size does not fit an Int.
+    """
+    var block_bytes = ggml_block_bytes(t)
+    if block_bytes == 0:
+        raise Error("unsupported GGUF tensor type: " + ggml_type_name(t))
+    var block = ggml_block_size(t)
+    if n < 0 or n % block != 0:
+        raise Error(
+            "row length "
+            + String(n)
+            + " is not a multiple of the "
+            + ggml_type_name(t)
+            + " block size "
+            + String(block)
+        )
+    var blocks = n // block
+    # Divide first: multiplying an untrusted length can wrap.
+    if blocks > Int.MAX // block_bytes:
+        raise Error(
+            "a row of "
+            + String(n)
+            + " "
+            + ggml_type_name(t)
+            + " elements is too large to size"
+        )
+    return blocks * block_bytes
 
 
 @fieldwise_init
@@ -152,6 +184,10 @@ struct TensorInfo(Copyable, ImplicitlyCopyable, Movable):
     var data_offset: Int
     """Absolute offset of the first byte in the mapping."""
     var n_bytes: Int
+    """Bytes the tensor occupies; 0 when the type is not `supported`."""
+    var supported: Bool
+    """Whether the type has a size here (`ggml_block_bytes`). `inspect` lists a
+    tensor of any other type, and every loader refuses it."""
 
     def n_elements(self) -> Int:
         return self.ne0 * self.ne1 * self.ne2 * self.ne3
@@ -183,13 +219,23 @@ struct Reader(Movable):
     var size: Int
     var at: Int
 
-    def __init__(out self, base: Int, size: Int, at: Int = 0):
+    def __init__(out self, base: Int, size: Int, at: Int = 0) raises:
+        if at < 0 or at > size:
+            raise Error(
+                "GGUF read position "
+                + String(at)
+                + " is outside the file of "
+                + String(size)
+                + " bytes"
+            )
         self.base = base
         self.size = size
         self.at = at
 
     def _need(self, n: Int) raises:
-        if n < 0 or self.at + n > self.size:
+        # `at <= size` holds from construction on, so `size - at` cannot wrap.
+        # `at + n` can: a length near 2^63 would pass a check written that way.
+        if n < 0 or n > self.size - self.at:
             raise Error(
                 "GGUF file truncated: wanted "
                 + String(n)
@@ -224,19 +270,49 @@ struct Reader(Movable):
         self._need(n)
         self.at += n
 
-    def string(mut self) raises -> String:
+    def string_at(mut self) raises -> Tuple[Int, Int]:
+        """The file offset and the length of the string at the read head, and
+        moves past it. The bytes are not looked at."""
         var n = Int(self.u64())
         self._need(n)
-        var p = U8Ptr(unsafe_from_address=self.base + self.at)
-        var s = String(
-            StringSpan(unsafe_from_utf8=Span(unsafe_ptr=p, length=n))
-        )
+        var start = self.at
         self.at += n
-        return s
+        return (start, n)
+
+    def string(mut self) raises -> String:
+        """The next string. Its bytes must be valid UTF-8: `String` operations
+        assume it, and a token text or a key read from an untrusted file would
+        otherwise reach `repr`, `replace` and the tokenizers unchecked. A file
+        with such a string is refused and the error says where."""
+        var start, n = self.string_at()
+        var span = Span(
+            unsafe_ptr=U8Ptr(unsafe_from_address=self.base + start), length=n
+        )
+        var bad = utf8_first_invalid(span)
+        if bad >= 0:
+            raise Error(
+                "string at file offset "
+                + String(start)
+                + " is not valid UTF-8: byte "
+                + String(bad)
+                + " of "
+                + String(n)
+                + " is 0x"
+                + _hex_byte(span[bad])
+            )
+        return String(StringSpan(unsafe_from_utf8=span))
 
     def skip_string(mut self) raises:
         var n = Int(self.u64())
         self.skip(n)
+
+
+def _hex_byte(b: UInt8) -> String:
+    var digits = "0123456789ABCDEF".as_bytes()
+    var out = List[UInt8]()
+    out.append(digits[Int(b) >> 4])
+    out.append(digits[Int(b) & 15])
+    return String(StringSpan(unsafe_from_utf8=Span(out)))
 
 
 def _scalar_size(kind: Int) raises -> Int:
@@ -305,8 +381,24 @@ struct GGUFFile(Movable):
         if n_tensors < 0 or n_kv < 0 or n_tensors > 1 << 20 or n_kv > 1 << 20:
             raise Error("GGUF header counts are implausible")
 
-        for _ in range(n_kv):
-            var key = r.string()
+        var seen_keys = Dict[String, Int]()
+        for i in range(n_kv):
+            var key: String
+            try:
+                key = r.string()
+            except e:
+                raise Error("metadata entry " + String(i) + ": " + String(e))
+            if key in seen_keys:
+                raise Error(
+                    "metadata key "
+                    + key
+                    + " is listed twice (entries "
+                    + String(seen_keys[key])
+                    + " and "
+                    + String(i)
+                    + ")"
+                )
+            seen_keys[key] = i
             var kind = Int(r.u32())
             if key == "general.alignment" and kind != GGUF_TYPE_UINT32:
                 raise Error(
@@ -359,33 +451,133 @@ struct GGUFFile(Movable):
                         )
 
         var rel = List[Int]()
-        for _ in range(n_tensors):
-            var name = r.string()
+        var raw_rel = List[UInt64]()
+        var seen_names = Dict[String, Int]()
+        for i in range(n_tensors):
+            var name: String
+            try:
+                name = r.string()
+            except e:
+                raise Error("tensor entry " + String(i) + ": " + String(e))
+            if name in seen_names:
+                raise Error(
+                    "tensor "
+                    + name
+                    + " is listed twice (entries "
+                    + String(seen_names[name])
+                    + " and "
+                    + String(i)
+                    + ")"
+                )
+            seen_names[name] = i
             var n_dims = Int(r.u32())
             if n_dims < 1 or n_dims > 4:
                 raise Error(
                     "tensor " + name + " has " + String(n_dims) + " dims"
                 )
             var ne = List[Int](length=4, fill=1)
+            var elements = 1
             for d in range(n_dims):
-                ne[d] = Int(r.u64())
+                var raw_dim = r.u64()
+                var dim = Int(raw_dim)
+                if dim < 1:
+                    raise Error(
+                        "tensor "
+                        + name
+                        + " has dimension "
+                        + String(d)
+                        + " of "
+                        + String(raw_dim)
+                        + "; every dimension must be at least 1"
+                    )
+                # Divide first: multiplying untrusted dimensions can wrap.
+                if dim > Int.MAX // elements:
+                    raise Error("tensor " + name + " has too many elements")
+                elements *= dim
+                ne[d] = dim
             var t = Int(r.u32())
-            var off = Int(r.u64())
-            rel.append(off)
-            # -1 marks an unsupported type: `inspect` lists it, loaders refuse it.
-            var nb = _tensor_bytes(t, ne[0], ne[1] * ne[2] * ne[3])
+            var raw_off = r.u64()
+            rel.append(Int(raw_off))
+            raw_rel.append(raw_off)
+            # A type with no size here (`supported` False) is listed by
+            # `inspect` and refused by every loader; it has no byte count.
+            var block_bytes = ggml_block_bytes(t)
+            var supported = block_bytes > 0
+            var n_bytes = 0
+            if supported:
+                var block = ggml_block_size(t)
+                if ne[0] % block != 0:
+                    raise Error(
+                        "tensor "
+                        + name
+                        + " is "
+                        + ggml_type_name(t)
+                        + " with "
+                        + String(ne[0])
+                        + " elements per row, which is not a multiple of its"
+                        " block size "
+                        + String(block)
+                    )
+                # Every size below is checked against the whole file by
+                # dividing first, so none of the products can wrap. The
+                # position of the tensor inside the file comes after the
+                # directory has been read.
+                var extends = (
+                    "tensor " + name + " extends past the end of the file"
+                )
+                var blocks = ne[0] // block
+                if blocks > self.map.size // block_bytes:
+                    raise Error(extends)
+                var row_bytes = blocks * block_bytes
+                var rows = ne[1] * ne[2] * ne[3]
+                if rows > self.map.size // row_bytes:
+                    raise Error(extends)
+                n_bytes = row_bytes * rows
             self.tensors.append(
-                TensorInfo(name, n_dims, ne[0], ne[1], ne[2], ne[3], t, 0, nb)
+                TensorInfo(
+                    name,
+                    n_dims,
+                    ne[0],
+                    ne[1],
+                    ne[2],
+                    ne[3],
+                    t,
+                    0,
+                    n_bytes,
+                    supported,
+                )
             )
         var a = self.alignment
         self.data_start = (r.at + a - 1) // a * a
+        # Negative when the directory ends the file and padding runs past it.
+        var room = self.map.size - self.data_start
         for i in range(len(self.tensors)):
-            self.tensors[i].data_offset = self.data_start + rel[i]
-            var t = self.tensors[i]
-            if t.n_bytes > 0 and t.data_offset + t.n_bytes > self.map.size:
+            var name = self.tensors[i].name
+            var off = rel[i]
+            if off < 0:
                 raise Error(
-                    "tensor " + t.name + " extends past the end of the file"
+                    "tensor "
+                    + name
+                    + " has offset "
+                    + String(raw_rel[i])
+                    + ", which is before the data section"
                 )
+            if off % a != 0:
+                raise Error(
+                    "tensor "
+                    + name
+                    + " has offset "
+                    + String(off)
+                    + ", which is not a multiple of the alignment "
+                    + String(a)
+                )
+            # `off` and `n_bytes` are both in [0, 2^63) and `room` is below the
+            # file size, so this subtraction cannot wrap.
+            if self.tensors[i].n_bytes > room - off:
+                raise Error(
+                    "tensor " + name + " extends past the end of the file"
+                )
+            self.tensors[i].data_offset = self.data_start + off
 
     # ---- metadata -------------------------------------------------------
 
@@ -458,7 +650,10 @@ struct GGUFFile(Movable):
         if kv.kind != GGUF_TYPE_STRING:
             raise Error("metadata key " + key + " is not a string")
         var r = Reader(self.map.addr, self.map.size, kv.at)
-        return r.string()
+        try:
+            return r.string()
+        except e:
+            raise Error("metadata key " + key + ": " + String(e))
 
     def get_str_or(self, key: String, default: String) raises -> String:
         if not self.has_key(key):
@@ -474,8 +669,13 @@ struct GGUFFile(Movable):
             raise Error("metadata key " + key + " is not a string array")
         var out = List[String](capacity=kv.count)
         var r = Reader(self.map.addr, self.map.size, kv.at)
-        for _ in range(kv.count):
-            out.append(r.string())
+        for i in range(kv.count):
+            try:
+                out.append(r.string())
+            except e:
+                raise Error(
+                    "metadata key " + key + "[" + String(i) + "]: " + String(e)
+                )
         return out^
 
     def get_int_array(self, key: String) raises -> List[Int]:
@@ -524,7 +724,21 @@ struct GGUFFile(Movable):
         var kv = self.kvs[i]
         if kv.kind == GGUF_TYPE_STRING:
             var rd = Reader(self.map.addr, self.map.size, kv.at)
-            var s = rd.string()
+            var start, n = rd.string_at()
+            var span = Span(
+                unsafe_ptr=U8Ptr(unsafe_from_address=self.map.addr + start),
+                length=n,
+            )
+            var bad = utf8_first_invalid(span)
+            if bad >= 0:
+                return (
+                    "<string, "
+                    + String(n)
+                    + " bytes, not valid UTF-8 at byte "
+                    + String(bad)
+                    + ">"
+                )
+            var s = String(StringSpan(unsafe_from_utf8=span))
             if s.byte_length() > 60:
                 return "<string, " + String(s.byte_length()) + " bytes>"
             return '"' + s.replace("\n", "\\n") + '"'

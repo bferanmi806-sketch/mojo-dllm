@@ -79,7 +79,11 @@ struct CanvasPrinter(StepObserver):
         interval: Int = 1,
         is_tty: Bool = True,
         no_color: String = "",
-    ):
+    ) raises:
+        if interval < 1:
+            raise Error(
+                "visual interval must be at least 1, got " + String(interval)
+            )
         self.tok = tok^
         self.start = start
         self.mask_id = mask_id

@@ -20,6 +20,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # The name of this job is a required status check of branch protection on main; do not rename it.
   hygiene:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -36,13 +37,24 @@ jobs:
           enable-cache: true
 
       - name: Launcher tests
-        run: uv run --frozen --only-group test pytest tests/python -q
+        run: uv run --locked --only-group test pytest tests/python -q
+
+      - name: Launcher script lock is current
+        # `uv run --script` resolves the script's dependencies from mojo-dllm.lock. Fails when the lock is
+        # missing or the `# dependencies` header no longer matches it.
+        if: ${{ !cancelled() }}
+        run: uv lock --script mojo-dllm --check
+
+      - name: Tests that need the fixtures and lint groups (numpy, gguf, PyYAML)
+        if: ${{ !cancelled() }}
+        run: bash scripts/run_extra_group_tests.sh
 
       - name: Install markdownlint at its exact version
+        if: ${{ !cancelled() }}
         run: npm install --global markdownlint-cli2@0.23.2
 
       - name: Secrets and employer name in tracked files
-        # Report every gate, not just the first failure.
+        # Report every gate, not only the first failure.
         if: ${{ !cancelled() }}
         run: bash scripts/check_hygiene.sh --tracked
 
@@ -56,9 +68,9 @@ jobs:
 
       - name: markdownlint
         if: ${{ !cancelled() }}
-        run: markdownlint-cli2 "*.md" "docs/**/*.md" "#docs/spec.md"
+        run: markdownlint-cli2 "*.md" "docs/**/*.md" "assets/*.md" ".github/*.md" "#node_modules"
 
-      - name: README benchmark numbers come from bench/results
+      - name: Published benchmark tables match their evidence
         if: ${{ !cancelled() }}
         run: uv run --no-project python scripts/bench_table.py --check
 
@@ -71,6 +83,11 @@ jobs:
         # A regression in the FIFO guard hangs instead of failing.
         timeout-minutes: 5
         run: uv run --frozen --only-group fixtures python scripts/check_weights.py --self-test
+
+      - name: Fixtures match their generators
+        # scripts/gen_fixtures.py and gen_moe_fixture.py regenerate into a scratch directory; every byte must match.
+        if: ${{ !cancelled() }}
+        run: uv run --frozen --only-group fixtures python scripts/check_fixtures.py
 
       - name: Action pins match the tags in their comments
         if: ${{ !cancelled() }}
@@ -92,8 +109,8 @@ jobs:
       - name: Install the pinned Mojo toolchain
         run: uv sync --frozen
 
-      - name: mojo format (no check mode, so format and diff)
-        run: uv run --frozen mojo format -q src tests bench && git diff --exit-code -- src tests bench
+      - name: mojo format (no check mode, so format and compare file contents)
+        run: bash scripts/check_format.sh
 
       - name: Build with -Werror
         run: bash scripts/build.sh
@@ -107,6 +124,11 @@ jobs:
       # rather than a crash.
       - name: GPU test suite builds
         run: bash scripts/build.sh tests/gpu/test_gpu.mojo build/tests/test_gpu
+
+      - name: GPU test count matches its pin
+        # The runner cannot run the suite, so a test added without re-pinning, or a file that stops defining
+        # tests, would pass the build above.
+        run: bash scripts/check_gpu_test_count.sh
 
       - name: --device gpu without a GPU fails cleanly
         run: bash scripts/check_no_gpu.sh

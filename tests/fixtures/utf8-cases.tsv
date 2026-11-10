@@ -1,0 +1,40 @@
+empty	-	-	-1
+ascii	61626320313233	61 62 63 20 31 32 33	-1
+two-byte	636166c3a9	63 61 66 e9	-1
+three-byte	e282ac	20ac	-1
+four-byte	f09f9880	1f600	-1
+lowest-two-byte	c280	80	-1
+highest-two-byte	dfbf	7ff	-1
+lowest-three-byte	e0a080	800	-1
+before-surrogates	ed9fbf	d7ff	-1
+after-surrogates	ee8080	e000	-1
+highest-three-byte	efbfbf	ffff	-1
+lowest-four-byte	f0908080	10000	-1
+highest-code-point	f48fbfbf	10ffff	-1
+latin1-e9	636166e92061	63 61 66 fffd 20 61	3
+latin1-e9-last	636166e9	63 61 66 fffd	3
+stray-continuation-first	80	fffd	0
+stray-continuation-middle	61bf62	61 fffd 62	1
+overlong-c0	c080	fffd fffd	0
+overlong-c1	c1bf	fffd fffd	0
+overlong-three-byte	e08080	fffd fffd fffd	0
+overlong-three-byte-high	e09fbf	fffd fffd fffd	0
+overlong-four-byte	f0808080	fffd fffd fffd fffd	0
+overlong-four-byte-high	f08fbfbf	fffd fffd fffd fffd	0
+surrogate-low	eda080	fffd fffd fffd	0
+surrogate-high	edbfbf	fffd fffd fffd	0
+above-10ffff	f4908080	fffd fffd fffd fffd	0
+lead-f5	f5808080	fffd fffd fffd fffd	0
+lead-ff	ff	fffd	0
+lead-fe-then-ascii	fe41	fffd 41	0
+two-byte-lead-then-ascii	c328	fffd 28	0
+three-byte-then-ascii-second	e228a1	fffd 28 fffd	0
+three-byte-then-ascii-third	e28228	fffd fffd 28	0
+four-byte-then-ascii-fourth	f09f9828	fffd fffd fffd 28	0
+four-byte-then-ascii-third	f09f2880	fffd fffd 28 fffd	0
+lead-then-lead	c3c3a9	fffd e9	0
+truncated-two-byte	61c3	61 fffd	1
+truncated-three-byte	e282	fffd fffd	0
+truncated-four-byte	f09f98	fffd fffd fffd	0
+truncated-three-byte-first-only	e2	fffd	0
+two-invalid-in-a-row	e9e961	fffd fffd 61	0

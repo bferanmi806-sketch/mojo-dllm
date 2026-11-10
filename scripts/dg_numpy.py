@@ -7,7 +7,7 @@ the Mojo model: every rule below was read from that source, and the tests compar
 
 Python is a development tool here, never a runtime dependency. Run through the fixtures group:
 
-    uv run --only-group fixtures python scripts/dg_numpy.py FILE.gguf [--prompt N] [--no-quant]
+    uv run --only-group fixtures python scripts/dg_numpy.py FILE.gguf [--prompt N] [--seed N] [--no-quant]
 
 `forward` returns the canvas logits [C, vocab] of one pass over [prompt | canvas].
 

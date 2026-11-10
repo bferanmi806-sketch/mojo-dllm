@@ -27,7 +27,8 @@ from engines import _http  # noqa: E402
 from fake_vllm_server import ANSWER, FakeServer  # noqa: E402
 
 RECORD_KEYS = {"index", "gold", "pred", "correct", "forward_passes", "generate_s", "stopped_early", "text",
-               "flags", "version", "model", "power_retries", "on_battery", "power_source", "isolation"}
+               "flags", "version", "model", "power_retries", "on_battery", "power_source", "isolation", "schema", "steps",
+               "completion_tokens", "finish_reason"}
 CHECKPOINT = "google/diffusiongemma-26B-A4B-it"
 MODEL = CHECKPOINT
 
@@ -341,8 +342,10 @@ def test_extra_engine_flags_are_refused(rig: Rig) -> None:
 
 def test_a_device_other_than_cpu_or_gpu_is_refused(rig: Rig) -> None:
     e = rig.engine()
+    cfg = rig.cfg()
+    object.__setattr__(cfg, "device", "tpu")   # GenConfig refuses it at construction; the adapter's own guard stays
     with pytest.raises(SystemExit, match="cpu or gpu"):
-        e.check(rig.cfg(device="tpu"))
+        e.check(cfg)
 
 
 # refusals at generate

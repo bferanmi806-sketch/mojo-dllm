@@ -6,7 +6,7 @@ the issue text; `scripts/dg_numpy.py` repeats them in numpy for the tests.
 """
 
 
-from std.math import sqrt, tanh
+from std.math import isfinite, sqrt, tanh
 from std.time import perf_counter_ns
 
 from mojo_dllm.formats.gguf import GGUFFile, TensorInfo
@@ -30,6 +30,7 @@ from mojo_dllm.kernels.qgemm import QActs, quantize_acts
 from mojo_dllm.kernels.softembed import EmbeddingT, soft_embed, softmax_rows
 from mojo_dllm.models.transformer import (
     ModelConfig,
+    expect_matrix,
     _load_vector,
 )
 from mojo_dllm.quant.kquants import check_embedding_type, dequant_row
@@ -70,7 +71,7 @@ comptime ATTENTION_SCALE: Float32 = 1.0
 
 
 def _load_matrix(
-    g: GGUFFile, name: String, rows: Int, cols: Int
+    g: GGUFFile, name: String, rows: Int, cols: Int, threads: Int
 ) raises -> PackedMatrix:
     """Repack one weight matrix [rows, cols]: Q4_K, Q6_K, Q5_0 or Q8_0.
 
@@ -78,22 +79,12 @@ def _load_matrix(
     do not have; this model runs on the CPU only, and `PackedMatrix` refuses
     any other type itself.
     """
-    var t = g.tensor(name)
-    if t.ne0 != cols or t.n_rows() != rows:
-        raise Error(
-            "tensor shape mismatch for "
-            + name
-            + ": "
-            + t.shape_str()
-            + ", expected ["
-            + String(cols)
-            + ", "
-            + String(rows)
-            + "]"
-        )
-    g.map.populate(g.data_addr(t), t.n_bytes)
-    var pm = PackedMatrix(g.data_addr(t), t.ggml_type, rows, cols)
-    g.map.drop(g.data_addr(t), t.n_bytes)
+    var t = expect_matrix(g, name, rows, cols)
+    g.map.populate(t.data_offset, t.n_bytes)
+    var pm = PackedMatrix(
+        g.data_addr(t), t.n_bytes, t.ggml_type, rows, cols, threads
+    )
+    g.map.drop(t.data_offset, t.n_bytes)
     return pm^
 
 
@@ -168,7 +159,9 @@ struct GemmaLayer(Movable):
     var down: PackedMatrix
     var experts: ExpertWeights
 
-    def __init__(out self, g: GGUFFile, i: Int, c: ModelConfig) raises:
+    def __init__(
+        out self, g: GGUFFile, i: Int, c: ModelConfig, threads: Int
+    ) raises:
         var p = "blk." + String(i) + "."
         var d = c.hidden
         self.sliding = c.is_sliding(i)
@@ -195,32 +188,37 @@ struct GemmaLayer(Movable):
         )[0]
         var q_rows = c.n_heads * self.head
         var kv_rows = self.n_kv * self.head
-        self.wq = _load_matrix(g, p + "attn_q.weight", q_rows, d)
-        self.wk = _load_matrix(g, p + "attn_k.weight", kv_rows, d)
+        self.wq = _load_matrix(g, p + "attn_q.weight", q_rows, d, threads)
+        self.wk = _load_matrix(g, p + "attn_k.weight", kv_rows, d, threads)
         self.wv = List[PackedMatrix]()
         if g.has_tensor(p + "attn_v.weight"):
-            self.wv.append(_load_matrix(g, p + "attn_v.weight", kv_rows, d))
-        self.wo = _load_matrix(g, p + "attn_output.weight", d, q_rows)
-        self.gate = _load_matrix(g, p + "ffn_gate.weight", c.ffn, d)
-        self.up = _load_matrix(g, p + "ffn_up.weight", c.ffn, d)
-        self.down = _load_matrix(g, p + "ffn_down.weight", d, c.ffn)
+            self.wv.append(
+                _load_matrix(g, p + "attn_v.weight", kv_rows, d, threads)
+            )
+        self.wo = _load_matrix(g, p + "attn_output.weight", d, q_rows, threads)
+        self.gate = _load_matrix(g, p + "ffn_gate.weight", c.ffn, d, threads)
+        self.up = _load_matrix(g, p + "ffn_up.weight", c.ffn, d, threads)
+        self.down = _load_matrix(g, p + "ffn_down.weight", d, c.ffn, threads)
         var gu = g.tensor(p + "ffn_gate_up_exps.weight")
         var dn = g.tensor(p + "ffn_down_exps.weight")
         var scales = _load_vector(g, p + "ffn_down_exps.scale", c.n_experts)
-        g.map.populate(g.data_addr(gu), gu.n_bytes)
-        g.map.populate(g.data_addr(dn), dn.n_bytes)
+        g.map.populate(gu.data_offset, gu.n_bytes)
+        g.map.populate(dn.data_offset, dn.n_bytes)
         self.experts = ExpertWeights(
             g.data_addr(gu),
+            gu.n_bytes,
             gu.ggml_type,
             g.data_addr(dn),
+            dn.n_bytes,
             dn.ggml_type,
             d,
             c.expert_ffn,
             c.n_experts,
             scales.ptr(),
+            threads,
         )
-        g.map.drop(g.data_addr(gu), gu.n_bytes)
-        g.map.drop(g.data_addr(dn), dn.n_bytes)
+        g.map.drop(gu.data_offset, gu.n_bytes)
+        g.map.drop(dn.data_offset, dn.n_bytes)
 
 
 struct DiffusionGemma(Movable):
@@ -297,10 +295,10 @@ struct DiffusionGemma(Movable):
         check_embedding_type(self.embd)
         self.layers = List[GemmaLayer](capacity=c.n_layers)
         for i in range(c.n_layers):
-            self.layers.append(GemmaLayer(self.gguf, i, c))
+            self.layers.append(GemmaLayer(self.gguf, i, c, threads))
         self.out_norm = _load_vector(self.gguf, "output_norm.weight", c.hidden)
         self.output = _load_matrix(
-            self.gguf, "token_embd.weight", c.vocab, c.hidden
+            self.gguf, "token_embd.weight", c.vocab, c.hidden, threads
         )
         var d = c.hidden
         var width_q = 0
@@ -358,13 +356,19 @@ struct DiffusionGemma(Movable):
                 self.gguf, "self_cond_pre_norm.weight", d
             )
             self.sc_gate.append(
-                _load_matrix(self.gguf, "self_cond_gate.weight", c.ffn, d)
+                _load_matrix(
+                    self.gguf, "self_cond_gate.weight", c.ffn, d, threads
+                )
             )
             self.sc_up.append(
-                _load_matrix(self.gguf, "self_cond_up.weight", c.ffn, d)
+                _load_matrix(
+                    self.gguf, "self_cond_up.weight", c.ffn, d, threads
+                )
             )
             self.sc_down.append(
-                _load_matrix(self.gguf, "self_cond_down.weight", d, c.ffn)
+                _load_matrix(
+                    self.gguf, "self_cond_down.weight", d, c.ffn, threads
+                )
             )
             if (
                 self.sc_gate[0].block_size != 256
@@ -508,12 +512,12 @@ struct DiffusionGemma(Movable):
             c.eps,
             th,
         )
-        quantize_acts(self.xn.ptr(), C, d, self.qa_h)
+        quantize_acts(self.xn.ptr(), C, d, self.qa_h, self.threads)
         pgemm(self.sc_gate[0], self.qa_h, C, self.g.ptr(), c.ffn, th)
         pgemm(self.sc_up[0], self.qa_h, C, self.u.ptr(), c.ffn, th)
         for i in range(C * c.ffn):
             self.g[i] = gelu_tanh(self.g[i]) * self.u[i]
-        quantize_acts(self.g.ptr(), C, c.ffn, self.qa_ffn)
+        quantize_acts(self.g.ptr(), C, c.ffn, self.qa_ffn, self.threads)
         pgemm(self.sc_down[0], self.qa_ffn, C, self.mlp.ptr(), d, th)
         add_inplace(self.x.ptr().unsafe_offset(row0 * d), self.mlp.ptr(), C * d)
 
@@ -598,7 +602,7 @@ struct DiffusionGemma(Movable):
         softmaxed in place at `prev_temp_inv` (1 / the previous temperature),
         which is why one 268 MB buffer serves a whole run.
         """
-        _check_temp(prev_temp_inv)
+        _check_temp(prev_temp_inv, self.cfg.softcap)
         self._step(canvas, logits, Int(logits), prev_temp_inv)
 
     def _step(
@@ -639,7 +643,7 @@ struct DiffusionGemma(Movable):
             c.eps,
             self.threads,
         )
-        quantize_acts(self.xn.ptr(), C, d, self.qa_h)
+        quantize_acts(self.xn.ptr(), C, d, self.qa_h, self.threads)
         pgemm(self.output, self.qa_h, C, logits, c.vocab, self.threads)
         if c.softcap != 0:
             _softcap(logits, C * c.vocab, c.softcap, self.threads)
@@ -672,7 +676,7 @@ struct DiffusionGemma(Movable):
         rmsnorm(
             self.x.ptr(), L.attn_norm.ptr(), self.xn.ptr(), rows, d, c.eps, th
         )
-        quantize_acts(self.xn.ptr(), rows, d, self.qa_h)
+        quantize_acts(self.xn.ptr(), rows, d, self.qa_h, self.threads)
         pgemm(L.wq, self.qa_h, rows, self.q.ptr(), q_w, th)
         pgemm(L.wk, self.qa_h, rows, kp, kv_w, th)
         if len(L.wv) > 0:
@@ -726,10 +730,14 @@ struct DiffusionGemma(Movable):
             th,
         )
         if L.sliding:
-            quantize_acts(self.att.ptr(), rows, q_w, self.qa_att_sliding)
+            quantize_acts(
+                self.att.ptr(), rows, q_w, self.qa_att_sliding, self.threads
+            )
             pgemm(L.wo, self.qa_att_sliding, rows, self.h.ptr(), d, th)
         else:
-            quantize_acts(self.att.ptr(), rows, q_w, self.qa_att_global)
+            quantize_acts(
+                self.att.ptr(), rows, q_w, self.qa_att_global, self.threads
+            )
             pgemm(L.wo, self.qa_att_global, rows, self.h.ptr(), d, th)
         rmsnorm(
             self.h.ptr(),
@@ -745,12 +753,12 @@ struct DiffusionGemma(Movable):
         rmsnorm(
             self.x.ptr(), L.ffn_norm.ptr(), self.xn.ptr(), rows, d, c.eps, th
         )
-        quantize_acts(self.xn.ptr(), rows, d, self.qa_h)
+        quantize_acts(self.xn.ptr(), rows, d, self.qa_h, self.threads)
         pgemm(L.gate, self.qa_h, rows, self.g.ptr(), c.ffn, th)
         pgemm(L.up, self.qa_h, rows, self.u.ptr(), c.ffn, th)
         for i in range(rows * c.ffn):
             self.g[i] = gelu_tanh(self.g[i]) * self.u[i]
-        quantize_acts(self.g.ptr(), rows, c.ffn, self.qa_ffn)
+        quantize_acts(self.g.ptr(), rows, c.ffn, self.qa_ffn, self.threads)
         pgemm(L.down, self.qa_ffn, rows, self.mlp.ptr(), d, th)
         rmsnorm(
             self.mlp.ptr(),
@@ -762,7 +770,7 @@ struct DiffusionGemma(Movable):
             th,
         )
         # Mixture of experts. The router reads the raw post-attention residual.
-        self.routing.n_tokens = rows
+        self.routing.set_len(rows)
         route_tokens(
             self.x.ptr(),
             d,
@@ -823,7 +831,7 @@ struct DiffusionGemma(Movable):
         `logits` holds the previous step's canvas logits [canvas, vocab] on
         entry and this step's on return; see `step_sc`.
         """
-        _check_temp(prev_temp_inv)
+        _check_temp(prev_temp_inv, self.cfg.softcap)
         var c = self.cfg
         var P = self._run(tokens, c.n_layers, Int(logits), prev_temp_inv)
         self._head(P, len(tokens) - P, logits)
@@ -836,10 +844,21 @@ struct DiffusionGemma(Movable):
         self._head(P, len(tokens) - P, logits)
 
 
-def _check_temp(inv: Float32) raises:
-    if not (inv > 0) or inv > 3.0e38:
+def _check_temp(inv: Float32, softcap: Float32) raises:
+    """The previous temperature's inverse must be positive and small enough for
+    `softmax_rows`. A logit times `inv` is rounded to 24 bits and the max is
+    subtracted from the unrounded product, so the difference carries a residue
+    of about 6e-8 of the product; once that passes 88 the exponential is
+    infinite and the canvas turns to NaN without an error (measured: logits up
+    to 30 give NaN rows from `inv` = 1e9 and none up to 1e8). The bound is 1e8 on
+    `inv` times the logit magnitude, `softcap` (1 when the file has no cap)."""
+    var bound = softcap if softcap > 1 else Float32(1)
+    if not (inv > 0) or not (inv * bound <= 1.0e8):
         raise Error(
-            "the previous temperature must be positive and finite, got 1 / "
+            "the previous temperature's inverse must be positive and, times"
+            " the logit soft cap "
+            + String(bound)
+            + " at most 1e8, got 1 / "
             + String(inv)
         )
 

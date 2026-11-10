@@ -40,7 +40,7 @@ ROOT = HERE.parent
 
 def load_cases(folder: pathlib.Path) -> dict[str, tuple[dict, pathlib.Path]]:
     cases = {}
-    for case_json in sorted(folder.glob("case*/case.json")):
+    for case_json in parity.dg_case_files(folder):
         ref = case_json.parent / "unified.ref.f32"
         if not ref.is_file():
             raise SystemExit(f"refusing: {ref} is missing; run bench/parity.py --phase ref first")

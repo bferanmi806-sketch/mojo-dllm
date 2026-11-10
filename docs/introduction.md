@@ -44,14 +44,15 @@ minutes](diffusion.md) walks through it with a picture.
 - Two architectures run: LLaDA and Dream. A `diffusion-gemma` file is read,
   `inspect` prints its config, `tokenize` prints the ids of its chat prompt,
   and `logits` runs it on the CPU: one unified pass over the prompt and the
-  canvas, checked against a numpy forward pass on a tiny fixture (#64). `run`
-  stops on it with `diffusion-gemma does not run on this model` until the
-  generation loop is wired (#64), on the CPU and the GPU.
+  canvas, checked against a numpy forward pass on a tiny fixture (#64). The
+  entropy-bounded denoiser is written too (#65), but `run` stops on this file
+  with `diffusion-gemma does not run on this model` until the model is wired
+  into the generation loop (#277), on the CPU and the GPU.
   Other architectures stop with
   `unsupported model architecture: <name> (runs: llada, dream; read only: diffusion-gemma)`.
 - One quantization mix: Q4_K and Q6_K projection matrices, as in a Q4_K_M
   file, with an embedding table and norm vectors that the reference decoders
-  read (F32, F16, BF16, Q8_0, Q4_K, Q5_K, Q6_K). A matrix of any other type
+  read (F32, F16, BF16, Q5_0, Q8_0, Q4_K, Q5_K, Q6_K). A matrix of any other type
   stops the load with an error that names it. DiffusionGemma's `logits` also
   reads Q5_0 and Q8_0 matrices for the down projections.
 

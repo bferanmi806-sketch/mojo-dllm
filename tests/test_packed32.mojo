@@ -4,10 +4,12 @@ from std.testing import assert_equal, assert_true, assert_raises, TestSuite
 from mojo_dllm.formats.gguf import (
     GGML_Q4_K,
     GGML_Q5_0,
+    GGML_Q6_K,
     GGML_Q8_0,
     ggml_row_bytes,
+    ggml_type_name,
 )
-from mojo_dllm.kernels.packed import PackedMatrix, pgemm
+from mojo_dllm.kernels.packed import PackedMatrix, matrix_bytes, pgemm
 from mojo_dllm.kernels.qgemm import QActs, quantize_acts, qgemm
 from mojo_dllm.quant.kquants import dequant_row
 from mojo_dllm.sys.mem import Bytes, Floats
@@ -50,7 +52,7 @@ def _weights(kind: Int, N: Int, K: Int) raises -> Bytes:
 def _check(kind: Int, K: Int, tokens: Int) raises:
     var N = 24
     var raw = _weights(kind, N, K)
-    var pm = PackedMatrix(raw.addr, kind, N, K)
+    var pm = PackedMatrix(raw.addr, raw.size, kind, N, K)
     assert_equal(pm.block_size, 32)
     var x = Floats(tokens * K)
     var state = UInt64(789)
@@ -108,7 +110,7 @@ def test_q8_0_extreme_products_do_not_saturate() raises:
         p.unsafe_store(1, 0x3C)
         for k in range(32):
             p.unsafe_store(2 + k, UInt8(127 if row % 2 == 0 else 128))
-    var pm = PackedMatrix(raw.addr, GGML_Q8_0, 8, 32)
+    var pm = PackedMatrix(raw.addr, raw.size, GGML_Q8_0, 8, 32)
     var x = Floats(2 * 32)
     for k in range(32):
         x[k] = 127
@@ -139,7 +141,7 @@ def test_quantize32_zero_and_per_block_scale() raises:
 
 def test_packed32_rejects_incompatible_activations() raises:
     var raw = _weights(GGML_Q8_0, 8, 256)
-    var pm = PackedMatrix(raw.addr, GGML_Q8_0, 8, 256)
+    var pm = PackedMatrix(raw.addr, raw.size, GGML_Q8_0, 8, 256)
     var qa = QActs(1, 256)
     var out = Floats(8)
     with assert_raises(contains="activation block size"):
@@ -165,13 +167,68 @@ def test_quantize32_rejects_bad_dimensions() raises:
         _ = QActs(-1, 32, 32)
     var raw = Bytes(8 * 34)
     with assert_raises(contains="multiple of 8 rows"):
-        _ = PackedMatrix(raw.addr, GGML_Q8_0, 0, 32)
+        _ = PackedMatrix(raw.addr, raw.size, GGML_Q8_0, 0, 32)
     with assert_raises(contains="positive multiple of 32"):
-        _ = PackedMatrix(raw.addr, GGML_Q8_0, 8, 0)
+        _ = PackedMatrix(raw.addr, raw.size, GGML_Q8_0, 8, 0)
     var qa = QActs(1, 32, 32)
     var x = Floats(64)
     with assert_raises(contains="too small"):
         quantize_acts(x.ptr(), 2, 32, qa)
+
+
+def _refuses_a_source_of_the_wrong_size(kind: Int, K: Int) raises:
+    var row_bytes = ggml_row_bytes(kind, K)
+    # The backing block holds all 8 rows, so a guard that is mutated away reads
+    # valid memory and the test fails by assertion.
+    var raw = Bytes(8 * row_bytes)
+    var pm = PackedMatrix(raw.addr, raw.size, kind, 8, K)
+    assert_equal(pm.N, 8)
+    var want = String(8 * row_bytes)
+    with assert_raises(
+        contains=(
+            "the source holds "
+            + String(8 * row_bytes - row_bytes)
+            + " bytes, but 8 rows of "
+            + String(K)
+            + " "
+            + ggml_type_name(kind)
+            + " values take "
+            + want
+        )
+    ):
+        _ = PackedMatrix(raw.addr, raw.size - row_bytes, kind, 8, K)
+    with assert_raises(contains="the source holds " + String(9 * row_bytes)):
+        _ = PackedMatrix(raw.addr, raw.size + row_bytes, kind, 8, K)
+    with assert_raises(contains="the source holds 0 bytes"):
+        _ = PackedMatrix(raw.addr, 0, kind, 8, K)
+    with assert_raises(contains="the source holds -1 bytes"):
+        _ = PackedMatrix(raw.addr, -1, kind, 8, K)
+
+
+def test_packed_matrix_refuses_a_q4_k_source_of_the_wrong_size() raises:
+    _refuses_a_source_of_the_wrong_size(GGML_Q4_K, 256)
+
+
+def test_packed_matrix_refuses_a_q6_k_source_of_the_wrong_size() raises:
+    _refuses_a_source_of_the_wrong_size(GGML_Q6_K, 256)
+
+
+def test_packed_matrix_refuses_a_q5_0_source_of_the_wrong_size() raises:
+    _refuses_a_source_of_the_wrong_size(GGML_Q5_0, 64)
+
+
+def test_packed_matrix_refuses_a_q8_0_source_of_the_wrong_size() raises:
+    _refuses_a_source_of_the_wrong_size(GGML_Q8_0, 64)
+
+
+def test_matrix_bytes_refuses_a_size_that_wraps() raises:
+    assert_equal(matrix_bytes(544, 8), 4352)
+    assert_equal(matrix_bytes(0, 5), 0)
+    assert_equal(matrix_bytes(Int.MAX // 4, 4), Int.MAX // 4 * 4)
+    with assert_raises(contains="is too large to size"):
+        _ = matrix_bytes(Int.MAX // 4 + 1, 4)
+    with assert_raises(contains="is too large to size"):
+        _ = matrix_bytes(8, -1)
 
 
 def test_packed32_rejects_incomplete_weight_block() raises:
@@ -179,7 +236,7 @@ def test_packed32_rejects_incomplete_weight_block() raises:
     # incorrectly truncates K=33 to one block instead of rejecting it.
     var raw = Bytes(8 * 2 * 34)
     with assert_raises(contains="row length 33 is not a multiple of 32"):
-        _ = PackedMatrix(raw.addr, GGML_Q8_0, 8, 33)
+        _ = PackedMatrix(raw.addr, raw.size, GGML_Q8_0, 8, 33)
     _ = raw^
 
 

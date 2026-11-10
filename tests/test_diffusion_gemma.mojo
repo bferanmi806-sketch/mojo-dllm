@@ -8,7 +8,9 @@ from mojo_dllm.formats.gguf import (
     GGML_Q6_K,
     GGML_Q8_0,
 )
+from mojo_dllm.models.diffusion_gemma import DiffusionGemma
 from mojo_dllm.models.transformer import DiffusionLM, ModelConfig
+from mojo_dllm.sys.mem import Floats
 
 comptime FIX = "tests/fixtures/"
 comptime DG = FIX + "diffusion-gemma/"
@@ -27,6 +29,20 @@ def _refuses(name: String, needle: String) raises:
             )
         return
     raise Error(name + ": the config accepted the file")
+
+
+def test_self_conditioning_needs_a_vocabulary_that_is_a_multiple_of_8() raises:
+    var DGF = DG
+    _ = ModelConfig(GGUFFile(DGF + "vocab-504-self-cond.gguf"))
+    _ = ModelConfig(GGUFFile(DGF + "vocab-500-no-self-cond.gguf"))
+    _refuses(
+        "vocab-500-self-cond",
+        (
+            "token_embd.weight has 500 rows, but self-conditioning"
+            " (self_cond_gate.weight is present) needs a vocabulary that is a"
+            " multiple of 8"
+        ),
+    )
 
 
 def _required_keys() -> List[String]:
@@ -372,6 +388,118 @@ def test_refuses_expert_tensors_that_disagree_with_the_expert_keys() raises:
 def test_refuses_an_embedding_that_is_not_hidden_wide() raises:
     _refuses(
         "embd-width", "tensor shape mismatch for token_embd.weight: [512, 512]"
+    )
+
+
+# ---- the constructor refuses what the config accepted (#209) -----------------
+
+
+def _refuses_load(name: String, needle: String) raises:
+    """The config accepts fixture `name`, and the model constructor refuses it
+    with an error that says `needle`."""
+    _ = ModelConfig(GGUFFile(DG + name + ".gguf"))
+    try:
+        _ = DiffusionGemma(DG + name + ".gguf", threads=1, max_tokens=16)
+    except e:
+        if needle not in String(e):
+            raise Error(
+                name + ": the error does not say '" + needle + "': " + String(e)
+            )
+        return
+    raise Error(name + ": the constructor accepted the file")
+
+
+def test_constructor_refuses_a_32_wide_attention_matrix() raises:
+    # Q5_0 is a matrix type the CPU can run, so only `check_block_sizes`
+    # stands between this file and an activation buffer of the wrong width.
+    _refuses_load(
+        "load-attn-q-q5_0",
+        (
+            "layer 0: attn_q has 32-wide blocks where the activation buffers"
+            " cover 256"
+        ),
+    )
+
+
+def test_constructor_refuses_a_256_wide_down_projection() raises:
+    _refuses_load(
+        "load-ffn-down-q4_k",
+        (
+            "layer 0: ffn_down has 256-wide blocks where the activation"
+            " buffers cover 32"
+        ),
+    )
+
+
+def test_constructor_refuses_a_32_wide_expert_gate_up() raises:
+    _refuses_load(
+        "load-experts-gate-up-q5_0",
+        (
+            "layer 1: expert gate/up has 32-wide blocks where the activation"
+            " buffers cover 256"
+        ),
+    )
+
+
+def test_constructor_refuses_a_shrunk_attention_matrix() raises:
+    _refuses_load(
+        "load-attn-q-shrunk",
+        (
+            "tensor shape mismatch for blk.0.attn_q.weight: [256, 256],"
+            " expected [256, 512]"
+        ),
+    )
+    _refuses_load(
+        "load-attn-output-narrow",
+        (
+            "tensor shape mismatch for blk.1.attn_output.weight: [256, 256],"
+            " expected [1024, 256]"
+        ),
+    )
+
+
+def test_constructor_refuses_a_vector_of_the_wrong_length() raises:
+    _refuses_load(
+        "load-attn-norm-short",
+        "tensor shape mismatch for blk.0.attn_norm.weight: [128]",
+    )
+    _refuses_load(
+        "load-output-norm-short",
+        "tensor shape mismatch for output_norm.weight: [128]",
+    )
+
+
+def test_constructor_refuses_self_conditioning_matrices_of_the_wrong_width() raises:
+    var needle = (
+        "self_cond gate and up must be 256-wide quantized and down 32-wide"
+    )
+    _refuses_load("load-self-cond-gate-q5_0", needle)
+    _refuses_load("load-self-cond-up-q5_0", needle)
+    _refuses_load("load-self-cond-down-q4_k", needle)
+
+
+def test_self_conditioning_refuses_a_file_that_has_none() raises:
+    # The file loads (self-conditioning is optional), and a pass that asks for
+    # it says why it cannot have it.
+    var m = DiffusionGemma(
+        DG + "load-no-self-cond.gguf", threads=1, max_tokens=32
+    )
+    var c = m.config()
+    var tokens = List[Int]()
+    for _ in range(c.canvas):
+        tokens.append(5)
+    var logits = Floats(c.canvas * c.vocab)
+    with assert_raises(contains="this file has no self-conditioning tensors"):
+        m.forward_sc(tokens, logits.ptr(), 1.25)
+
+
+def test_constructor_refuses_a_shrunk_self_conditioning_matrix() raises:
+    _refuses_load(
+        "load-self-cond-up-short",
+        (
+            "tensor shape mismatch for self_cond_up.weight: [256, 256],"
+            " expected [256, 512]"
+        ),
     )
 
 

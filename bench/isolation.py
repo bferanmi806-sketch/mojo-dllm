@@ -5,8 +5,8 @@ Before an arm starts, `preflight` reads the power profile, the CPU governor, sys
 information (PSI), swap, free memory, thermal throttle counters and, for a GPU arm, the GPU's processes, memory,
 utilization and clock event reasons. Around every problem, a `Window` samples the same sources every 0.5 s,
 subtracts what the benchmark's own process tree used, and reports `clean` with the reasons when it was not.
-`run_isolated` waits for a quiet moment, runs the problem inside a window and repeats it up to `retries` times
-while the window is noisy. After that the row is kept with its reasons; accuracy never depends on a window.
+`run_isolated` waits up to `max_quiet_wait_s` for a quiet moment (it runs anyway after that, and logs it), runs the
+problem inside a window and repeats it up to `retries` times while the window is noisy. After that the row is kept with its reasons; accuracy never depends on a window.
 
 The checks fail closed, as `power.py` does. A source that cannot be read is a WARN in the preflight and an
 `unavailable` entry in the window, and a window with an unmeasured dimension is never clean. An empty reading
@@ -30,9 +30,11 @@ import dataclasses
 import datetime as dt
 import glob
 import json
+import math
 import os
 import pathlib
 import platform
+import re
 import shutil
 import signal
 import stat
@@ -41,7 +43,7 @@ import sys
 import threading
 import time
 import uuid
-from typing import Any, Callable, Iterator, TypeVar
+from typing import Any, Callable, Iterator, Literal, TypedDict, TypeVar
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import power  # noqa: E402  (bench/power.py)
@@ -88,6 +90,22 @@ class Thresholds:
     swap_pages_max: int = SWAP_PAGES_MAX
     thermal_events_max: int = THERMAL_EVENTS_MAX
     foreign_gpu_pids_max: int = FOREIGN_GPU_PIDS_MAX
+
+    def __post_init__(self) -> None:
+        """A negative or NaN limit makes every window noisy or none, so it is refused when the limits are made."""
+        shares = ("cpu_busy_max", "other_cpu_mean_max", "other_cpu_sample_max")      # a share of all CPUs: 0..1
+        percents = ("psi_avg10_max", "gpu_util_max")                                  # percent: 0..100
+        counts = ("swap_pages_max", "thermal_events_max", "foreign_gpu_pids_max")     # whole numbers from 0
+        for f in dataclasses.fields(self):
+            v = getattr(self, f.name)
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v < 0:
+                raise ValueError(f"threshold {f.name} is {v!r}: it must be a finite number of at least 0")
+            if f.name in shares and v > 1:
+                raise ValueError(f"threshold {f.name} is {v!r}: it is a share of the machine, 0 to 1")
+            if f.name in percents and v > 100:
+                raise ValueError(f"threshold {f.name} is {v!r}: it is a percentage, 0 to 100")
+            if f.name in counts and not isinstance(v, int):
+                raise ValueError(f"threshold {f.name} is {v!r}: it counts whole events or pages")
 
 
 class IsolationError(RuntimeError):
@@ -367,6 +385,20 @@ def read_gpu_apps(m: Machine) -> list[tuple[int, float]] | None:
     return apps
 
 
+def split_gpu_apps(m: Machine, apps: list[tuple[int, float]],
+                   table: dict[int, tuple[int, int, str, int]] | None = None) -> tuple[list[tuple[int, float]], float]:
+    """(compute processes that are not ours, MiB the ones that are ours hold).
+
+    Ours is this process and its descendants, the tree `Window` also leaves out as the benchmark's own use. An
+    engine that loads its weights in this process (the hf adapter) is on the GPU before the preflight runs; it
+    is the benchmark, not contention. The table is read again when not given; if /proc cannot be listed, ours is
+    this pid alone.
+    """
+    table = table if table is not None else process_table(m)
+    own = (tree_of(table, m.self_pid) if table else set()) | {m.self_pid}
+    return ([(p, mib) for p, mib in apps if p not in own], sum(mib for p, mib in apps if p in own))
+
+
 def reason_names(bits: int) -> list[str]:
     return [name for mask, name in GPU_REASONS.items() if bits & mask]
 
@@ -519,11 +551,19 @@ def present_sources(m: Machine, device: str) -> set[str]:
 # preflight
 
 
+Status = Literal["PASS", "WARN", "FAIL"]
+STATUSES: tuple[str, ...] = ("PASS", "WARN", "FAIL")
+
+
 @dataclasses.dataclass
 class Check:
     name: str
-    status: str          # PASS, WARN or FAIL
+    status: Status
     detail: str
+
+    def __post_init__(self) -> None:
+        if self.status not in STATUSES:
+            raise ValueError(f"check {self.name!r} has status {self.status!r}, not one of {STATUSES}")
 
 
 @dataclasses.dataclass
@@ -696,15 +736,19 @@ def preflight(device: str, need_ram_gb: float | None, allow: tuple[str, ...] = (
         if len(rows) != len(gpu_rows) or apps is None:
             warn("gpu", "`nvidia-smi --query-gpu` / `--query-compute-apps`")
         else:
-            checks.append(Check("gpu-processes", "FAIL" if apps else "PASS",
-                                f"compute processes: {[p for p, _ in apps]}" if apps else "none"))
+            foreign, own_mib = split_gpu_apps(m, apps, proc1)
+            checks.append(Check("gpu-processes", "FAIL" if foreign else "PASS",
+                                f"compute processes: {[p for p, _ in foreign]}" if foreign else
+                                ("none besides this benchmark" if apps else "none")))
             mem_used = _num(rows[-1]["memory.used"])
             if mem_used is None:
                 warn("gpu-memory", "memory.used")
             else:
-                over = mem_used > th.gpu_mem_used_max_mib
+                other = max(mem_used - own_mib, 0.0)     # what this benchmark already holds is not contention
+                over = other > th.gpu_mem_used_max_mib
+                held = f" ({own_mib:.0f} MiB held by this benchmark excluded)" if own_mib else ""
                 checks.append(Check("gpu-memory", "FAIL" if over else "PASS",
-                                    f"{mem_used:.0f} MiB used (limit {th.gpu_mem_used_max_mib:g})"))
+                                    f"{other:.0f} MiB used{held} (limit {th.gpu_mem_used_max_mib:g})"))
             utils = [_num(r["utilization.gpu"]) for r in rows]
             if any(u is None for u in utils):
                 warn("gpu-utilization", "utilization.gpu")
@@ -788,8 +832,10 @@ def quiet_gate(device: str, *, machine: Machine | None = None, thresholds: Thres
             g1 = read_gpu_apps(m)
             if g0 is None or g1 is None:
                 reasons.append("gpu unmeasured")
-            elif g1:
-                reasons.append(f"gpu processes {[p for p, _ in g1]}")
+            else:
+                foreign = split_gpu_apps(m, g1)[0]
+                if foreign:
+                    reasons.append(f"gpu processes {[p for p, _ in foreign]}")
         waited = m.clock() - t0
         if not reasons or waited > max_wait_s:
             return {"ok": not reasons, "cpu_busy_before": round(busy, 3), "waited_s": round(waited, 1),
@@ -798,6 +844,42 @@ def quiet_gate(device: str, *, machine: Machine | None = None, thresholds: Thres
 
 
 # the window around one problem
+
+
+class WindowResult(TypedDict):
+    """What `Window.result` holds: one record per problem, read by run_isolated, the eval runners and bench_table."""
+
+    clean: bool
+    reasons: list[str]
+    other_cpu_share_max: float | None
+    other_cpu_share_mean: float | None
+    other_top_processes: list[dict]
+    psi_memory_stall_ms: float | None
+    psi_cpu_stall_ms: float | None
+    swap_pages: float | None
+    thermal_events: float | None
+    gpu_reasons_seen: list[str]
+    gpu_power_capped: bool
+    gpu_foreign_pids: list[int]
+    sm_clock_min_mhz: float | None
+    sm_clock_max_mhz: float | None
+    window_s: float
+    samples: int
+    unavailable: list[str]
+
+
+class IsolationRecord(WindowResult):
+    """A row's `isolation` field: the window plus what `run_isolated` adds. `noisy` is `not clean`, written once,
+    where the record is built, so a reader may use either and a test checks that they agree."""
+
+    retries: int
+    noisy: bool
+    cpu_busy_before: float
+    waited_s: float
+    gate_ok: bool
+    session: str | None
+    allow_noisy: bool
+    preflight_failed_allowed: bool
 
 
 class Window:
@@ -824,7 +906,7 @@ class Window:
         self.readings: list[dict] = []
         self.error: BaseException | None = None
         self.stuck = False
-        self.result: dict = {}
+        self.result: WindowResult = {}  # type: ignore[typeddict-item]  # filled by _evaluate on exit
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._t0 = 0.0
@@ -895,7 +977,7 @@ class Window:
                 for pid, (n, t) in used.items()]
         return sorted((r for r in rows if r["percent"] >= 1.0), key=lambda r: -r["percent"])[:5]
 
-    def _evaluate(self) -> dict:
+    def _evaluate(self) -> WindowResult:
         th, rs = self.th, self.readings
         window_s = (rs[-1]["t"] - rs[0]["t"]) if len(rs) >= 2 else 0.0
         reasons: list[str] = []
@@ -1044,12 +1126,38 @@ class Arm:
                             allow_battery=self.allow_battery, log=self.log, **kw)
 
     def finish(self) -> None:
+        """Write the closing snapshot. A missing or corrupt env file is logged and left alone: this runs while
+        another error may be propagating, and raising here would replace it and skip the cleanup after it."""
         if self.env_path is None:
             return
-        doc = json.loads(self.env_path.read_text())
-        doc["sessions"][-1]["snapshot_end"] = snapshot(self.machine, sample_s=0)
-        doc["sessions"][-1]["ended"] = dt.datetime.fromtimestamp(self.machine.wall()).isoformat(timespec="seconds")
-        self.env_path.write_text(json.dumps(doc, indent=2) + "\n")
+        try:
+            doc = json.loads(self.env_path.read_text())
+            doc["sessions"][-1]["snapshot_end"] = snapshot(self.machine, sample_s=0)
+            doc["sessions"][-1]["ended"] = dt.datetime.fromtimestamp(self.machine.wall()).isoformat(timespec="seconds")
+            self.env_path.write_text(json.dumps(doc, indent=2) + "\n")
+        except (OSError, ValueError, KeyError, IndexError, TypeError) as e:
+            self.log(f"!! could not write the closing snapshot to {self.env_path} ({type(e).__name__}: {e})")
+
+
+_BENCH_QUIET = re.compile(r"timers:(\d+),pm:(\d+),clocks:(\d+),refused:(\d+)")
+
+
+def bench_quiet_record(value: str | None) -> tuple[bool, dict | None]:
+    """`bench_quiet` and `bench_quiet_changes` of an env file, from BENCH_QUIET_ACTIVE.
+
+    scripts/bench-quiet.sh exports `timers:N,pm:N,clocks:N,refused:N`: the timers it stopped, the cards it put
+    into persistence mode and locked, and the changes it tried and could not make. Unset or empty means the run
+    was not started under the script. A value in another form (an older script exported `1`) is recorded as
+    started under it with no detail: the changes are unknown, never zero.
+    """
+    if not value:
+        return False, None
+    m = _BENCH_QUIET.fullmatch(value)
+    if m is None:
+        return True, None
+    timers, pm, clocks, refused = (int(g) for g in m.groups())
+    return True, {"timers_stopped": timers, "gpus_persistence_on": pm, "gpus_clocks_locked": clocks,
+                  "refused": refused}
 
 
 def begin_arm(arm: str, *, device: str, need_ram_gb: float | None, runs_dir: pathlib.Path | None,
@@ -1070,6 +1178,7 @@ def begin_arm(arm: str, *, device: str, need_ram_gb: float | None, runs_dir: pat
     if runs_dir is not None:
         runs_dir.mkdir(parents=True, exist_ok=True)
         env_path = runs_dir / f"{arm}.env.json"
+        quiet, quiet_changes = bench_quiet_record(os.environ.get("BENCH_QUIET_ACTIVE"))
         try:
             doc = json.loads(env_path.read_text()) if env_path.exists() else {"arm": arm, "sessions": []}
         except ValueError as e:
@@ -1078,7 +1187,7 @@ def begin_arm(arm: str, *, device: str, need_ram_gb: float | None, runs_dir: pat
             "session_id": session_id, "started": dt.datetime.fromtimestamp(m.wall()).isoformat(timespec="seconds"), "device": device,
             "preflight": report.to_dict(), "preflight_failed_allowed": bool(report.failed) and allow_noisy,
             "allow_noisy": allow_noisy, "allow_battery": allow_battery,
-            "bench_quiet": os.environ.get("BENCH_QUIET_ACTIVE") == "1", "retries": retries,
+            "bench_quiet": quiet, "bench_quiet_changes": quiet_changes, "retries": retries,
             "need_ram_gb": need_ram_gb, "thresholds": dataclasses.asdict(th), "tuned": tuned,
             "snapshot_start": report.snapshot, "tool_versions": {**_tool_versions(m), **(versions or {})}})
         env_path.write_text(json.dumps(doc, indent=2) + "\n")
@@ -1126,16 +1235,21 @@ def run_isolated(fn: Callable[[], T], *, device: str, retries: int = 2, arm: Arm
             break
         attempts += 1
         log(f"noisy window ({'; '.join(win['reasons'])}): repeating, {attempts} of {retries}")
-    iso = {**win, "retries": attempts, "noisy": not win["clean"], "cpu_busy_before": gate["cpu_busy_before"],
-           "waited_s": gate["waited_s"], "gate_ok": gate["ok"],
-           # which start of the arm wrote this row, and whether that start went on past a failed preflight
-           "session": arm.session_id if arm else None, "allow_noisy": bool(arm and arm.allow_noisy),
-           "preflight_failed_allowed": bool(arm and arm.allow_noisy and arm.report.failed)}
+    iso = IsolationRecord(
+        **win, retries=attempts, noisy=not win["clean"], cpu_busy_before=gate["cpu_busy_before"],
+        waited_s=gate["waited_s"], gate_ok=gate["ok"],
+        # which start of the arm wrote this row, and whether that start went on past a failed preflight
+        session=arm.session_id if arm else None, allow_noisy=bool(arm and arm.allow_noisy),
+        preflight_failed_allowed=bool(arm and arm.allow_noisy and arm.report.failed))
     return result, {**pinfo, "isolation": iso}
 
 
 def need_ram_gb(model: str | os.PathLike) -> float | None:
-    """Free memory an arm wants: RAM_FACTOR times the model file (llama.cpp's resident set is 1.4 times the file).
+    """Free memory an arm wants: RAM_FACTOR times the model file.
+
+    The factor is a margin, not a measurement of every runtime: in the committed CPU results of LLaDA-8B Q4_K_M
+    (4.93 GB) the peak resident set of mojo-dllm was 5.92 GB, 1.2 times the file, and llama.cpp's 8.44 GB, 1.7 times,
+    so the check does not promise that a llama.cpp run fits.
 
     None when the size cannot be read (missing, unreadable, not a regular file): the preflight then FAILs
     `memory`, it never reads the need as zero."""

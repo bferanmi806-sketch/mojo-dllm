@@ -2,7 +2,13 @@ from std.math import sqrt
 from std.testing import assert_equal, assert_true, assert_raises, TestSuite
 
 from mojo_dllm.formats.gguf import GGUFFile
-from mojo_dllm.models.transformer import DiffusionLM, ModelConfig
+from mojo_dllm.models.transformer import (
+    DiffusionLM,
+    ModelConfig,
+    check_window,
+    _load_matrix,
+    _load_vector,
+)
 from mojo_dllm.sys.mem import F32Ptr, Floats
 from mojo_dllm.sys.mmap import Mapping
 
@@ -88,6 +94,240 @@ def test_rejects_too_long_input() raises:
     var out = Floats(VOCAB)
     with assert_raises(contains="exceeds"):
         m.forward(toks, rows, out.ptr())
+
+
+def _refuses_window(
+    mut m: DiffusionLM,
+    toks: List[Int],
+    lo: Int,
+    hi: Int,
+    rows: List[Int],
+    needle: String,
+) raises:
+    """`forward_window` refuses, says `needle`, and writes nothing to the
+    logits buffer: a guard that ran late would have written there first. The
+    buffer holds a row for every position, so a pass that is wrongly accepted
+    fails the assertions instead of overrunning it."""
+    var out = Floats(9 * VOCAB)
+    for i in range(out.n):
+        out[i] = 7.0
+    try:
+        m.forward_window(toks, lo, hi, rows, out.ptr())
+    except e:
+        if needle not in String(e):
+            raise Error(
+                "window ("
+                + String(lo)
+                + ", "
+                + String(hi)
+                + "): the error does not say '"
+                + needle
+                + "': "
+                + String(e)
+            )
+        for i in range(out.n):
+            assert_equal(out[i], 7.0, "the refused pass wrote to the logits")
+        return
+    raise Error("window (" + String(lo) + ", " + String(hi) + "): accepted")
+
+
+def test_forward_refuses_output_rows_that_are_not_ascending_inside_the_window() raises:
+    var m = DiffusionLM(FIX + "tiny-llada.gguf", threads=2, max_tokens=16)
+    var toks = _tokens()
+    var ascending = "output rows must be ascending positions inside the window"
+    var a: List[Int] = [3, 3]
+    _refuses_window(m, toks, 0, 8, a, ascending)
+    var b: List[Int] = [4, 3]
+    _refuses_window(m, toks, 0, 8, b, ascending)
+    var c: List[Int] = [8]
+    _refuses_window(m, toks, 0, 8, c, ascending)
+    var d: List[Int] = [-1]
+    _refuses_window(m, toks, 0, 8, d, ascending)
+    var e: List[Int] = [0, 2, 9]
+    _refuses_window(m, toks, 0, 8, e, ascending)
+
+
+def test_forward_refuses_no_output_rows() raises:
+    var m = DiffusionLM(FIX + "tiny-llada.gguf", threads=2, max_tokens=16)
+    var none = List[Int]()
+    _refuses_window(
+        m, _tokens(), 0, 8, none, "forward called with no output rows"
+    )
+
+
+def test_forward_refuses_a_window_that_is_not_a_range_inside_the_input() raises:
+    var m = DiffusionLM(FIX + "tiny-llada.gguf", threads=2, max_tokens=16)
+    var toks = _tokens()
+    var rows: List[Int] = [3]
+    var needle = "forward window must be a non-empty range inside the input"
+    _refuses_window(m, toks, 0, 0, rows, needle)
+    _refuses_window(m, toks, -1, 4, rows, needle)
+    _refuses_window(m, toks, 2, 9, rows, needle)
+    _refuses_window(m, toks, 5, 5, rows, needle)
+    _refuses_window(m, toks, 6, 2, rows, needle)
+
+
+def test_a_partial_window_refuses_rows_outside_it() raises:
+    # With a warm cache a window (2, 6) is allowed, and its rows must lie in it.
+    var m = DiffusionLM(
+        FIX + "tiny-llada.gguf", threads=2, max_tokens=16, kv_cache=True
+    )
+    var toks = _tokens()
+    var all_rows = List[Int]()
+    for i in range(len(toks)):
+        all_rows.append(i)
+    var out = Floats(len(toks) * VOCAB)
+    m.forward(toks, all_rows, out.ptr())
+    var ascending = "output rows must be ascending positions inside the window"
+    var below: List[Int] = [1]
+    _refuses_window(m, toks, 2, 6, below, ascending)
+    var at_hi: List[Int] = [6]
+    _refuses_window(m, toks, 2, 6, at_hi, ascending)
+    var inside: List[Int] = [2, 5]
+    var two = Floats(2 * VOCAB)
+    m.forward(toks, all_rows, out.ptr())
+    m.forward_window(toks, 2, 6, inside, two.ptr())
+
+
+def test_forward_refuses_a_token_id_outside_the_vocabulary() raises:
+    var m = DiffusionLM(FIX + "tiny-llada.gguf", threads=2, max_tokens=16)
+    var rows: List[Int] = [0]
+    var below = _tokens()
+    below[2] = -1
+    var needle = "token id -1 is outside the vocabulary"
+    var out = Floats(VOCAB)
+    with assert_raises(contains=needle):
+        m.forward(below, rows, out.ptr())
+    var above = _tokens()
+    above[2] = VOCAB
+    with assert_raises(contains="token id 512 is outside the vocabulary"):
+        m.forward(above, rows, out.ptr())
+    # The model still runs afterwards.
+    m.forward(_tokens(), rows, out.ptr())
+
+
+def _window_logits(
+    mut m: DiffusionLM, toks: List[Int], win: List[Int]
+) raises -> Floats:
+    var out = Floats(len(win) * VOCAB)
+    m.forward_window(toks, 3, 7, win, out.ptr())
+    return out^
+
+
+def _full_pass(mut m: DiffusionLM, toks: List[Int]) raises -> Floats:
+    var all_rows = List[Int]()
+    for i in range(len(toks)):
+        all_rows.append(i)
+    var out = Floats(len(toks) * VOCAB)
+    m.forward(toks, all_rows, out.ptr())
+    return out^
+
+
+def _check_stale_window(path: String, outside: Int) raises:
+    # A window pass recomputes rows [3, 7) and reads every other row's K/V from
+    # the cache. Changing a token outside the window after the full pass must
+    # therefore change nothing: the cache is stale on purpose. A pass that
+    # recomputed the outside rows from the tokens would see the new token.
+    var m = DiffusionLM(FIX + path, threads=2, max_tokens=16, kv_cache=True)
+    var toks = _tokens()
+    var win: List[Int] = [3, 4, 6]
+    _ = _full_pass(m, toks)
+    var w1 = _window_logits(m, toks, win)
+
+    var changed = _tokens()
+    changed[outside] = 99
+    _ = _full_pass(m, toks)
+    var w2 = _window_logits(m, changed, win)
+    for i in range(w1.n):
+        assert_equal(
+            w1[i],
+            w2[i],
+            path + ": window logit " + String(i) + " saw the changed token",
+        )
+
+    # The changed token does matter to a fresh full pass, so the equality
+    # above is not an artifact of a token that no row reads.
+    _ = _full_pass(m, changed)
+    var fresh = _window_logits(m, changed, win)
+    var differing = 0
+    for i in range(w1.n):
+        if fresh[i] != w1[i]:
+            differing += 1
+    assert_true(
+        differing > 0,
+        path + ": a fresh pass on the changed canvas equals the stale window",
+    )
+
+
+def test_a_window_reads_stale_cache_rows_llada() raises:
+    _check_stale_window("tiny-llada.gguf", 1)
+    _check_stale_window("tiny-llada.gguf", 7)
+
+
+def test_a_window_reads_stale_cache_rows_dream() raises:
+    _check_stale_window("tiny-dream.gguf", 1)
+    _check_stale_window("tiny-dream.gguf", 7)
+
+
+def test_the_input_length_limit_is_exact() raises:
+    # n_tokens == max_tokens runs; one more raises. The limit sizes every
+    # buffer, so a guard that lets one extra token through overruns them.
+    var toks = _tokens()
+    assert_equal(len(toks), 8)
+    var rows: List[Int] = [0]
+    # The guard itself, on its own: a model that wrongly accepted the ninth
+    # token would overrun its buffers, so this case must fail by assertion.
+    check_window(8, 8, 0, 8, rows, False, -1)
+    with assert_raises(
+        contains="input of 9 tokens exceeds the runtime limit of 8"
+    ):
+        check_window(9, 8, 0, 9, rows, False, -1)
+    var m = DiffusionLM(FIX + "tiny-llada.gguf", threads=2, max_tokens=8)
+    var out = Floats(VOCAB)
+    m.forward(toks, rows, out.ptr())
+    var longer = _tokens()
+    longer.append(7)
+    with assert_raises(
+        contains="input of 9 tokens exceeds the runtime limit of 8"
+    ):
+        m.forward(longer, rows, out.ptr())
+
+
+def test_load_matrix_refuses_a_shape_that_is_not_the_tensors() raises:
+    # kquants.gguf: q4k is 512 wide and 4 rows. A wrong row count or width
+    # would let `PackedMatrix` read past the tensor.
+    var g = GGUFFile(FIX + "kquants.gguf")
+    var ll = GGUFFile(FIX + "tiny-llada.gguf")
+    var ok = _load_matrix(ll, "blk.0.attn_q.weight", 256, 256, 1)
+    assert_equal(ok.N, 256)
+    with assert_raises(
+        contains="tensor shape mismatch for q4k: [512, 4], expected [512, 8]"
+    ):
+        _ = _load_matrix(g, "q4k", 8, 512, 1)
+    with assert_raises(
+        contains="tensor shape mismatch for q4k: [512, 4], expected [256, 4]"
+    ):
+        _ = _load_matrix(g, "q4k", 4, 256, 1)
+    with assert_raises(contains="tensor not found: absent"):
+        _ = _load_matrix(g, "absent", 4, 512, 1)
+
+
+def test_load_matrix_refuses_a_type_without_a_matrix_kernel() raises:
+    var g = GGUFFile(FIX + "kquants.gguf")
+    with assert_raises(
+        contains="tensor f16 is F16: matrix kernels exist for Q4_K and Q6_K"
+    ):
+        _ = _load_matrix(g, "f16", 2, 64, 1)
+
+
+def test_load_vector_refuses_a_length_that_is_not_the_tensors() raises:
+    var g = GGUFFile(FIX + "kquants.gguf")
+    var v = _load_vector(g, "f16", 128)
+    assert_equal(v.n, 128)
+    with assert_raises(contains="tensor shape mismatch for f16: [64, 2]"):
+        _ = _load_vector(g, "f16", 64)
+    with assert_raises(contains="tensor shape mismatch for f16: [64, 2]"):
+        _ = _load_vector(g, "f16", 129)
 
 
 def test_rejects_wrong_architecture() raises:
@@ -235,6 +475,124 @@ def test_a_failed_pass_invalidates_the_cache() raises:
         m.forward_window(bad, 3, 7, rows, out.ptr())
     with assert_raises(contains="run a full pass first"):
         m.forward_window(toks, 3, 7, rows, out.ptr())
+
+
+def _refuses_config(name: String, message: String) raises:
+    var g = GGUFFile(FIX + "metadata/" + name + ".gguf")
+    with assert_raises(contains=message):
+        _ = ModelConfig(g)
+
+
+def test_config_accepts_embedding_and_output_that_match_the_vocabulary() raises:
+    var c = ModelConfig(GGUFFile(FIX + "metadata/shapes-valid.gguf"))
+    assert_equal(c.vocab, 8)
+    assert_equal(c.hidden, 256)
+    # A file without an output tensor loads here; the loader names it later.
+    _ = ModelConfig(GGUFFile(FIX + "metadata/output-absent.gguf"))
+
+
+def test_config_refuses_embedding_rows_short_of_the_vocabulary() raises:
+    _refuses_config(
+        "embd-rows-short",
+        (
+            "tensor shape mismatch for token_embd.weight: [256, 6], expected"
+            " [256, 8] (llada.embedding_length 256, vocabulary 8 from"
+            " llada.vocab_size)"
+        ),
+    )
+
+
+def test_config_refuses_embedding_rows_beyond_the_vocabulary() raises:
+    _refuses_config(
+        "embd-rows-long",
+        (
+            "tensor shape mismatch for token_embd.weight: [256, 10], expected"
+            " [256, 8]"
+        ),
+    )
+
+
+def test_config_refuses_output_rows_short_of_the_vocabulary() raises:
+    _refuses_config(
+        "output-rows-short",
+        "tensor shape mismatch for output.weight: [256, 6], expected [256, 8]",
+    )
+
+
+def test_config_refuses_an_embedding_of_the_wrong_width() raises:
+    _refuses_config(
+        "embd-width",
+        (
+            "tensor shape mismatch for token_embd.weight: [512, 8], expected"
+            " [256, 8]"
+        ),
+    )
+
+
+def test_vocabulary_read_from_the_output_rows_must_match_the_embedding() raises:
+    _refuses_config(
+        "vocab-from-output",
+        (
+            "tensor shape mismatch for token_embd.weight: [256, 6], expected"
+            " [256, 8] (llada.embedding_length 256, vocabulary 8 from the rows"
+            " of output.weight)"
+        ),
+    )
+
+
+def test_cpu_loader_refuses_a_short_embedding_before_any_layer() raises:
+    # The file has no layer tensors: without the check, the loader would stop at
+    # blk.0.attn_norm.weight, and a token id of 7 would read past the 6 rows.
+    with assert_raises(
+        contains="tensor shape mismatch for token_embd.weight: [256, 6]"
+    ):
+        _ = DiffusionLM(
+            FIX + "metadata/embd-rows-short.gguf", threads=1, max_tokens=4
+        )
+
+
+def test_config_refuses_a_zero_count_and_names_the_key() raises:
+    for key in [
+        "llada.block_count",
+        "llada.embedding_length",
+        "llada.attention.head_count",
+        "llada.attention.head_count_kv",
+        "llada.feed_forward_length",
+        "llada.vocab_size",
+    ]:
+        _refuses_config(
+            "zero-" + String(key), String(key) + " must be positive, got 0"
+        )
+
+
+def test_config_refuses_a_negative_count_and_names_the_key() raises:
+    _refuses_config(
+        "negative-llada.attention.head_count",
+        "llada.attention.head_count must be positive, got -2",
+    )
+    _refuses_config(
+        "negative-llada.attention.head_count_kv",
+        "llada.attention.head_count_kv must be positive, got -1",
+    )
+
+
+def test_config_refuses_an_epsilon_that_is_not_finite_and_above_zero() raises:
+    for label in ["zero", "negative", "nan", "inf"]:
+        _refuses_config(
+            String(label) + "-llada.attention.layer_norm_rms_epsilon",
+            (
+                "llada.attention.layer_norm_rms_epsilon must be finite and"
+                " above zero"
+            ),
+        )
+
+
+def test_config_refuses_a_rope_base_that_is_not_finite_and_above_zero() raises:
+    for label in ["zero", "negative", "nan", "inf"]:
+        _refuses_config(
+            String(label) + "-llada.rope.freq_base",
+            "llada.rope.freq_base must be finite and above zero",
+        )
 
 
 def test_config_rejects_missing_layers() raises:

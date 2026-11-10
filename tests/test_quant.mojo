@@ -244,7 +244,7 @@ def _check_packed(name: String, n_tokens: Int) raises:
     var t = g.tensor(name)
     var K = t.ne0
     var N = t.n_rows()
-    var pm = PackedMatrix(g.data_addr(t), t.ggml_type, N, K)
+    var pm = PackedMatrix(g.data_addr(t), t.n_bytes, t.ggml_type, N, K)
     var x = Floats(n_tokens * K)
     _fill(x, 11)
     var qa = QActs(n_tokens, K)

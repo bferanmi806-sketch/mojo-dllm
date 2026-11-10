@@ -13,6 +13,7 @@
     "Write a short Python function that checks whether a number is prime.",
     "List three differences between diffusion language models and autoregressive language models."
   ],
+  "arch": "dream",
   "gen_length": 128,
   "steps": 32,
   "block_length": 32,

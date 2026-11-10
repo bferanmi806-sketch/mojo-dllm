@@ -10,7 +10,7 @@ before anything turns it into a pointer.
 
 from std.ffi import ErrNo, c_int, c_size_t, external_call, get_errno
 
-from mojo_dllm.sys.mem import Bytes, U8Ptr
+from mojo_dllm.sys.mem import Bytes, ConstU8Ptr
 
 comptime O_RDONLY = 0
 comptime PROT_READ = 1
@@ -59,9 +59,15 @@ struct Mapping(Movable):
             _ = external_call["close", c_int](fd)
             raise Error("is a directory: " + path)
         var end = Int(external_call["lseek", Int](fd, Int(0), c_int(SEEK_END)))
-        if end <= 0:
+        var seek_failure = get_errno()
+        if end < 0:
             _ = external_call["close", c_int](fd)
-            raise Error("file is empty or unreadable: " + path)
+            raise Error(
+                "cannot get the size of " + path + ": " + String(seek_failure)
+            )
+        if end == 0:
+            _ = external_call["close", c_int](fd)
+            raise Error("file is empty: " + path)
         var addr = Int(
             external_call["mmap", Int](
                 Int(0),
@@ -72,17 +78,20 @@ struct Mapping(Movable):
                 Int(0),
             )
         )
+        var map_failure = get_errno()
         _ = external_call["close", c_int](fd)
         if addr == -1 or addr == 0:
-            raise Error("mmap failed for " + path)
+            raise Error("mmap failed for " + path + ": " + String(map_failure))
         self.addr = addr
         self.size = end
 
     def __deinit__(deinit self):
         _ = external_call["munmap", c_int](self.addr, c_size_t(self.size))
 
-    def ptr(self) -> U8Ptr:
-        return U8Ptr(unsafe_from_address=self.addr)
+    def ptr(self) -> ConstU8Ptr:
+        """The mapped bytes. The pages are `PROT_READ`, so the pointer cannot store.
+        """
+        return ConstU8Ptr(unsafe_from_address=self.addr)
 
     def will_need(self):
         """Ask the kernel to start reading the whole file ahead of use."""
@@ -90,27 +99,54 @@ struct Mapping(Movable):
             self.addr, c_size_t(self.size), c_int(MADV_WILLNEED)
         )
 
-    def drop(self, addr: Int, size: Int):
-        """Release the resident pages of [addr, addr+size), shrunk to whole pages.
+    def _check_range(self, what: String, offset: Int, size: Int) raises:
+        """The range [offset, offset + size) lies inside the mapping.
+
+        The end is compared with `self.size` by subtraction, so a size near
+        2^63 cannot wrap past the test. `MADV_DONTNEED` outside the mapping
+        zero-fills private anonymous pages, which is heap corruption.
+        """
+        # An offset past the end leaves `self.size - offset` negative, so the
+        # last test refuses it for every size.
+        if offset < 0 or size < 0 or size > self.size - offset:
+            raise Error(
+                what
+                + " range ["
+                + String(offset)
+                + ", +"
+                + String(size)
+                + ") is outside the "
+                + String(self.size)
+                + "-byte mapping of "
+                + self.path
+            )
+
+    def drop(self, offset: Int, size: Int) raises:
+        """Release the resident pages of [offset, offset+size) of the file,
+        shrunk to whole pages.
 
         Used after a tensor has been repacked into the heap: the mapped bytes
         will not be read again, and leaving them resident would double-count
         the model in RSS. A later read faults the page back in from the file.
+        The range must lie inside the mapping.
         """
-        var lo, hi = drop_range(addr, size)
+        self._check_range("drop", offset, size)
+        var lo, hi = drop_range(self.addr + offset, size)
         if hi > lo:
             _ = external_call["madvise", c_int](
                 lo, c_size_t(hi - lo), c_int(MADV_DONTNEED)
             )
 
-    def populate(self, addr: Int, size: Int):
-        """Fault in [addr, addr+size) with one call (Linux 5.14+).
+    def populate(self, offset: Int, size: Int) raises:
+        """Fault in [offset, offset+size) of the file with one call (Linux 5.14+).
 
         Repacking reads every byte of a tensor once. Without this the kernel
         takes one page fault per 4 KiB page; MADV_POPULATE_READ reads the
-        range in bulk. Failure (an older kernel) only costs speed.
+        range in bulk. Failure (an older kernel) only costs speed. The range
+        must lie inside the mapping.
         """
-        var lo, hi = populate_range(addr, size)
+        self._check_range("populate", offset, size)
+        var lo, hi = populate_range(self.addr + offset, size)
         if hi > lo:
             _ = external_call["madvise", c_int](
                 lo, c_size_t(hi - lo), c_int(MADV_POPULATE_READ)

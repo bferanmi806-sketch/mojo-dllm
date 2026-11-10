@@ -67,6 +67,12 @@ contain 32 weights and one f16 scale, so their activations use
 that do not fit the K-quant activation layout. The existing default remains
 256, and `pgemm` checks that the activation block size matches the matrix.
 
+`PackedMatrix(src_addr, src_bytes, kind, N, K)` takes the size of its source
+as well as the address, and raises unless `src_bytes` equals the bytes of `N`
+rows of `K` weights. The tensor loaders pass the byte count the GGUF reader
+checked against the file, so a shape that disagrees with the tensor is an error
+and not a read past it.
+
 Each packed block holds eight f32 weight scales and interleaved bytes for
 eight rows. Q5_0 uses unsigned values with zero point 16; Q8_0 uses zero
 point 128. The activation sums remove those offsets after the integer dot
@@ -87,7 +93,9 @@ the inverse square root of the hidden width, the router scale vector and an
 F32 projection. It computes softmax, selects the highest-weight experts with
 lower expert IDs winning ties, and renormalizes the selected weights.
 
-`ExpertWeights` repacks each expert's slice once. `MoEWorkspace` stores
+`ExpertWeights` repacks each expert's slice once, after checking that the byte
+counts of the fused gate/up tensor and the down tensor match the expert count
+and dimensions. `MoEWorkspace` stores
 reusable buffers large enough for every token to select the same expert.
 `grouped_experts` counts and groups token/expert pairs, skips empty experts,
 and runs batched gate/up and down projections for each active expert. Between

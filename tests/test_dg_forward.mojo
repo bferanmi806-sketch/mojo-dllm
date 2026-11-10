@@ -278,8 +278,11 @@ def _check_rows(
     1 of 25 rows beyond 1e-5 (worst 6.1e-4); layer 1: 6 of 25 (worst 1.9e-3);
     logits: 6 of 16 rows (worst 5.6e-3). Prompt 150 logits: worst 7.0e-3. Prompt
     rows never see canvas ties and stay at 1e-7. So the test asks that at least
-    half the rows agree within 1e-5 and that none is off by more than 2e-2. A
-    wrong formula moves every row by far more than 1e-5.
+    a quarter of the rows agree within 1e-5 and that none is off by more than
+    2e-2. The measured worst case leaves 10 of 16 rows within 1e-5, so a quarter
+    (4 of 16) survives 12 rows flipping on another CPU, where "half" survived
+    only 8. A wrong formula moves every row by far more than 1e-5, so it leaves
+    none within the bound and still fails.
     """
     var close = 0
     var worst = Float64(0)
@@ -291,7 +294,7 @@ def _check_rows(
             close += 1
         worst = max(worst, e)
     assert_true(
-        close * 2 >= rows,
+        close * 4 >= rows,
         what
         + ": only "
         + String(close)

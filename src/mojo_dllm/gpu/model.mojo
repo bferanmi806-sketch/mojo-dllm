@@ -41,6 +41,9 @@ from mojo_dllm.models.transformer import (
     ModelConfig,
     RowStats,
     Timings,
+    check_window,
+    expect_matrix,
+    expect_vector,
 )
 from mojo_dllm.quant.kquants import (
     dequant_row,
@@ -96,28 +99,14 @@ struct _Planner:
 
 
 def _vec_len(g: GGUFFile, name: String, n: Int) raises -> Int:
-    var t = g.tensor(name)
-    if t.n_elements() != n:
-        raise Error("tensor shape mismatch for " + name + ": " + t.shape_str())
+    _ = expect_vector(g, name, n)
     return n
 
 
 def _plan_matrix(
     g: GGUFFile, mut plan: _Planner, name: String, rows: Int, cols: Int
 ) raises -> DevMatrix:
-    var t = g.tensor(name)
-    if t.ne0 != cols or t.n_rows() != rows:
-        raise Error(
-            "tensor shape mismatch for "
-            + name
-            + ": "
-            + t.shape_str()
-            + ", expected ["
-            + String(cols)
-            + ", "
-            + String(rows)
-            + "]"
-        )
+    var t = expect_matrix(g, name, rows, cols)
     check_matrix_type(t)
     var off = plan.take(staged_matrix_bytes(t.ggml_type, rows, cols))
     return DevMatrix(off, t.ggml_type, rows, cols)
@@ -200,11 +189,6 @@ struct GpuDiffusionLM(DenoisingModel, Movable):
                 + self.ctx.name()
                 + " has "
                 + String(self.ctx.compute_capability())
-            )
-        if self.embd.ne0 != c.hidden:
-            raise Error(
-                "tensor shape mismatch for token_embd.weight: "
-                + self.embd.shape_str()
             )
         var kvd = c.kv_dim()
 
@@ -373,11 +357,11 @@ struct GpuDiffusionLM(DenoisingModel, Movable):
         mut self, name: String, m: DevMatrix, stage: Bytes
     ) raises:
         var t = self.gguf.tensor(name)
-        self.gguf.map.populate(self.gguf.data_addr(t), t.n_bytes)
+        self.gguf.map.populate(t.data_offset, t.n_bytes)
         stage_matrix(
             self.gguf.data_addr(t), m.ggml_type, m.rows, m.cols, stage.u8()
         )
-        self.gguf.map.drop(self.gguf.data_addr(t), t.n_bytes)
+        self.gguf.map.drop(t.data_offset, t.n_bytes)
         self._upload(
             m.off, staged_matrix_bytes(m.ggml_type, m.rows, m.cols), stage
         )
@@ -520,35 +504,15 @@ struct GpuDiffusionLM(DenoisingModel, Movable):
         var c = self.cfg
         var L = len(tokens)
         var n_out = len(out_rows)
-        if L > self.max_tokens:
-            raise Error(
-                "input of "
-                + String(L)
-                + " tokens exceeds the runtime limit of "
-                + String(self.max_tokens)
-            )
-        if lo < 0 or hi > L or lo >= hi:
-            raise Error(
-                "forward window must be a non-empty range inside the input"
-            )
-        var full = lo == 0 and hi == L
-        if not full and not self.kv_cache:
-            raise Error("a partial forward window needs the K/V cache")
-        if not full and self.cache_tokens != L:
-            raise Error(
-                "the K/V cache does not hold this canvas; run a full pass first"
-            )
-        if n_out == 0:
-            raise Error("forward called with no output rows")
-        for j in range(n_out):
-            if (
-                out_rows[j] < lo
-                or out_rows[j] >= hi
-                or (j > 0 and out_rows[j] <= out_rows[j - 1])
-            ):
-                raise Error(
-                    "output rows must be ascending positions inside the window"
-                )
+        check_window(
+            L,
+            self.max_tokens,
+            lo,
+            hi,
+            out_rows,
+            self.kv_cache,
+            self.cache_tokens,
+        )
         # The cache holds no canvas until this pass has synchronized: one that
         # raises, here or at the sync, may already have overwritten some rows.
         if self.kv_cache:

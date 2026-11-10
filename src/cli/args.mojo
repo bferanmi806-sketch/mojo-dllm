@@ -10,6 +10,15 @@ struct Args(Movable):
     var positional: List[String]
     var unknown: List[String]
     var missing_value: String
+    var flag_value: String
+    """The value flag whose value is the name of another declared flag
+    (`--prompt --verbose`), or "". `flag_value_text` holds that value."""
+    var flag_value_text: String
+    var repeated: String
+    """The first value flag given twice, or ""."""
+    var declared: List[String]
+    """Every name a lookup may ask for: the value flags, the boolean flags and
+    `help`."""
 
     def __init__(
         out self,
@@ -22,13 +31,30 @@ struct Args(Movable):
         A flag the command does not declare goes to `unknown` and takes no
         value. `--help` and `-h` set the boolean flag `help` for every command.
         A value flag in last position stops the parse and is named in
-        `missing_value`; the caller decides whether help outranks that.
+        `missing_value`; the caller decides whether help outranks that. A value
+        that is the name of a declared flag (`--prompt --verbose`) stops it the
+        same way and is named in `flag_value`: a forgotten value is far more
+        likely than a prompt that spells a flag. `--help` stays a legal value.
+        A value flag given twice is named in `repeated`.
+
+        A lookup (`has`, `get`, ...) of a name that is not declared raises, so a
+        misspelled name in the code fails at once and does not read as an absent
+        flag.
         """
         self.values = Dict[String, String]()
         self.flags = List[String]()
         self.positional = List[String]()
         self.unknown = List[String]()
         self.missing_value = String("")
+        self.flag_value = String("")
+        self.flag_value_text = String("")
+        self.repeated = String("")
+        self.declared = List[String]()
+        for f in value_flags:
+            self.declared.append(f)
+        for f in boolean_flags:
+            self.declared.append(f)
+        self.declared.append("help")
         self.command = argv[1] if len(argv) > 1 else String("")
         var i = 2
         while i < len(argv):
@@ -57,13 +83,46 @@ struct Args(Movable):
                 if i + 1 >= len(argv):
                     self.missing_value = name
                     break
-                self.values[name] = argv[i + 1]
+                var value = argv[i + 1]
+                if value.startswith("--"):
+                    var named = String(value[byte=2:])
+                    var is_flag = False
+                    for f in value_flags:
+                        if f == named:
+                            is_flag = True
+                    for f in boolean_flags:
+                        if f == named:
+                            is_flag = True
+                    if is_flag:
+                        self.flag_value = name
+                        self.flag_value_text = value
+                        break
+                if name in self.values and self.repeated.byte_length() == 0:
+                    self.repeated = name
+                self.values[name] = value
                 i += 2
             else:
                 self.positional.append(a)
                 i += 1
 
-    def has(self, name: String) -> Bool:
+    def declares(self, name: String) -> Bool:
+        for f in self.declared:
+            if f == name:
+                return True
+        return False
+
+    def _require(self, name: String) raises:
+        if not self.declares(name):
+            raise Error(
+                "internal error: flag --"
+                + name
+                + " is not declared for '"
+                + self.command
+                + "'"
+            )
+
+    def has(self, name: String) raises -> Bool:
+        self._require(name)
         if name in self.values:
             return True
         for f in self.flags:
@@ -72,21 +131,25 @@ struct Args(Movable):
         return False
 
     def get(self, name: String) raises -> String:
+        self._require(name)
         if name not in self.values:
             raise Error("missing required flag --" + name)
         return self.values[name]
 
     def get_or(self, name: String, default: String) raises -> String:
+        self._require(name)
         if name in self.values:
             return self.values[name]
         return default
 
     def int_or(self, name: String, default: Int) raises -> Int:
+        self._require(name)
         if name in self.values:
             return Int(self.values[name])
         return default
 
     def float_or(self, name: String, default: Float64) raises -> Float64:
+        self._require(name)
         if name in self.values:
             return Float64(self.values[name])
         return default
@@ -219,9 +282,16 @@ def with_env(
 
 
 def parse_csv_ints(s: String) raises -> List[Int]:
+    """Comma-separated integers. A trailing comma is legal; an empty part
+    anywhere else (`0,,2`, `,1`) raises, because a dropped part moves every
+    position after it."""
     var out = List[Int]()
-    for part in s.split(","):
-        var p = String(part).strip()
-        if p.byte_length() > 0:
-            out.append(Int(p))
+    var parts = s.split(",")
+    for k in range(len(parts)):
+        var p = String(parts[k]).strip()
+        if p.byte_length() == 0:
+            if k == len(parts) - 1:
+                continue
+            raise Error("empty entry " + String(k + 1) + " in '" + s + "'")
+        out.append(Int(p))
     return out^

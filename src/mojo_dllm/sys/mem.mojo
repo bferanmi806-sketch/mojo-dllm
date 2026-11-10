@@ -16,6 +16,7 @@ comptime ALIGN = 64
 comptime F32Ptr = Pointer[Float32, MutAnyOrigin]
 comptime I8Ptr = Pointer[Int8, MutAnyOrigin]
 comptime U8Ptr = Pointer[UInt8, MutAnyOrigin]
+comptime ConstU8Ptr = Pointer[UInt8, ImmutAnyOrigin]
 comptime I32Ptr = Pointer[Int32, MutAnyOrigin]
 comptime F64Ptr = Pointer[Float64, MutAnyOrigin]
 comptime I16Ptr = Pointer[Int16, MutAnyOrigin]
@@ -29,12 +30,19 @@ def alloc_bytes(n_bytes: Int, zero: Bool = True) raises -> Int:
     """A 64-byte aligned block, zeroed unless the caller overwrites all of it.
 
     Blocks of 2 MiB and more are aligned to 2 MiB and advised as huge-page
-    candidates: the repacked model is about 5 GB, and 4 KiB pages would cost
+    candidates: a repacked model is several gigabytes, and 4 KiB pages would cost
     over a million page faults to populate it.
     """
     if n_bytes < 0:
         raise Error(
             "cannot allocate a negative size: " + String(n_bytes) + " bytes"
+        )
+    if n_bytes > Int.MAX - HUGE:
+        # Rounding the size up to the alignment would wrap.
+        raise Error(
+            "cannot allocate "
+            + String(n_bytes)
+            + " bytes: the size is beyond what the allocator can round up"
         )
     var align = HUGE if n_bytes >= HUGE else ALIGN
     var size = ((max(n_bytes, 1) + align - 1) // align) * align
@@ -59,7 +67,7 @@ def free_bytes(addr: Int):
 
 
 struct Bytes(Movable):
-    """An owned, aligned, zeroed byte block."""
+    """An owned, aligned byte block, zeroed unless `zero` is False."""
 
     var addr: Int
     var size: Int
@@ -91,14 +99,22 @@ struct Bytes(Movable):
 
 
 struct Floats(Movable):
-    """An owned f32 array of `n` elements, zero-initialised."""
+    """An owned f32 array of `n` elements, zero-initialised unless `zero` is
+    False, in which case the caller writes every element before it reads one."""
 
     var addr: Int
     var n: Int
 
-    def __init__(out self, n: Int) raises:
+    def __init__(out self, n: Int, zero: Bool = True) raises:
+        if n > Int.MAX // 4:
+            # n * 4 wraps: 2^62 floats would be asked of the allocator as 0.
+            raise Error(
+                "cannot allocate "
+                + String(n)
+                + " floats: the size in bytes does not fit in an Int"
+            )
         self.n = n
-        self.addr = alloc_bytes(n * 4)
+        self.addr = alloc_bytes(n * 4, zero)
 
     def __deinit__(deinit self):
         free_bytes(self.addr)

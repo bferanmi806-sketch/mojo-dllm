@@ -33,7 +33,8 @@ REAL_AFTER_LOAD = hf.HF.ram_gb_after_load
 SHA = "05334cb9faaf763692dcf9d8737c642be2b2a6ae"
 ANSWER = "The answer is 18."
 RECORD_KEYS = {"index", "gold", "pred", "correct", "forward_passes", "generate_s", "stopped_early", "text",
-               "flags", "version", "model", "power_retries", "on_battery", "power_source", "isolation"}
+               "flags", "version", "model", "power_retries", "on_battery", "power_source", "isolation", "schema", "steps",
+               "completion_tokens", "finish_reason"}
 VERSIONS = {"transformers": "4.38.2", "torch": "2.2.0", "bitsandbytes": None}
 
 
@@ -273,7 +274,7 @@ def test_llada_record_values(rig: Rig) -> None:
     r = rig.rows()[0]
     assert r["model"] == "LLaDA-8B-Instruct"          # the basename of --model, as eval_gsm8k records it
     assert r["text"] == ANSWER
-    assert r["forward_passes"] == 32                  # steps; the authors' loop reports no count of its own
+    assert r["forward_passes"] is None and r["steps"] == 32   # the authors' loop reports no count: steps is the configured one
     assert r["stopped_early"] is None
     assert isinstance(r["generate_s"], float) and r["generate_s"] >= 0
     f = r["flags"]

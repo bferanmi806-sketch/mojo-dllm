@@ -39,6 +39,7 @@ model file, which is measured in the pull request that added this module.
 from std.collections import Dict
 
 from mojo_dllm.formats.gguf import GGUFFile
+from mojo_dllm.tokenizer.vocab import special_token_id, validate_token_table
 
 comptime ATTR_UNKNOWN = 1
 comptime ATTR_UNUSED = 2
@@ -227,29 +228,21 @@ struct Gemma4Vocab(Movable):
         self.tokens = g.get_str_array("tokenizer.ggml.tokens")
         var types = g.get_int_array("tokenizer.ggml.token_type")
         var n = len(self.tokens)
-        if len(types) != n:
-            raise Error(
-                "tokenizer.ggml.token_type has "
-                + String(len(types))
-                + " entries but tokenizer.ggml.tokens has "
-                + String(n)
-            )
-        self.ids = Dict[String, Int]()
-        self.attrs = List[Int](capacity=n)
         for i in range(n):
             if self.tokens[i].byte_length() == 0:
                 # llama.cpp gives an empty token this name instead.
                 self.tokens[i] = "[EMPTY_" + String(i) + "]"
-            if self.tokens[i] in self.ids:
+        self.ids = validate_token_table(self.tokens, len(types))
+        self.attrs = List[Int](capacity=n)
+        for i in range(n):
+            if types[i] < 0 or types[i] > 6:
                 raise Error(
-                    "tokenizer.ggml.tokens has the text "
-                    + repr(self.tokens[i])
-                    + " at ids "
-                    + String(self.ids[self.tokens[i]])
-                    + " and "
+                    "tokenizer.ggml.token_type["
                     + String(i)
+                    + "] is "
+                    + String(types[i])
+                    + ", expected a type from 0 to 6"
                 )
-            self.ids[self.tokens[i]] = i
             var attr = _attr_of_type(types[i])
             # llama.cpp turns these into control tokens (they end generation).
             # The vocabulary holds no other name from its list of 65.
@@ -321,11 +314,11 @@ struct Gemma4Vocab(Movable):
                 b -= 1
             self.specials[b + 1] = v
 
-        self.bos_id = self._special_id(g, "tokenizer.ggml.bos_token_id")
-        self.eos_id = self._special_id(g, "tokenizer.ggml.eos_token_id")
-        self.pad_id = self._special_id(g, "tokenizer.ggml.padding_token_id")
-        self.unk_id = self._special_id(g, "tokenizer.ggml.unknown_token_id")
-        self.mask_id = self._special_id(g, "tokenizer.ggml.mask_token_id")
+        self.bos_id = special_token_id(g, "tokenizer.ggml.bos_token_id", n)
+        self.eos_id = special_token_id(g, "tokenizer.ggml.eos_token_id", n)
+        self.pad_id = special_token_id(g, "tokenizer.ggml.padding_token_id", n)
+        self.unk_id = special_token_id(g, "tokenizer.ggml.unknown_token_id", n)
+        self.mask_id = special_token_id(g, "tokenizer.ggml.mask_token_id", n)
         if self.bos_id < 0:
             raise Error(
                 "metadata key tokenizer.ggml.bos_token_id is required: a"
@@ -358,21 +351,6 @@ struct Gemma4Vocab(Movable):
             var id = self.ids.get(String(name), -1)
             if id >= 0 and id != self.eos_id:
                 self.eog.append(id)
-
-    @staticmethod
-    def _special_id(g: GGUFFile, key: String) raises -> Int:
-        var id = g.get_int_or(key, -1)
-        if id >= 0 and id >= g.array_len("tokenizer.ggml.tokens"):
-            raise Error(
-                "metadata key "
-                + key
-                + " is "
-                + String(id)
-                + ", outside the vocabulary of "
-                + String(g.array_len("tokenizer.ggml.tokens"))
-                + " tokens"
-            )
-        return id
 
     def vocab_size(self) -> Int:
         return len(self.tokens)

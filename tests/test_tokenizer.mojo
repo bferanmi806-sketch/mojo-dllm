@@ -2,6 +2,11 @@ from std.testing import assert_equal, assert_true, assert_raises, TestSuite
 
 from cli.args import parse_csv_ints
 from mojo_dllm.formats.gguf import GGUFFile
+from mojo_dllm.formats.utf8 import (
+    utf8_decode_bytes,
+    utf8_first_invalid,
+    utf8_sequence_length,
+)
 from mojo_dllm.tokenizer.bpe import (
     Tokenizer,
     UnicodeClasses,
@@ -71,6 +76,120 @@ def _check_golden(prefix: String) raises:
             print("MISMATCH", prefix, repr(c[0]), "got", gs)
         assert_equal(tok.decode(got, skip_special=False), c[0])
     assert_equal(failures, 0)
+
+
+def _hex_bytes(h: String) -> List[UInt8]:
+    """Bytes from hex digits; "-" is no bytes."""
+    var b = h.as_bytes()
+    var out = List[UInt8]()
+    if h == "-":
+        return out^
+    for i in range(0, len(b), 2):
+        var hi = Int(b[i])
+        var lo = Int(b[i + 1])
+        hi = hi - 48 if hi <= 57 else hi - 87
+        lo = lo - 48 if lo <= 57 else lo - 87
+        out.append(UInt8(hi * 16 + lo))
+    return out^
+
+
+def _b(*values: Int) -> List[UInt8]:
+    var out = List[UInt8]()
+    for v in values:
+        out.append(UInt8(v))
+    return out^
+
+
+def _hex_int(h: String) -> Int:
+    var n = 0
+    for c in h.as_bytes():
+        var d = Int(c)
+        n = n * 16 + (d - 48 if d <= 57 else d - 87)
+    return n
+
+
+def _hex_code_points(h: String) raises -> List[Int]:
+    """Code points from space-separated hex numbers; "-" is none."""
+    var out = List[Int]()
+    if h == "-":
+        return out^
+    for part in h.split(" "):
+        out.append(_hex_int(String(part)))
+    return out^
+
+
+def _same(a: List[Int], b: List[Int]) -> Bool:
+    if len(a) != len(b):
+        return False
+    for i in range(len(a)):
+        if a[i] != b[i]:
+            return False
+    return True
+
+
+def test_utf8_decode_keeps_the_bytes_after_an_invalid_lead_byte() raises:
+    # "caf\xe9 a" in Latin-1: E9 announces a three-byte sequence, but 20 and 61
+    # are not continuation bytes, so only the E9 is replaced.
+    var latin1 = _b(0x63, 0x61, 0x66, 0xE9, 0x20, 0x61)
+    var got = utf8_decode_bytes(Span(latin1))
+    assert_true(_same(got, [0x63, 0x61, 0x66, 0xFFFD, 0x20, 0x61]))
+    assert_equal(utf8_first_invalid(Span(latin1)), 3)
+    # Valid text decodes as before.
+    var valid = _b(0x63, 0x61, 0x66, 0xC3, 0xA9)
+    assert_true(_same(utf8_decode_bytes(Span(valid)), [0x63, 0x61, 0x66, 0xE9]))
+    assert_equal(utf8_first_invalid(Span(valid)), -1)
+
+
+def test_utf8_decode_of_a_string_follows_the_same_rule() raises:
+    var bytes = _b(0x61, 0xE2, 0x82, 0x62)
+    var text = String(StringSpan(unsafe_from_utf8=Span(bytes)))
+    assert_true(_same(utf8_decode(text), [0x61, 0xFFFD, 0xFFFD, 0x62]))
+
+
+def test_utf8_cases_match_the_reference_table() raises:
+    # tests/fixtures/utf8-cases.tsv: name, bytes, code points, first invalid offset.
+    var seen = 0
+    with open(FIX + "utf8-cases.tsv", "r") as f:
+        var text = f.read()
+        for line in text.split("\n"):
+            var l = String(line)
+            if l.byte_length() == 0:
+                continue
+            var parts = l.split("\t")
+            var name = String(parts[0])
+            var data = _hex_bytes(String(parts[1]))
+            var want = _hex_code_points(String(parts[2]))
+            var first = Int(String(parts[3]))
+            var got = utf8_decode_bytes(Span(data))
+            if not _same(got, want):
+                var shown = String("")
+                for cp in got:
+                    shown += String(cp) + " "
+                assert_true(False, name + ": decoded to " + shown)
+            assert_equal(utf8_first_invalid(Span(data)), first, name)
+            seen += 1
+    assert_true(seen >= 40, "utf8-cases.tsv has " + String(seen) + " cases")
+
+
+def _length_at(data: List[UInt8], i: Int) -> Int:
+    return utf8_sequence_length(Span(data), i)
+
+
+def test_utf8_sequence_length_at_each_boundary() raises:
+    assert_equal(_length_at(_b(0x7F), 0), 1)
+    assert_equal(_length_at(_b(0xC2, 0x80), 0), 2)
+    assert_equal(_length_at(_b(0xE0, 0xA0, 0x80), 0), 3)
+    assert_equal(_length_at(_b(0xF4, 0x8F, 0xBF, 0xBF), 0), 4)
+    # One byte off each boundary.
+    assert_equal(_length_at(_b(0xC1, 0xBF), 0), 0)
+    assert_equal(_length_at(_b(0xE0, 0x9F, 0xBF), 0), 0)
+    assert_equal(_length_at(_b(0xED, 0xA0, 0x80), 0), 0)
+    assert_equal(_length_at(_b(0xF0, 0x8F, 0xBF, 0xBF), 0), 0)
+    assert_equal(_length_at(_b(0xF4, 0x90, 0x80, 0x80), 0), 0)
+    assert_equal(_length_at(_b(0xF5, 0x80, 0x80, 0x80), 0), 0)
+    # A sequence cut by the end of the input, and one that starts after byte 0.
+    assert_equal(_length_at(_b(0x61, 0xE2, 0x82), 1), 0)
+    assert_equal(_length_at(_b(0x61, 0xC3, 0xA9), 1), 2)
 
 
 def test_llada_golden_ids_match_llama_cpp() raises:
@@ -177,6 +296,76 @@ def test_byte_level_end_of_generation_is_the_rule_llada_and_dream_always_had() r
         for id in [-1, 0, tok.bos_id, tok.eos_id, tok.eot_id, tok.mask_id]:
             assert_equal(tok.is_eog(id), _old_stop_rule(tok, id))
         assert_true(tok.is_eog(tok.eos_id) and tok.is_eog(tok.eot_id))
+
+
+def _refuses_tokenizer(name: String, message: String) raises:
+    var g = GGUFFile(FIX + "gpt2-tiny/" + name + ".gguf")
+    with assert_raises(contains=message):
+        _ = Tokenizer(g)
+
+
+def test_byte_level_loader_refuses_types_shorter_than_tokens() raises:
+    _refuses_tokenizer(
+        "short-types",
+        (
+            "tokenizer.ggml.token_type has 5 entries but tokenizer.ggml.tokens"
+            " has 6"
+        ),
+    )
+
+
+def test_byte_level_loader_refuses_an_unknown_pre_tokenizer() raises:
+    _refuses_tokenizer("pre-unknown", "unsupported pre-tokenizer: mystery")
+
+
+def test_byte_level_loader_refuses_a_special_id_outside_the_vocabulary() raises:
+    _refuses_tokenizer(
+        "special-out-of-range",
+        (
+            "metadata key tokenizer.ggml.bos_token_id is 99, outside the"
+            " vocabulary of 6 tokens"
+        ),
+    )
+
+
+def test_byte_level_loader_refuses_a_repeated_token_text() raises:
+    _refuses_tokenizer(
+        "duplicate-token",
+        "tokenizer.ggml.tokens has the text 'a' at ids 0 and 5",
+    )
+
+
+def test_byte_level_loader_refuses_a_missing_eos_id() raises:
+    _refuses_tokenizer(
+        "no-eos", "metadata key tokenizer.ggml.eos_token_id is missing"
+    )
+
+
+def test_byte_level_loader_refuses_add_bos_without_a_bos_id() raises:
+    _refuses_tokenizer(
+        "add-bos-without-id",
+        (
+            "tokenizer.ggml.add_bos_token is true but"
+            " tokenizer.ggml.bos_token_id is missing"
+        ),
+    )
+
+
+def test_byte_level_loader_refuses_a_negative_special_id() raises:
+    _refuses_tokenizer(
+        "special-negative", "metadata key tokenizer.ggml.bos_token_id is -5"
+    )
+    assert_equal(
+        Tokenizer(GGUFFile(FIX + "gpt2-tiny/special-minus-one.gguf")).pad_id, -1
+    )
+
+
+def test_decode_refuses_ids_outside_the_vocabulary() raises:
+    var tok = Tokenizer(GGUFFile(FIX + "gpt2-tiny/ids.gguf"))
+    with assert_raises(contains="token id -1 is outside the vocabulary"):
+        _ = tok.decode([-1])
+    with assert_raises(contains="token id 6 is outside the vocabulary"):
+        _ = tok.decode([6])
 
 
 def main() raises:

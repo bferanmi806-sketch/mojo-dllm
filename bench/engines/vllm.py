@@ -36,14 +36,14 @@ import pathlib
 import re
 import time
 
-from . import EngineError, GenConfig, register
+from . import EngineError, GenConfig, GenResult, register
 from ._http import HttpClient, HttpError, clean
 from ._openai import model_cards, parse_chat
 
 STEPS_METRIC = "vllm:diffusion_num_denoising_steps_total"
 STEPS_METRIC_SOURCE = "vllm:diffusion_num_denoising_steps"
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024    # a 256-token completion is a few KB; /metrics is the largest answer, well under this
-CLIENT_RAM_GB = 0.5         # my estimate for the Python loop of a client that holds no model; not a measurement
+CLIENT_RAM_GB = 0.5         # an estimate for the Python loop of a client that holds no model; not a measurement
 _SAMPLE = re.compile(r"^(?P<name>[^\s{]+)(?:\{[^}]*\})?\s+(?P<value>\S+)", re.M)
 
 
@@ -211,5 +211,6 @@ class VLLM:
                                   "reports no denoising steps for it (another client, or the counter is not "
                                   "this model's), so the step count would be wrong")
             steps = after - before
-        return dict(text=text, generate_s=generate_s, forward_passes=steps, steps=steps,
-                    prompt_tokens=prompt_tokens, completion_tokens=completion_tokens, finish_reason=finish)
+        return GenResult(text=text, generate_s=generate_s, forward_passes=steps, steps=steps,
+                         prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
+                         finish_reason=finish)

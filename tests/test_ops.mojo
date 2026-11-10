@@ -1,5 +1,5 @@
 from std.math import abs, cos, sin, exp, sqrt
-from std.testing import assert_true, assert_equal, TestSuite
+from std.testing import assert_true, assert_equal, assert_raises, TestSuite
 
 from mojo_dllm.kernels.ops import (
     rmsnorm,
@@ -191,6 +191,130 @@ def test_add_inplace() raises:
         b[i] = 1.0
     add_inplace(a.ptr(), b.ptr(), 10)
     assert_equal(a[9], 10.0)
+
+
+# ---- SIMD loops against an f64 reference (#229) ------------------------------
+#
+# The width is 8 lanes. Dimension 19 runs the vector body twice and leaves a
+# tail of 3, dimension 37 runs it four times with a tail of 5; the older tests
+# use dimensions below 8, which only reach the tail.
+
+
+def _val(i: Int, salt: Int) -> Float32:
+    return Float32((i * 37 + salt * 101) % 211 - 105) / 40.0
+
+
+def _agree(got: Float32, want: Float64, what: String) raises:
+    var bound = 2e-6 * abs(want) + 1e-7
+    assert_true(
+        abs(Float64(got) - want) <= bound,
+        what + ": got " + String(got) + " want " + String(want),
+    )
+
+
+def _check_rmsnorm_dim(dim: Int) raises:
+    var rows = 3
+    var x = Floats(rows * dim)
+    var w = Floats(dim)
+    for i in range(x.n):
+        x[i] = _val(i, 1)
+    for i in range(dim):
+        w[i] = _val(i, 2)
+    var y = Floats(rows * dim)
+    rmsnorm(x.ptr(), w.ptr(), y.ptr(), rows, dim, 1e-5, 2)
+    for t in range(rows):
+        var ss = Float64(0)
+        for i in range(dim):
+            ss += Float64(x[t * dim + i]) * Float64(x[t * dim + i])
+        var inv = 1.0 / sqrt(ss / Float64(dim) + Float64(Float32(1e-5)))
+        for i in range(dim):
+            _agree(
+                y[t * dim + i],
+                Float64(x[t * dim + i]) * inv * Float64(w[i]),
+                "rmsnorm dim " + String(dim) + " at " + String(t * dim + i),
+            )
+
+
+def test_rmsnorm_vector_body_and_tail_match_an_f64_reference() raises:
+    _check_rmsnorm_dim(19)
+    _check_rmsnorm_dim(37)
+
+
+def _check_silu_mul_n(n: Int) raises:
+    var g = Floats(n)
+    var u = Floats(n)
+    var g0 = Floats(n)
+    for i in range(n):
+        g[i] = _val(i, 3)
+        g0[i] = g[i]
+        u[i] = _val(i, 4)
+    silu_mul(g.ptr(), u.ptr(), n, 2)
+    for i in range(n):
+        var a = Float64(g0[i])
+        _agree(
+            g[i],
+            a / (1.0 + exp(-a)) * Float64(u[i]),
+            "silu_mul n " + String(n) + " at " + String(i),
+        )
+
+
+def test_silu_mul_vector_body_and_tail_match_an_f64_reference() raises:
+    _check_silu_mul_n(19)
+    _check_silu_mul_n(37)
+
+
+def test_add_bias_vector_body_and_tail_match_an_f64_reference() raises:
+    for dim in [19, 37]:
+        var rows = 3
+        var x = Floats(rows * dim)
+        var b = Floats(dim)
+        var x0 = Floats(rows * dim)
+        for i in range(x.n):
+            x[i] = _val(i, 5)
+            x0[i] = x[i]
+        for i in range(dim):
+            b[i] = _val(i, 6)
+        add_bias(x.ptr(), b.ptr(), rows, dim)
+        for r in range(rows):
+            for i in range(dim):
+                assert_equal(
+                    x[r * dim + i],
+                    Float32(Float64(x0[r * dim + i]) + Float64(b[i])),
+                    "add_bias dim "
+                    + String(dim)
+                    + " at "
+                    + String(r * dim + i),
+                )
+
+
+def test_add_inplace_vector_body_and_tail_match_an_f64_reference() raises:
+    for n in [19, 37]:
+        var a = Floats(n)
+        var b = Floats(n)
+        var a0 = Floats(n)
+        for i in range(n):
+            a[i] = _val(i, 7)
+            a0[i] = a[i]
+            b[i] = _val(i, 8)
+        add_inplace(a.ptr(), b.ptr(), n)
+        for i in range(n):
+            assert_equal(
+                a[i],
+                Float32(Float64(a0[i]) + Float64(b[i])),
+                "add_inplace n " + String(n) + " at " + String(i),
+            )
+
+
+def test_attention_refuses_a_head_dimension_that_is_not_a_multiple_of_64() raises:
+    var q = Floats(128)
+    var k = Floats(128)
+    var v = Floats(128)
+    var o = Floats(128)
+    for hd in [32, 96, 100]:
+        with assert_raises(
+            contains="attention needs a head dimension that is a multiple of 64"
+        ):
+            attention(q.ptr(), k.ptr(), v.ptr(), o.ptr(), 1, 1, 1, hd, 1)
 
 
 def main() raises:

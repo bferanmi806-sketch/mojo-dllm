@@ -139,7 +139,8 @@ def rig(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Rig:
 
 
 RECORD_KEYS = {"index", "gold", "pred", "correct", "forward_passes", "generate_s", "stopped_early", "text",
-               "flags", "version", "model", "power_retries", "on_battery", "power_source", "isolation"}
+               "flags", "version", "model", "power_retries", "on_battery", "power_source", "isolation", "schema", "steps",
+               "completion_tokens", "finish_reason"}
 
 
 # registry
@@ -177,7 +178,8 @@ def test_record_values_for_llamacpp(rig: Rig) -> None:
     assert r["model"] == "LLaDA-test.Q4_K_M.gguf"                      # the basename, as eval_gsm8k records it
     assert r["version"] == _git(rig.llama, "rev-parse", "--short", "HEAD")
     assert r["generate_s"] == pytest.approx(12.3456)                    # llama.cpp's own total time, in seconds
-    assert r["forward_passes"] == 4                                     # the configured step count
+    assert r["forward_passes"] is None and r["steps"] == 4              # llama.cpp counts nothing: steps is the configured count
+    assert r["schema"] == "engine" and r["completion_tokens"] is None and r["finish_reason"] is None
     assert r["stopped_early"] is None                                   # llama.cpp has no early stop to report
     assert r["flags"]["forward_passes_measured"] is False
     assert r["flags"]["schedule"] == "timestep"
@@ -187,13 +189,13 @@ def test_record_values_for_llamacpp(rig: Rig) -> None:
 
 
 def test_scores_with_the_shared_extractor(rig: Rig, monkeypatch: pytest.MonkeyPatch) -> None:
-    first, second = _first_problems(2)
-    monkeypatch.setenv("FAKE_ANSWER", f"so it is cheap. The answer is {first['answer']}.")
+    # The first two problems of gsm8k-200.jsonl have gold answers 70000 and 460 (the file is pinned at 200 rows).
+    assert [p["answer"] for p in _first_problems(2)] == ["70000", "460"]
+    monkeypatch.setenv("FAKE_ANSWER", "so it is cheap. The answer is 70000.")
     assert rig.run() == 0
     r0, r1 = rig.rows()
-    assert r0["pred"] == eval_gsm8k.canon(first["answer"]) and r0["correct"] is True
-    assert r0["gold"] == first["answer"]
-    assert r1["correct"] is (eval_gsm8k.canon(second["answer"]) == r0["pred"])
+    assert r0["pred"] == "70000" and r0["correct"] is True and r0["gold"] == "70000"
+    assert r1["pred"] == "70000" and r1["gold"] == "460" and r1["correct"] is False
 
 
 def test_wrong_answer_is_scored_wrong(rig: Rig, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -329,7 +331,7 @@ def test_run_llama_still_refuses_a_cpu_fallback_and_still_parses(rig: Rig, monke
     c = {"llama_cpp": str(rig.llama), "models": {"gguf": str(rig.model)}, "steps": 4}
     good = run_bench.run_llama(c, "hi", 2, 21, cuda=True)
     assert good["ok"] is True and good["generate_s"] == pytest.approx(12.3456)
-    assert good["ms_per_step"] == 48.2 and good["forward_passes"] == 4
+    assert good["ms_per_step"] == 48.2 and good["forward_passes"] is None and good["steps"] == 4
     monkeypatch.setenv("FAKE_MODE", "cpu_fallback")
     bad = run_bench.run_llama(c, "hi", 2, 21, cuda=True)
     assert bad["ok"] is False and "every layer" in bad["error"]
@@ -426,8 +428,8 @@ def test_compare_keeps_its_other_keys(rig: Rig) -> None:
     assert eval_gsm8k.cmd_compare("a", "b") == 0
     doc = json.loads(next((rig.root / "bench" / "eval").glob("*-a-vs-b.json")).read_text())
     assert set(doc) == {"date", "problems", "arms", "limit", "problems_in_arm", "config", "accuracy", "difference",
-                        "ci95", "discordant", "mcnemar_p", "forward_passes_mean", "forward_passes_rows",
-                        "generate_s_mean", "generate_s_mean_clean", "clean_rows", "noisy_rows", "unchecked_rows",
+                        "ci95", "ci95_method", "discordant", "mcnemar_p", "forward_passes_mean", "forward_passes_measured",
+                        "forward_passes_rows", "generate_s_mean", "generate_s_mean_clean", "clean_rows", "noisy_rows", "unchecked_rows",
                         "models", "weights_differ"}
 
 
@@ -439,7 +441,8 @@ def test_compare_accepts_an_engine_arm_next_to_a_mojo_arm(rig: Rig) -> None:
     assert eval_gsm8k.cmd_compare("mojo-arm", "llamacpp-arm") == 0
     doc = json.loads(next((rig.root / "bench" / "eval").glob("*-mojo-arm-vs-llamacpp-arm.json")).read_text())
     assert doc["problems"] == 2
-    assert doc["forward_passes_mean"] == {"mojo-arm": 3.0, "llamacpp-arm": 4.0}
+    assert doc["forward_passes_mean"] == {"mojo-arm": 3.0, "llamacpp-arm": None}, "a configured count is not a mean"
+    assert doc["forward_passes_measured"] == {"mojo-arm": True, "llamacpp-arm": False}
     assert doc["config"]["llamacpp-arm"]["flags"]["forward_passes_measured"] is False
 
 
@@ -462,7 +465,7 @@ def test_steps_default_to_the_generation_length(rig: Rig) -> None:
     assert rig.run(steps=None, limit=1) == 0
     argv = rig.calls()[0]
     assert argv[argv.index("--diffusion-steps") + 1] == "16"
-    assert rig.rows()[0]["flags"]["diffusion_steps"] == 16 and rig.rows()[0]["forward_passes"] == 16
+    assert rig.rows()[0]["flags"]["diffusion_steps"] == 16 and rig.rows()[0]["steps"] == 16
 
 
 @pytest.mark.parametrize("battery", [True, False])

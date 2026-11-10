@@ -151,14 +151,19 @@ def _copy_prev(cs: Case) raises -> Floats:
     return buf^
 
 
-def test_forward_sc_matches_numpy() raises:
-    var m = _model(64)
-    var cs = Case("p9sc")
+def _check_sc_logits(name: String, max_tokens: Int) raises:
+    var m = _model(max_tokens)
+    var cs = Case(name)
     assert_equal(cs.sc, 1)
     var buf = _copy_prev(cs)
     m.forward_sc(cs.tokens, buf.ptr(), cs.temp_inv)
-    # Rows agree to rounding but for a few where an int8 rounding step lands on a
-    # tie (see test_dg_forward): at least half within 1e-5, none beyond 2e-2.
+    # Rows agree to rounding but for a few where an int8 rounding step lands on
+    # a tie (see test_dg_forward). The tie flips measured on the tiny model
+    # leave 15 of 16 rows within 1e-5 for p9sc (worst 5.7e-3), 12 for p0sc
+    # (worst 7.2e-3) and 14 for p150sc (worst 4.2e-3). A wrong
+    # formula moves every row, so the test asks for a quarter of the rows
+    # within 1e-5, which tolerates 12 of 16 flipping on another CPU, and for
+    # no row beyond 2e-2.
     var close = 0
     var worst = Float64(0)
     for r in range(CANVAS):
@@ -171,9 +176,25 @@ def test_forward_sc_matches_numpy() raises:
             close += 1
         worst = max(worst, e)
     assert_true(
-        close * 2 >= CANVAS, "only " + String(close) + " rows agree within 1e-5"
+        close * 4 >= CANVAS,
+        name + ": only " + String(close) + " rows agree within 1e-5",
     )
-    assert_true(worst < 2e-2, "worst row error " + String(worst))
+    assert_true(worst < 2e-2, name + ": worst row error " + String(worst))
+
+
+def test_forward_sc_matches_numpy() raises:
+    _check_sc_logits("p9sc", 64)
+
+
+def test_forward_sc_matches_numpy_with_no_prompt() raises:
+    # The canvas alone: no prompt row to attend to.
+    _check_sc_logits("p0sc", 64)
+
+
+def test_forward_sc_matches_numpy_past_the_sliding_window() raises:
+    # 150 prompt tokens against a window of 128: the sliding layer clips the
+    # prompt, and self-conditioning rides on top of that.
+    _check_sc_logits("p150sc", 200)
 
 
 def test_self_conditioning_changes_the_logits() raises:
@@ -211,13 +232,49 @@ def test_cached_step_with_self_conditioning_equals_the_unified_pass() raises:
     assert_equal(differ, 0)
 
 
+def test_cached_step_with_self_conditioning_equals_the_unified_pass_past_the_window() raises:
+    var m = _model(200)
+    var cs = Case("p150sc")
+    var unified = _copy_prev(cs)
+    m.forward_sc(cs.tokens, unified.ptr(), cs.temp_inv)
+    var prompt = List[Int]()
+    var canvas = List[Int]()
+    for i in range(cs.n_tokens):
+        if i < cs.n_prompt:
+            prompt.append(cs.tokens[i])
+        else:
+            canvas.append(cs.tokens[i])
+    m.prefill(prompt)
+    var cached = _copy_prev(cs)
+    m.step_sc(canvas, cached.ptr(), cs.temp_inv)
+    var differ = 0
+    for i in range(CANVAS * VOCAB):
+        if unified[i] != cached[i]:
+            differ += 1
+    assert_equal(differ, 0)
+
+
 def test_self_conditioning_guards() raises:
     var m = _model(64)
     var cs = Case("p9sc")
     var buf = _copy_prev(cs)
-    for bad in [0.0, -1.0, 1e30 * 1e30]:
+    # 5e6 passes a bound that ignores the cap (5e6 < 1e8) and fails the real one (1.5e8).
+    for bad in [0.0, -1.0, 1e30 * 1e30, 3e38, 1e9, 5e6]:
         with assert_raises(contains="previous temperature"):
             m.forward_sc(cs.tokens, buf.ptr(), Float32(bad))
+    # The message states the real bound, not "finite": 5e6 is finite.
+    with assert_raises(
+        contains="times the logit soft cap 30.0 at most 1e8, got 1 / 5000000.0"
+    ):
+        m.forward_sc(cs.tokens, buf.ptr(), 5e6)
+    # Inside the bound (3e6 times the cap of 30 is 9e7) the logits stay finite.
+    var ok = _copy_prev(cs)
+    m.forward_sc(cs.tokens, ok.ptr(), 3e6)
+    for i in range(CANVAS * VOCAB):
+        assert_true(
+            ok[i] == ok[i] and abs(ok[i]) < 1e6,
+            "logit " + String(i) + " is not finite",
+        )
     var canvas = List[Int]()
     for i in range(CANVAS):
         canvas.append(cs.tokens[cs.n_prompt + i])

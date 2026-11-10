@@ -29,7 +29,9 @@ The regex (llama.cpp `LLAMA_VOCAB_PRE_TYPE_BAILINGMOE`, ECMAScript semantics):
 from std.collections import Dict
 
 from mojo_dllm.formats.gguf import GGUFFile
+from mojo_dllm.formats.utf8 import utf8_decode_bytes
 from mojo_dllm.tokenizer.gemma4 import Gemma4Vocab
+from mojo_dllm.tokenizer.vocab import special_token_id, validate_token_table
 from mojo_dllm.tokenizer.unicode_tables import (
     LETTER_RANGES,
     NUMBER_RANGES,
@@ -110,38 +112,10 @@ def _lower(cp: Int) -> Int:
 
 
 def utf8_decode(s: String) -> List[Int]:
-    """Code points of `s`. Invalid bytes become U+FFFD."""
-    var out = List[Int]()
-    var b = s.as_bytes()
-    var i = 0
-    var n = len(b)
-    while i < n:
-        var c = Int(b[i])
-        if c < 0x80:
-            out.append(c)
-            i += 1
-        elif c >= 0xC0 and c < 0xE0 and i + 1 < n:
-            out.append(((c & 0x1F) << 6) | (Int(b[i + 1]) & 0x3F))
-            i += 2
-        elif c >= 0xE0 and c < 0xF0 and i + 2 < n:
-            out.append(
-                ((c & 0x0F) << 12)
-                | ((Int(b[i + 1]) & 0x3F) << 6)
-                | (Int(b[i + 2]) & 0x3F)
-            )
-            i += 3
-        elif c >= 0xF0 and i + 3 < n:
-            out.append(
-                ((c & 0x07) << 18)
-                | ((Int(b[i + 1]) & 0x3F) << 12)
-                | ((Int(b[i + 2]) & 0x3F) << 6)
-                | (Int(b[i + 3]) & 0x3F)
-            )
-            i += 4
-        else:
-            out.append(0xFFFD)
-            i += 1
-    return out^
+    """Code points of `s`. A byte that does not begin a valid UTF-8 sequence
+    becomes U+FFFD and decoding goes on at the next byte, as in llama.cpp (see
+    `formats/utf8.mojo`). A `String` made from raw bytes can hold such bytes."""
+    return utf8_decode_bytes(s.as_bytes())
 
 
 def utf8_append(mut out: List[UInt8], cp: Int):
@@ -252,8 +226,9 @@ def _match_at(cps: List[Int], cls: List[Int], i: Int) -> Int:
 struct Tokenizer(Movable):
     """The tokenizer of a GGUF file: `gpt2` (byte-level BPE) or `gemma4`.
 
-    The fields below `g4` belong to the byte-level BPE and stay empty for a
-    gemma4 file, whose vocabulary lives in `g4`. The id fields are filled for both.
+    The fields from `tokens` to `uc` belong to the byte-level BPE and stay empty
+    for a gemma4 file, whose vocabulary lives in `g4`. The id fields are filled for
+    both.
     """
 
     var tokens: List[String]
@@ -319,9 +294,7 @@ struct Tokenizer(Movable):
         self.tokens = g.get_str_array("tokenizer.ggml.tokens")
         self.types = g.get_int_array("tokenizer.ggml.token_type")
         var merges = g.get_str_array("tokenizer.ggml.merges")
-        self.ids = Dict[String, Int]()
-        for i in range(len(self.tokens)):
-            self.ids[self.tokens[i]] = i
+        self.ids = validate_token_table(self.tokens, len(self.types))
         self.ranks = Dict[String, Int]()
         for i in range(len(merges)):
             self.ranks[merges[i]] = i
@@ -359,15 +332,28 @@ struct Tokenizer(Movable):
                 extra += 1
             self.byte_to_cp[b] = cp
             self.cp_to_byte[cp] = b
-        self.bos_id = g.get_int_or("tokenizer.ggml.bos_token_id", -1)
-        self.eos_id = g.get_int_or("tokenizer.ggml.eos_token_id", -1)
-        self.mask_id = g.get_int_or("tokenizer.ggml.mask_token_id", -1)
-        self.pad_id = g.get_int_or("tokenizer.ggml.padding_token_id", -1)
-        self.unk_id = g.get_int_or("tokenizer.ggml.unknown_token_id", -1)
+        var n = len(self.tokens)
+        self.bos_id = special_token_id(g, "tokenizer.ggml.bos_token_id", n)
+        self.eos_id = special_token_id(g, "tokenizer.ggml.eos_token_id", n)
+        self.mask_id = special_token_id(g, "tokenizer.ggml.mask_token_id", n)
+        self.pad_id = special_token_id(g, "tokenizer.ggml.padding_token_id", n)
+        self.unk_id = special_token_id(g, "tokenizer.ggml.unknown_token_id", n)
+        var arch = g.get_str_or("general.architecture", "")
+        if self.eos_id < 0 and (arch == "llada" or arch == "dream"):
+            raise Error(
+                "metadata key tokenizer.ggml.eos_token_id is missing: "
+                + arch
+                + " stops generation at the end-of-sequence token"
+            )
         self.eot_id = self.ids.get("<|eot_id|>", self.ids.get("<|im_end|>", -1))
         self.add_bos = g.get_bool("tokenizer.ggml.add_bos_token") if g.has_key(
             "tokenizer.ggml.add_bos_token"
         ) else False
+        if self.add_bos and self.bos_id < 0:
+            raise Error(
+                "tokenizer.ggml.add_bos_token is true but"
+                " tokenizer.ggml.bos_token_id is missing"
+            )
         self.cache = Dict[String, List[Int]]()
         self.uc = UnicodeClasses()
 

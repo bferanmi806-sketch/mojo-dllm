@@ -11,8 +11,14 @@ at the bottom of this file.
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass, field
+import math
+from dataclasses import dataclass, field, fields
+from pathlib import Path
 from typing import Protocol, runtime_checkable
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import spec  # noqa: E402  (bench/spec.py)
 
 
 class EngineError(RuntimeError):
@@ -24,13 +30,74 @@ class GenConfig:
     """What one generation is asked to do; the same for every problem of an arm."""
 
     model: str
-    device: str = "gpu"
+    device: spec.Device = "gpu"
     gen_length: int = 256
     steps: int = 256
     block_length: int = 32
-    schedule: str = "timestep"
+    schedule: spec.Schedule = "timestep"
     extra: tuple[str, ...] = field(default_factory=tuple)
-    timeout_s: float = 1800.0      # per generation; a timeout fails the run, it never scores a row
+    timeout_s: float = spec.GENERATION_TIMEOUT_S      # per generation; a timeout fails the run, it never scores a row
+
+    def __post_init__(self) -> None:
+        if self.device not in spec.DEVICES:
+            raise EngineError(f"device must be one of {list(spec.DEVICES)}, got {self.device!r}")
+        if self.schedule not in spec.SCHEDULES:
+            raise EngineError(f"schedule must be one of {list(spec.SCHEDULES)}, got {self.schedule!r}")
+
+
+def _count(name: str, value: object, minimum: int, optional: bool = True) -> None:
+    if value is None and optional:
+        return
+    if not isinstance(value, int) or isinstance(value, bool) or value < minimum:
+        raise EngineError(f"{name} must be an integer of at least {minimum}{' or None' if optional else ''}, "
+                          f"got {value!r}")
+
+
+@dataclass(frozen=True)
+class GenResult:
+    """What an engine reports for one prompt, checked when it is built.
+
+    `forward_passes` is the number of full-canvas passes the engine itself counted, or None when it does not
+    count them. It is never the configured number: an engine that does not measure puts the configured number
+    in `steps` and leaves `forward_passes` None, and `flags.forward_passes_measured` says which kind the arm has.
+    `finish_reason` is the server's (`stop`, `length`), None for an engine that has none; a row that ended on
+    `length` was cut off by the token limit.
+
+    Reading by key (`g["text"]`) works for the fields, as it did when the result was a dict.
+    """
+
+    text: str
+    generate_s: float
+    forward_passes: int | None = None
+    steps: int | None = None
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    finish_reason: str | None = None
+    stopped_early: bool | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.text, str) or not self.text.strip():
+            raise EngineError("the engine returned no text; not scored")
+        g = self.generate_s
+        if isinstance(g, bool) or not isinstance(g, (int, float)) or not math.isfinite(g) or g <= 0:
+            raise EngineError(f"generate_s must be a finite number above 0, got {g!r}: a timing that is zero, "
+                              "negative or NaN would enter every mean")
+        _count("forward_passes", self.forward_passes, 1)
+        _count("steps", self.steps, 1)
+        _count("prompt_tokens", self.prompt_tokens, 0)
+        _count("completion_tokens", self.completion_tokens, 0)
+        if self.finish_reason is not None and not isinstance(self.finish_reason, str):
+            raise EngineError(f"finish_reason must be a string or None, got {self.finish_reason!r}")
+        if self.stopped_early is not None and not isinstance(self.stopped_early, bool):
+            raise EngineError(f"stopped_early must be a bool or None, got {self.stopped_early!r}")
+
+    def __getitem__(self, key: str) -> object:
+        if key not in {f.name for f in fields(self)}:
+            raise KeyError(key)
+        return getattr(self, key)
+
+    def get(self, key: str, default: object = None) -> object:
+        return getattr(self, key, default) if key in {f.name for f in fields(self)} else default
 
 
 @runtime_checkable
@@ -52,9 +119,9 @@ class Engine(Protocol):
     def flags(self, cfg: GenConfig) -> dict:
         """The configuration an arm keeps, recorded in every row. It decides what a resume may change."""
 
-    def generate(self, prompt: str, cfg: GenConfig) -> dict:
-        """Answer one prompt. Returns `text`, `generate_s`, `forward_passes` (int, or None when the engine
-        cannot count them) and `steps`. Raises EngineError when the run is not a valid one."""
+    def generate(self, prompt: str, cfg: GenConfig) -> GenResult:
+        """Answer one prompt. `forward_passes` is the engine's own count or None, `steps` the configured (or, for
+        an engine that measures, the measured) step count. Raises EngineError when the run is not a valid one."""
 
 
 _REGISTRY: dict[str, type] = {}

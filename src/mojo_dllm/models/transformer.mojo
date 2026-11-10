@@ -31,11 +31,13 @@ CPU forward pass for that architecture is `DiffusionGemma` in
 `models/diffusion_gemma.mojo`.
 """
 
+from std.math import isfinite
 from std.time import perf_counter_ns
 
 from mojo_dllm.formats.gguf import GGUFFile, TensorInfo
 from mojo_dllm.kernels.packed import PackedMatrix, pgemm
 from mojo_dllm.kernels.qgemm import QActs, quantize_acts
+from mojo_dllm.kernels.softembed import W as SOFTEMBED_W
 from mojo_dllm.kernels.ops import (
     rmsnorm,
     rope_table,
@@ -91,6 +93,33 @@ comptime GEMMA_EXPERTS_UP = "ffn_gate_up_exps.weight"
 comptime GEMMA_EXPERTS_DOWN = "ffn_down_exps.weight"
 
 
+# What a missing key becomes. llama.cpp (commit 5f490d7) has the same default for
+# the rope base (src/llama-model.cpp:1577), for the KV head count (line 1565) and
+# for the final logit softcap, 30 (src/llama-hparams.h:152). It has no default for
+# the context length (src/llama-model.cpp:1475 requires the key), and its diffusion
+# example reads a missing `diffusion.shift_logits` as true for every architecture
+# (examples/diffusion/diffusion-cli.cpp:186). Here the architecture decides that
+# one (see `ModelConfig.__init__`). The reader lists each of these that the
+# file left out, in `ModelConfig.defaults`.
+comptime DEFAULT_CONTEXT = 4096
+
+
+def gemma_run_refusal() -> String:
+    """The text that refuses `run` on a diffusion-gemma file, in `main` before
+    any parse work and in `ModelConfig.check_runnable` for a model that is built
+    anyway. The forward pass (#64) and the entropy-bounded denoiser (#65) are
+    written; #277 tracks wiring one into the other."""
+    return (
+        GEMMA_ARCH
+        + " does not run on this model: `run` waits for the model to be wired"
+        " into the generation loop (#277), so use `logits` (CPU) until then"
+    )
+
+
+comptime DEFAULT_ROPE_BASE: Float32 = 10000.0
+comptime DEFAULT_SOFTCAP: Float32 = 30.0
+
+
 @fieldwise_init
 struct ModelConfig(Copyable, ImplicitlyCopyable, Movable):
     """The hyperparameters of a GGUF model.
@@ -131,6 +160,10 @@ struct ModelConfig(Copyable, ImplicitlyCopyable, Movable):
     """`final_logit_softcapping`: logits become softcap * tanh(logit / softcap); 0 is off. A missing key means 30, llama.cpp's default."""
     var canvas: Int
     """`diffusion.canvas_length`: the tokens the model denoises after the prompt."""
+    var defaults: String
+    """One line for each metadata key the file lacks and the reader replaced by a
+    default, as `KEY = VALUE (default, key absent)`, each ending in a newline;
+    empty when the file set every such key. `inspect` and `run --verbose` print it."""
 
     def __init__(out self, g: GGUFFile) raises:
         var arch = g.architecture()
@@ -156,23 +189,38 @@ struct ModelConfig(Copyable, ImplicitlyCopyable, Movable):
         self.expert_ffn = 0
         self.softcap = 0.0
         self.canvas = 0
+        var defaults = String("")
         var a = self.arch + "."
-        self.n_layers = g.get_int(a + "block_count")
-        self.hidden = g.get_int(a + "embedding_length")
-        self.n_heads = g.get_int(a + "attention.head_count")
-        self.n_kv_heads = g.get_int_or(
-            a + "attention.head_count_kv", self.n_heads
-        )
+        self.n_layers = _positive(g, a + "block_count")
+        self.hidden = _positive(g, a + "embedding_length")
+        self.n_heads = _positive(g, a + "attention.head_count")
+        var kv_key = a + "attention.head_count_kv"
+        self.n_kv_heads = self.n_heads
+        if g.has_key(kv_key):
+            self.n_kv_heads = _positive(g, kv_key)
+        else:
+            defaults += _default_line(kv_key, String(self.n_heads))
         self.head_dim = self.hidden // self.n_heads
-        self.ffn = g.get_int(a + "feed_forward_length")
-        self.ctx = g.get_int_or(a + "context_length", 4096)
-        self.eps = g.get_f32(a + "attention.layer_norm_rms_epsilon")
-        self.theta = g.get_f32_or(a + "rope.freq_base", 10000.0)
+        self.ffn = _positive(g, a + "feed_forward_length")
+        var ctx_key = a + "context_length"
+        self.ctx = g.get_int_or(ctx_key, DEFAULT_CONTEXT)
+        if not g.has_key(ctx_key):
+            defaults += _default_line(ctx_key, String(DEFAULT_CONTEXT))
+        var eps_key = a + "attention.layer_norm_rms_epsilon"
+        self.eps = g.get_f32(eps_key)
+        _check_finite_positive(eps_key, self.eps)
+        var theta_key = a + "rope.freq_base"
+        self.theta = g.get_f32_or(theta_key, DEFAULT_ROPE_BASE)
+        _check_finite_positive(theta_key, self.theta)
+        if not g.has_key(theta_key):
+            defaults += _default_line(theta_key, _number_text(self.theta))
         self.mask_id = g.get_int("tokenizer.ggml.mask_token_id")
-        if g.has_key(a + "vocab_size"):
-            self.vocab = g.get_int(a + "vocab_size")
+        var vocab_source = a + "vocab_size"
+        if g.has_key(vocab_source):
+            self.vocab = _positive(g, vocab_source)
         else:
             self.vocab = g.tensor("output.weight").n_rows()
+            vocab_source = "the rows of output.weight"
         # llama.cpp: LLM_ARCH_LLADA -> ROPE_TYPE_NORM, LLM_ARCH_DREAM -> ROPE_TYPE_NEOX.
         self.rope_neox = self.arch == "dream"
         # LLaDA scores position i from row i; Dream (like its Qwen2 base)
@@ -183,6 +231,11 @@ struct ModelConfig(Copyable, ImplicitlyCopyable, Movable):
         self.shift_logits = self.arch == "dream"
         if g.has_key("diffusion.shift_logits"):
             self.shift_logits = g.get_bool("diffusion.shift_logits")
+        else:
+            defaults += _default_line(
+                "diffusion.shift_logits",
+                "true" if self.shift_logits else "false",
+            )
         if self.head_dim * self.n_heads != self.hidden:
             raise Error("hidden size is not divisible by the head count")
         if self.n_heads % self.n_kv_heads != 0:
@@ -220,6 +273,10 @@ struct ModelConfig(Copyable, ImplicitlyCopyable, Movable):
             raise Error(
                 a + "rope.scaling.factor must be 1, got " + String(factor)
             )
+        _check_embedding_and_output_shapes(
+            g, self.hidden, self.vocab, a + "embedding_length", vocab_source
+        )
+        self.defaults = defaults^
 
     def kv_dim(self) -> Int:
         """Width of K or V when every layer has the same shape (LLaDA, Dream).
@@ -249,13 +306,27 @@ struct ModelConfig(Copyable, ImplicitlyCopyable, Movable):
         return self.theta
 
     def check_runnable(self) raises:
-        """Refuses a config the loaders can read but no forward pass runs."""
+        """Refuses a config `DiffusionLM` and `GpuDiffusionLM` cannot run.
+
+        DiffusionGemma has a forward pass of its own (`DiffusionGemma` in
+        models/diffusion_gemma.mojo, which `logits` drives on the CPU), but it
+        does not implement `DenoisingModel`, so `run` cannot use it until the
+        model is wired into the generation loop (#277).
+        """
         if self.arch == GEMMA_ARCH:
-            raise Error(
-                GEMMA_ARCH
-                + " does not run on this model: `logits` runs it on the CPU,"
-                " and `run` waits for the generation loop (#64)"
-            )
+            raise Error(gemma_run_refusal())
+
+
+def _default_line(key: String, value: String) -> String:
+    return key + " = " + value + " (default, key absent)\n"
+
+
+def _number_text(v: Float32) -> String:
+    """A default as a short number: 10000, not 10000.0."""
+    var whole = Int(v)
+    if Float32(whole) == v:
+        return String(whole)
+    return String(v)
 
 
 def _positive(g: GGUFFile, key: String) raises -> Int:
@@ -263,6 +334,15 @@ def _positive(g: GGUFFile, key: String) raises -> Int:
     if value <= 0:
         raise Error(key + " must be positive, got " + String(value))
     return value
+
+
+def _check_finite_positive(key: String, value: Float32) raises:
+    """A float hyperparameter that a division or a power takes: not NaN, not
+    infinite, above zero."""
+    if not (value > 0.0) or not isfinite(value):
+        raise Error(
+            key + " must be finite and above zero, got " + String(value)
+        )
 
 
 def _equal_to(g: GGUFFile, key: String, want: Int, other: String) raises:
@@ -315,6 +395,34 @@ def _expect_shape(
             + why
             + ")"
         )
+
+
+def _check_embedding_and_output_shapes(
+    g: GGUFFile,
+    hidden: Int,
+    vocab: Int,
+    hidden_key: String,
+    vocab_source: String,
+) raises:
+    """`token_embd.weight` and, when present, `output.weight` are [hidden, vocab].
+
+    The token guard of the forward pass is `tok < vocab` and the lookup reads
+    row `tok` of the embedding, so a table with fewer rows than `vocab` reads
+    past the tensor. A tensor that the file lacks is named by its loader.
+    """
+    var why = (
+        hidden_key
+        + " "
+        + String(hidden)
+        + ", vocabulary "
+        + String(vocab)
+        + " from "
+        + vocab_source
+    )
+    if g.has_tensor(GEMMA_TOKEN_EMBD):
+        _expect_shape(g, GEMMA_TOKEN_EMBD, [hidden, vocab], why)
+    if g.has_tensor("output.weight"):
+        _expect_shape(g, "output.weight", [hidden, vocab], why)
 
 
 def _read_diffusion_gemma(g: GGUFFile) raises -> ModelConfig:
@@ -452,13 +560,20 @@ def _read_diffusion_gemma(g: GGUFFile) raises -> ModelConfig:
             + GEMMA_CAUSAL
             + " is true: only the bidirectional canvas is implemented"
         )
-    var softcap = g.get_f32_or(a + GEMMA_SOFTCAP, 30.0)
+    var defaults = String("")
+    var softcap_key = a + GEMMA_SOFTCAP
+    var softcap = g.get_f32_or(softcap_key, DEFAULT_SOFTCAP)
+    if not g.has_key(softcap_key):
+        defaults += _default_line(softcap_key, _number_text(softcap))
     if softcap < 0.0:
         raise Error(
             a + GEMMA_SOFTCAP + " must not be negative, got " + String(softcap)
         )
 
-    var ctx = g.get_int_or(a + GEMMA_CONTEXT_LENGTH, 4096)
+    var ctx_key = a + GEMMA_CONTEXT_LENGTH
+    var ctx = g.get_int_or(ctx_key, DEFAULT_CONTEXT)
+    if not g.has_key(ctx_key):
+        defaults += _default_line(ctx_key, String(DEFAULT_CONTEXT))
     var eps = g.get_f32(a + GEMMA_EPSILON)
     var theta = g.get_f32(a + GEMMA_ROPE_BASE)
     var theta_swa = g.get_f32(a + GEMMA_ROPE_BASE_SWA)
@@ -466,6 +581,17 @@ def _read_diffusion_gemma(g: GGUFFile) raises -> ModelConfig:
     # Every key is read before the first tensor, so a missing key is named
     # first even in a file without tensors.
     var vocab = g.tensor(GEMMA_TOKEN_EMBD).n_rows()
+    # Self-conditioning builds its transposed table in groups of W rows; it
+    # used to say so only at the first self-conditioned step.
+    if g.has_tensor("self_cond_gate.weight") and vocab % SOFTEMBED_W != 0:
+        raise Error(
+            GEMMA_TOKEN_EMBD
+            + " has "
+            + String(vocab)
+            + " rows, but self-conditioning (self_cond_gate.weight is"
+            " present) needs a vocabulary that is a multiple of "
+            + String(SOFTEMBED_W)
+        )
 
     var c = ModelConfig(
         arch=String(GEMMA_ARCH),
@@ -494,6 +620,7 @@ def _read_diffusion_gemma(g: GGUFFile) raises -> ModelConfig:
         expert_ffn=expert_ffn,
         softcap=softcap,
         canvas=canvas,
+        defaults=defaults,
     )
     _check_diffusion_gemma_tensors(g, c)
     return c
@@ -612,7 +739,9 @@ struct Layer(Movable):
     var wu: PackedMatrix
     var wd: PackedMatrix
 
-    def __init__(out self, g: GGUFFile, i: Int, c: ModelConfig) raises:
+    def __init__(
+        out self, g: GGUFFile, i: Int, c: ModelConfig, threads: Int
+    ) raises:
         var p = "blk." + String(i) + "."
         var kvd = c.kv_dim()
         self.attn_norm = _load_vector(g, p + "attn_norm.weight", c.hidden)
@@ -626,27 +755,39 @@ struct Layer(Movable):
             self.bq = Floats(0)
             self.bk = Floats(0)
             self.bv = Floats(0)
-        self.wq = _load_matrix(g, p + "attn_q.weight", c.hidden, c.hidden)
-        self.wk = _load_matrix(g, p + "attn_k.weight", kvd, c.hidden)
-        self.wv = _load_matrix(g, p + "attn_v.weight", kvd, c.hidden)
-        self.wo = _load_matrix(g, p + "attn_output.weight", c.hidden, c.hidden)
-        self.wg = _load_matrix(g, p + "ffn_gate.weight", c.ffn, c.hidden)
-        self.wu = _load_matrix(g, p + "ffn_up.weight", c.ffn, c.hidden)
-        self.wd = _load_matrix(g, p + "ffn_down.weight", c.hidden, c.ffn)
+        self.wq = _load_matrix(
+            g, p + "attn_q.weight", c.hidden, c.hidden, threads
+        )
+        self.wk = _load_matrix(g, p + "attn_k.weight", kvd, c.hidden, threads)
+        self.wv = _load_matrix(g, p + "attn_v.weight", kvd, c.hidden, threads)
+        self.wo = _load_matrix(
+            g, p + "attn_output.weight", c.hidden, c.hidden, threads
+        )
+        self.wg = _load_matrix(
+            g, p + "ffn_gate.weight", c.ffn, c.hidden, threads
+        )
+        self.wu = _load_matrix(g, p + "ffn_up.weight", c.ffn, c.hidden, threads)
+        self.wd = _load_matrix(
+            g, p + "ffn_down.weight", c.hidden, c.ffn, threads
+        )
 
 
-def _load_vector(g: GGUFFile, name: String, n: Int) raises -> Floats:
+def expect_vector(g: GGUFFile, name: String, n: Int) raises -> TensorInfo:
+    """The tensor `name`, refused unless it holds `n` elements. The one shape
+    check of every loader, CPU and GPU."""
     var t = g.tensor(name)
     if t.n_elements() != n:
         raise Error("tensor shape mismatch for " + name + ": " + t.shape_str())
-    var v = Floats(n)
-    dequant_row(t.ggml_type, g.data_addr(t), v.ptr(), n)
-    return v^
+    return t^
 
 
-def _load_matrix(
+def expect_matrix(
     g: GGUFFile, name: String, rows: Int, cols: Int
-) raises -> PackedMatrix:
+) raises -> TensorInfo:
+    """The tensor `name`, refused unless it is a [rows, cols] matrix (`cols`
+    wide, `rows` rows). Each loader adds its own type policy: the dense CPU and
+    GPU models demand a type with a GPU kernel (`check_matrix_type`), and
+    DiffusionGemma, which runs on the CPU only, takes Q5_0 and Q8_0 too."""
     var t = g.tensor(name)
     if t.ne0 != cols or t.n_rows() != rows:
         raise Error(
@@ -660,10 +801,69 @@ def _load_matrix(
             + String(rows)
             + "]"
         )
+    return t^
+
+
+def check_window(
+    n_tokens: Int,
+    max_tokens: Int,
+    lo: Int,
+    hi: Int,
+    out_rows: List[Int],
+    kv_cache: Bool,
+    cache_tokens: Int,
+) raises:
+    """The guards of `forward_window`, shared by the CPU and the GPU model: the
+    input fits the runtime limit, [lo, hi) is a non-empty range inside it, a
+    partial window has a cache that holds this canvas, and `out_rows` is a
+    non-empty ascending list of positions inside the window."""
+    var n_out = len(out_rows)
+    if n_tokens > max_tokens:
+        raise Error(
+            "input of "
+            + String(n_tokens)
+            + " tokens exceeds the runtime limit of "
+            + String(max_tokens)
+        )
+    if lo < 0 or hi > n_tokens or lo >= hi:
+        raise Error("forward window must be a non-empty range inside the input")
+    var full = lo == 0 and hi == n_tokens
+    if not full and not kv_cache:
+        raise Error("a partial forward window needs the K/V cache")
+    if not full and cache_tokens != n_tokens:
+        raise Error(
+            "the K/V cache does not hold this canvas; run a full pass first"
+        )
+    if n_out == 0:
+        raise Error("forward called with no output rows")
+    for j in range(n_out):
+        if (
+            out_rows[j] < lo
+            or out_rows[j] >= hi
+            or (j > 0 and out_rows[j] <= out_rows[j - 1])
+        ):
+            raise Error(
+                "output rows must be ascending positions inside the window"
+            )
+
+
+def _load_vector(g: GGUFFile, name: String, n: Int) raises -> Floats:
+    var t = expect_vector(g, name, n)
+    var v = Floats(n)
+    dequant_row(t.ggml_type, g.data_addr(t), v.ptr(), n)
+    return v^
+
+
+def _load_matrix(
+    g: GGUFFile, name: String, rows: Int, cols: Int, threads: Int
+) raises -> PackedMatrix:
+    var t = expect_matrix(g, name, rows, cols)
     check_matrix_type(t)
-    g.map.populate(g.data_addr(t), t.n_bytes)
-    var pm = PackedMatrix(g.data_addr(t), t.ggml_type, rows, cols)
-    g.map.drop(g.data_addr(t), t.n_bytes)
+    g.map.populate(t.data_offset, t.n_bytes)
+    var pm = PackedMatrix(
+        g.data_addr(t), t.n_bytes, t.ggml_type, rows, cols, threads
+    )
+    g.map.drop(t.data_offset, t.n_bytes)
     return pm^
 
 
@@ -815,17 +1015,12 @@ struct DiffusionLM(DenoisingModel, Movable):
         self.max_tokens = max_tokens
         self.embd = self.gguf.tensor("token_embd.weight")
         check_embedding_type(self.embd)
-        if self.embd.ne0 != c.hidden:
-            raise Error(
-                "tensor shape mismatch for token_embd.weight: "
-                + self.embd.shape_str()
-            )
         self.layers = List[Layer](capacity=c.n_layers)
         for i in range(c.n_layers):
-            self.layers.append(Layer(self.gguf, i, c))
+            self.layers.append(Layer(self.gguf, i, c, threads))
         self.out_norm = _load_vector(self.gguf, "output_norm.weight", c.hidden)
         self.output = _load_matrix(
-            self.gguf, "output.weight", c.vocab, c.hidden
+            self.gguf, "output.weight", c.vocab, c.hidden, threads
         )
         var L = max_tokens
         self.x = Floats(L * c.hidden)
@@ -904,35 +1099,15 @@ struct DiffusionLM(DenoisingModel, Movable):
         var c = self.cfg
         var L = len(tokens)
         var n_out = len(out_rows)
-        if L > self.max_tokens:
-            raise Error(
-                "input of "
-                + String(L)
-                + " tokens exceeds the runtime limit of "
-                + String(self.max_tokens)
-            )
-        if lo < 0 or hi > L or lo >= hi:
-            raise Error(
-                "forward window must be a non-empty range inside the input"
-            )
-        var full = lo == 0 and hi == L
-        if not full and not self.kv_cache:
-            raise Error("a partial forward window needs the K/V cache")
-        if not full and self.cache_tokens != L:
-            raise Error(
-                "the K/V cache does not hold this canvas; run a full pass first"
-            )
-        if n_out == 0:
-            raise Error("forward called with no output rows")
-        for j in range(n_out):
-            if (
-                out_rows[j] < lo
-                or out_rows[j] >= hi
-                or (j > 0 and out_rows[j] <= out_rows[j - 1])
-            ):
-                raise Error(
-                    "output rows must be ascending positions inside the window"
-                )
+        check_window(
+            L,
+            self.max_tokens,
+            lo,
+            hi,
+            out_rows,
+            self.kv_cache,
+            self.cache_tokens,
+        )
         # The cache holds no canvas until this pass completes: one that raises
         # past here may already have overwritten some of its rows.
         if self.kv_cache:
@@ -979,7 +1154,7 @@ struct DiffusionLM(DenoisingModel, Movable):
                 c.eps,
                 self.threads,
             )
-            quantize_acts(self.xn.ptr(), rows, d, self.qa_h)
+            quantize_acts(self.xn.ptr(), rows, d, self.qa_h, self.threads)
             self.timings.gemm_ns += _timed_gemm(
                 self.layers[li].wq,
                 self.qa_h,
@@ -1032,7 +1207,7 @@ struct DiffusionLM(DenoisingModel, Movable):
                 n_keys,
             )
             self.timings.attn_ns += Int(perf_counter_ns() - ta)
-            quantize_acts(self.att.ptr(), rows, d, self.qa_h)
+            quantize_acts(self.att.ptr(), rows, d, self.qa_h, self.threads)
             self.timings.gemm_ns += _timed_gemm(
                 self.layers[li].wo,
                 self.qa_h,
@@ -1060,7 +1235,7 @@ struct DiffusionLM(DenoisingModel, Movable):
                 c.eps,
                 self.threads,
             )
-            quantize_acts(self.xn.ptr(), rows, d, self.qa_h)
+            quantize_acts(self.xn.ptr(), rows, d, self.qa_h, self.threads)
             self.timings.gemm_ns += _timed_gemm(
                 self.layers[li].wg,
                 self.qa_h,
@@ -1078,7 +1253,7 @@ struct DiffusionLM(DenoisingModel, Movable):
                 self.threads,
             )
             silu_mul(self.g.ptr(), self.u.ptr(), rows * c.ffn, self.threads)
-            quantize_acts(self.g.ptr(), rows, c.ffn, self.qa_f)
+            quantize_acts(self.g.ptr(), rows, c.ffn, self.qa_f, self.threads)
             self.timings.gemm_ns += _timed_gemm(
                 self.layers[li].wd,
                 self.qa_f,
@@ -1104,7 +1279,7 @@ struct DiffusionLM(DenoisingModel, Movable):
             c.eps,
             self.threads,
         )
-        quantize_acts(self.xn.ptr(), n_out, d, self.qa_h)
+        quantize_acts(self.xn.ptr(), n_out, d, self.qa_h, self.threads)
         var th = perf_counter_ns()
         pgemm(self.output, self.qa_h, n_out, logits, c.vocab, self.threads)
         var t_end = perf_counter_ns()

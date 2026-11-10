@@ -36,7 +36,7 @@ its own metadata.
 | `<arch>.attention.head_count` | required | query head count |
 | `<arch>.attention.head_count_kv` | optional, head count | KV head count; must divide query head count |
 | `<arch>.feed_forward_length` | required | feed-forward width |
-| `<arch>.context_length` | optional, 4096 | stored in config; currently does not constrain the canvas |
+| `<arch>.context_length` | optional, 4096 | the longest canvas (prompt plus `--max-tokens`) `run` accepts |
 | `<arch>.attention.layer_norm_rms_epsilon` | required | RMSNorm epsilon |
 | `<arch>.rope.freq_base` | optional, 10000 | RoPE frequency base |
 | `<arch>.vocab_size` | optional, rows of `output.weight` | vocabulary size |
@@ -49,10 +49,13 @@ its own metadata.
 | `<arch>.rope.scaling.factor` | optional, 1.0 | other factors are rejected; no scaled RoPE is implemented |
 
 The head dimension is `embedding_length / head_count`, with exact divisibility
-required. Other scaling metadata is not interpreted. These compatibility checks
-do not add general validation of metadata ranges. Whether to constrain canvases
-by `context_length` or reject `attention.causal = true` remains a separate policy
-decision.
+required. `block_count`, `embedding_length`, `head_count`, `head_count_kv`,
+`feed_forward_length` and `vocab_size` must be positive, and the epsilon and
+the RoPE base must be finite and above zero; a value outside those ranges
+stops the load with `<key> must be positive, got N` or `<key> must be finite and
+above zero, got X`. Other scaling metadata is not interpreted, and
+`context_length` is not range checked. `run` refuses a canvas longer than it;
+whether to reject `attention.causal = true` remains a separate policy decision.
 
 ### DiffusionGemma metadata
 
@@ -60,7 +63,8 @@ A `diffusion-gemma` file is read into a `ModelConfig`, and `mojo-dllm inspect`
 prints the result, or the refusal and its key. `DiffusionLM` and the GPU model
 stop on it with `diffusion-gemma does not run on this model`. `DiffusionGemma`
 runs it on the CPU through `logits`, and `tokenize` prints the ids of its chat
-prompt; `run` still waits for the generation loop (#64), so a clean `inspect`
+prompt; `run` still waits for the model to be wired into the generation loop
+(#277; the forward pass is #64 and the denoiser #65), so a clean `inspect`
 does not mean `run` works. The names come from the unmerged
 ggml-org/llama.cpp#24423 and appear once each, as the `GEMMA_*` constants at the
 top of `models/transformer.mojo`. Keys carry the `diffusion-gemma.` prefix
@@ -76,7 +80,7 @@ except `diffusion.canvas_length` and `tokenizer.ggml.mask_token_id`.
 | `rope.freq_base`, `rope.freq_base_swa` | required | RoPE base of global and of sliding layers |
 | `attention.layer_norm_rms_epsilon`, `tokenizer.ggml.mask_token_id` | required | RMSNorm epsilon, mask token |
 | `attention.value_length`, `attention.value_length_swa`, `rope.dimension_count`, `rope.dimension_count_swa` | required, equal to the key length of their kind | other widths are refused |
-| `context_length` | optional, 4096 | stored in config |
+| `context_length` | optional, 4096 | stored in config; `run` does not take this architecture yet |
 | `final_logit_softcapping` | optional, 30 when absent (llama.cpp's default); 0 turns it off | a negative value is refused |
 | `attention.shared_kv_layers`, `embedding_length_per_layer_input` | optional, 0 | any other value is refused: no forward pass handles it |
 | `attention.causal` | optional, false | true is refused; the canvas attends in both directions |
@@ -98,6 +102,12 @@ the tensor and the keys that set its shape:
   and `blk.N.ffn_down_exps.weight` is `[expert_feed_forward_length, embedding_length, expert_count]`.
 - `rope_freqs.weight` has `key_length / 2` entries when any layer is global, and
   `token_embd.weight` is `embedding_length` wide.
+
+For LLaDA and Dream the same kind of check covers the two vocabulary-sized
+tensors: `token_embd.weight` and, when the file has it, `output.weight` must be
+`[embedding_length, vocabulary]`, where the vocabulary is `<arch>.vocab_size` or
+the rows of `output.weight`. `ModelConfig` raises `tensor shape mismatch for
+<name>: [..], expected [..]` before any loader runs, on the CPU and on the GPU.
 
 To convert a Hugging Face source with llama.cpp and quantize the result:
 
@@ -137,7 +147,7 @@ unmapped source names; dtypes are shown for reference, not compared. Use
 `--ignore 'rotary.*inv_freq'` for source buffers intentionally omitted during
 conversion; `ignored N` counts these source entries, and their mapped GGUF
 counterparts are also omitted. Index shard names must be bare `.safetensors`
-filenames resolving inside the index directory. The checker accepts 1–1024
+filenames resolving inside the index directory. The checker accepts 1 to 1024
 blocks to bound name-map construction. Malformed inputs return 2, including
 JSON nesting errors. An output tensor absent from a tied source is still reported as
 missing, with an explanation. Exit 0 means at least one tensor was compared and

@@ -6,10 +6,10 @@ stores [2 * ffn, hidden] gate/up rows followed, in a separate tensor, by
 Weights are repacked once; the workspace is reused between denoising steps.
 """
 
-from std.math import exp, sqrt, tanh
+from std.math import exp, isfinite, sqrt, tanh
 
-from mojo_dllm.formats.gguf import ggml_row_bytes
-from mojo_dllm.kernels.packed import PackedMatrix, pgemm
+from mojo_dllm.formats.gguf import ggml_row_bytes, ggml_type_name
+from mojo_dllm.kernels.packed import PackedMatrix, matrix_bytes, pgemm
 from mojo_dllm.kernels.qgemm import QActs, quantize_acts
 from mojo_dllm.sys.mem import Bytes, Floats, F32Ptr
 from mojo_dllm.sys.parallel import parallel_for
@@ -24,7 +24,10 @@ def gelu_tanh(x: Float32) -> Float32:
 
 
 struct Routing(Movable):
+    var capacity: Int
+    """Tokens the buffers hold. Set once, by the constructor."""
     var n_tokens: Int
+    """Tokens in use, at most `capacity`; change it with `set_len`."""
     var n_experts: Int
     var top_k: Int
     var ids: Bytes
@@ -42,11 +45,23 @@ struct Routing(Movable):
                 + ", top_k="
                 + String(top_k)
             )
+        self.capacity = n_tokens
         self.n_tokens = n_tokens
         self.n_experts = n_experts
         self.top_k = top_k
         self.ids = Bytes(n_tokens * top_k * 4)
         self.weights = Floats(n_tokens * top_k)
+
+    def set_len(mut self, n: Int) raises:
+        """Use the first `n` tokens of the buffers."""
+        if n < 0 or n > self.capacity:
+            raise Error(
+                "MoE routing holds "
+                + String(self.capacity)
+                + " tokens, cannot be set to "
+                + String(n)
+            )
+        self.n_tokens = n
 
 
 def route_tokens(
@@ -65,6 +80,13 @@ def route_tokens(
     """
     if hidden <= 0 or eps <= 0:
         raise Error("MoE router needs positive hidden size and RMS epsilon")
+    if routing.n_tokens < 0 or routing.n_tokens > routing.capacity:
+        raise Error(
+            "MoE routing holds "
+            + String(routing.capacity)
+            + " tokens, cannot route "
+            + String(routing.n_tokens)
+        )
     var normalized = Floats(routing.n_tokens * hidden)
     var probabilities = Floats(routing.n_tokens * routing.n_experts)
     var xp = normalized.ptr()
@@ -144,9 +166,16 @@ def route_tokens(
 
     parallel_for(work, routing.n_tokens, threads)
     # The pointers above have untracked origins; keep their owners alive
-    # through the parallel callback, just as attention's score scratch does.
+    # through the parallel callback, as attention's score scratch does.
     _ = normalized^
     _ = probabilities^
+    # A NaN or infinite score makes every probability of the token NaN, and the
+    # selection then picks expert 0 for every slot. Name the token here, at the
+    # cause; in `grouped_experts` the failure reads as a repeated expert.
+    for t in range(routing.n_tokens):
+        for s in range(top_k):
+            if not isfinite(wp.unsafe_load(t * top_k + s)):
+                raise Error("non-finite router scores for token " + String(t))
 
 
 struct ExpertWeights(Movable):
@@ -160,15 +189,21 @@ struct ExpertWeights(Movable):
     def __init__(
         out self,
         gate_up_addr: Int,
+        gate_up_bytes: Int,
         gate_up_kind: Int,
         down_addr: Int,
+        down_bytes: Int,
         down_kind: Int,
         hidden: Int,
         ffn: Int,
         n_experts: Int,
         scales: F32Ptr,
+        threads: Int = 0,
     ) raises:
-        if hidden <= 0 or ffn <= 0 or n_experts <= 0:
+        """Repacks every expert's matrices on `threads` workers (0: every
+        core). Each `*_bytes` is the size of the whole tensor of all experts
+        and must equal what the dimensions take."""
+        if hidden <= 0 or ffn <= 0 or n_experts <= 0 or ffn > Int.MAX // 2:
             raise Error("MoE expert dimensions must be positive")
         self.hidden = hidden
         self.ffn = ffn
@@ -176,20 +211,61 @@ struct ExpertWeights(Movable):
         self.gate_up = List[PackedMatrix]()
         self.down = List[PackedMatrix]()
         self.scales = Floats(n_experts)
-        var gate_stride = 2 * ffn * ggml_row_bytes(gate_up_kind, hidden)
-        var down_stride = hidden * ggml_row_bytes(down_kind, ffn)
+        var gate_stride = matrix_bytes(
+            ggml_row_bytes(gate_up_kind, hidden), 2 * ffn
+        )
+        var down_stride = matrix_bytes(ggml_row_bytes(down_kind, ffn), hidden)
+        var gate_want = matrix_bytes(gate_stride, n_experts)
+        var down_want = matrix_bytes(down_stride, n_experts)
+        if gate_up_bytes != gate_want:
+            raise Error(
+                "the gate/up tensor holds "
+                + String(gate_up_bytes)
+                + " bytes, but "
+                + String(n_experts)
+                + " experts of "
+                + String(2 * ffn)
+                + " rows of "
+                + String(hidden)
+                + " "
+                + ggml_type_name(gate_up_kind)
+                + " values take "
+                + String(gate_want)
+            )
+        if down_bytes != down_want:
+            raise Error(
+                "the down tensor holds "
+                + String(down_bytes)
+                + " bytes, but "
+                + String(n_experts)
+                + " experts of "
+                + String(hidden)
+                + " rows of "
+                + String(ffn)
+                + " "
+                + ggml_type_name(down_kind)
+                + " values take "
+                + String(down_want)
+            )
         for e in range(n_experts):
             self.gate_up.append(
                 PackedMatrix(
                     gate_up_addr + e * gate_stride,
+                    gate_stride,
                     gate_up_kind,
                     2 * ffn,
                     hidden,
+                    threads,
                 )
             )
             self.down.append(
                 PackedMatrix(
-                    down_addr + e * down_stride, down_kind, hidden, ffn
+                    down_addr + e * down_stride,
+                    down_stride,
+                    down_kind,
+                    hidden,
+                    ffn,
+                    threads,
                 )
             )
             self.scales[e] = scales.unsafe_load(e)
@@ -238,7 +314,7 @@ def grouped_experts(
 
     Empty experts launch no GEMM. Buffers hold the complete canvas for an
     expert, including the case where every token chooses the same expert.
-    `dst` must not overlap `x`; it is replaced, not added to its old contents.
+    `dst` must not overlap `x`; its old contents are overwritten.
     """
     if (
         routing.n_experts != weights.n_experts
@@ -292,7 +368,7 @@ def grouped_experts(
             var t = pair // top_k
             for d in range(hidden):
                 ws.input[r * hidden + d] = x.unsafe_load(t * hidden + d)
-        quantize_acts(ws.input.ptr(), rows, hidden, ws.qa_gate)
+        quantize_acts(ws.input.ptr(), rows, hidden, ws.qa_gate, threads)
         pgemm(
             weights.gate_up[e],
             ws.qa_gate,
@@ -307,7 +383,7 @@ def grouped_experts(
                     gelu_tanh(ws.gate_up[r * 2 * ffn + f])
                     * ws.gate_up[r * 2 * ffn + ffn + f]
                 )
-        quantize_acts(ws.activated.ptr(), rows, ffn, ws.qa_down)
+        quantize_acts(ws.activated.ptr(), rows, ffn, ws.qa_down, threads)
         pgemm(
             weights.down[e], ws.qa_down, rows, ws.output.ptr(), hidden, threads
         )

@@ -3,8 +3,9 @@
 The command line is the one `bench/run_bench.py` times (`run_llama`), and a CUDA run is held to the same check:
 every layer on the GPU. Flag names come from `llama-diffusion-cli --help` at the commit recorded as `version`.
 
-llama.cpp has no early stop and prints no pass count, so `forward_passes` is the configured step count and the
-arm's `flags` say `"forward_passes_measured": false`. Seconds per problem are the comparable column.
+llama.cpp has no early stop and prints no pass count, so a row's `forward_passes` is null, its `steps` is the
+configured step count, and the arm's `flags` say `"forward_passes_measured": false`. Seconds per problem are the
+comparable column.
 """
 
 from __future__ import annotations
@@ -15,16 +16,17 @@ import pathlib
 import subprocess
 import sys
 
-from . import EngineError, GenConfig, register
+from . import EngineError, GenConfig, GenResult, register
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "bench"))
 import run_bench  # noqa: E402  (bench/run_bench.py: the CUDA check and the output parser)
+import spec  # noqa: E402  (bench/spec.py)
 
-EPS = "0.001"     # the timestep schedule's epsilon, as in run_bench
-TEMP = "0"
-SHORT_TIMEOUT_S = 60    # git rev-parse and `mojo-dllm tokenize`: both finish in well under a second
-SEED = "42"
+EPS = spec.LLAMA_EPS     # the timestep schedule's epsilon, as in run_bench
+TEMP = spec.LLAMA_TEMP
+SHORT_TIMEOUT_S = 60    # git rev-parse and `mojo-dllm tokenize`: a slow disk can take seconds, 60 s is the ceiling
+SEED = spec.LLAMA_SEED
 
 
 def _run(cmd: list[str], timeout_s: float) -> subprocess.CompletedProcess:
@@ -91,13 +93,9 @@ class LlamaCpp:
         return len(lines[-1].strip("[]").replace(" ", "").split(","))
 
     def command(self, prompt: str, cfg: GenConfig, seq_len: int) -> list[str]:
-        cmd = [str(binary(self.llama_cpp, cfg.device)), "-m", cfg.model, "-p", prompt,
-               "-c", str(seq_len), "-b", str(seq_len), "-ub", str(seq_len),
-               "--diffusion-steps", str(cfg.steps)]
-        cmd += ["--diffusion-eps", EPS] if cfg.schedule == "timestep" else ["--diffusion-block-length", str(cfg.block_length)]
-        cmd += ["--temp", TEMP, "-t", str(self.threads), "-tb", str(self.threads), "--seed", SEED]
-        if cfg.device == "gpu":
-            cmd += ["-ngl", "99", "-v"]
+        cmd = [str(binary(self.llama_cpp, cfg.device)), "-m", cfg.model, "-p", prompt]
+        cmd += spec.llama_diffusion_args(seq_len, cfg.steps, self.threads, cfg.device == "gpu", cfg.schedule,
+                                         cfg.block_length)
         return cmd + list(cfg.extra)
 
     def generate(self, prompt: str, cfg: GenConfig) -> dict:
@@ -117,4 +115,5 @@ class LlamaCpp:
         parsed = run_bench.parse_llama_output(output)
         if parsed is None:
             raise EngineError(f"no `time per step` line in the output: {output[-400:]}")
-        return dict(text=parsed["text"], generate_s=parsed["total_s"], forward_passes=cfg.steps, steps=cfg.steps)
+        # llama.cpp does not report its pass count: the configured steps go in `steps`, `forward_passes` stays None.
+        return GenResult(text=parsed["text"], generate_s=parsed["total_s"], forward_passes=None, steps=cfg.steps)

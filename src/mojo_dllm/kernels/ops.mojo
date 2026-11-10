@@ -89,7 +89,8 @@ def rope_apply(
     neox: Bool,
     threads: Int,
 ) raises:
-    """In-place rotary embedding at positions 0..n_tokens-1.
+    """In-place rotary embedding: row i takes the angles of row i of the cos/sin
+    tables, so the positions are whatever the tables were built for.
 
     NORM style (llama.cpp's LLaMA convention, used for LLaDA GGUFs) rotates
     adjacent pairs (2i, 2i+1); the converter un-permutes LLaDA's Q/K so this
@@ -183,7 +184,8 @@ def attention(
     var scale = Float32(1.0 / sqrt(Float64(head_dim)))
     var NK = L if n_keys < 0 else n_keys
     var nqb = (L + QB - 1) // QB
-    var scores = Floats(n_heads * nqb * QB * NK)
+    # Each work item writes every score of its rows before the softmax reads one.
+    var scores = Floats(n_heads * nqb * QB * NK, zero=False)
     var sp = scores.ptr()
 
     def work(item: Int) {imm}:
@@ -293,8 +295,9 @@ def rope_table_factors(
 
     This is llama.cpp's `rope_freqs` (freq_factors): a factor of 1e30 leaves a
     pair unrotated. `factors` holds head_dim / 2 values and is read only when
-    `use_factors` is set. Built in f64 like `rope_table`; the branch accumulates
-    the angle in f32, which differs by under 1e-4 rad at position 300.
+    `use_factors` is set. Built in f64 like `rope_table`; llama.cpp's DiffusionGemma
+    branch (PR 24423 at 2e715c0639) accumulates the angle in f32, so its table
+    can differ from this one by rounding; the size of the difference was not measured.
     """
     var half = head_dim // 2
     for t in range(n_tokens):
@@ -328,9 +331,11 @@ def attention_ranges(
 
     q and o rows are [n_q, n_heads * head_dim]; k and v rows are
     [n_keys, n_kv_heads * head_dim]. Query head h reads KV head
-    h // (n_heads / n_kv_heads). `scale` is the argument, not 1/sqrt(d):
-    DiffusionGemma passes 1.0. Every query needs at least one key, so the
-    softmax is never over nothing; the head size is a multiple of 8.
+    h // (n_heads / n_kv_heads). `scale` is the argument
+    (DiffusionGemma passes 1.0; `attention` computes 1/sqrt(d) itself). Every query needs at least one key, so the
+    softmax is never over nothing. The head size must be a multiple of 8 and the
+    head count a multiple of the key-value head count; both refusals carry one
+    message, which names the head size.
     """
     if head_dim % W != 0 or n_heads % n_kv_heads != 0:
         raise Error("attention needs a head size that is a multiple of 8")

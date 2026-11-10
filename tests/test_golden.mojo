@@ -63,7 +63,6 @@ def _config(name: String) -> GenConfig:
     c.gen_length = 16
     c.block_length = 8
     c.steps = 8
-    c.mask_id = 511
     c.threads = 1
     c.early_stop = False
     c.threshold = 0.0
@@ -89,7 +88,6 @@ def _config(name: String) -> GenConfig:
         # Fixed from the middle of L1's baseline output, not derived at runtime.
         c.stop_ids = [347]
     if name.startswith("D"):
-        c.mask_id = 510
         c.block_length = 16
         if name == "D2":
             c.remasking = "maskgit_plus"

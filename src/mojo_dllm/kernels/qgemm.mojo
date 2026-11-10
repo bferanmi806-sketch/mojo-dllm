@@ -1,4 +1,9 @@
-"""Quantized GEMM: f32 activations x Q4_K / Q6_K weights.
+"""Activation quantization, and a row-major reference GEMM over Q4_K / Q6_K weights.
+
+`quantize_acts` feeds every projection. `qgemm` multiplies the GGUF row-major
+blocks directly: a reference that tests/test_quant.mojo checks against the
+dequantized weights. The kernel the models run is `PackedMatrix` with `pgemm`
+in `kernels/packed.mojo`.
 
 A denoising step pushes the whole canvas (prompt + generation, L tokens)
 through every linear layer, so this is a GEMM with L in the tens to hundreds,
@@ -29,6 +34,7 @@ from max.algorithm import parallelize
 from mojo_dllm.formats.gguf import GGML_Q4_K, GGML_Q6_K, ggml_type_name
 from mojo_dllm.quant.kquants import load_f16, q4k_scale_min
 from mojo_dllm.sys.mem import Bytes, Floats, F32Ptr, I8Ptr, U8Ptr
+from mojo_dllm.sys.parallel import parallel_for_counted, worker_count
 
 comptime QK = 256
 comptime GROUP = 16
@@ -72,18 +78,29 @@ struct QActs(Movable):
         self.s = Floats(n_tokens * (K // GROUP))
 
 
-def quantize_acts(x: F32Ptr, n_tokens: Int, K: Int, mut qa: QActs) raises:
+def quantize_acts(
+    x: F32Ptr, n_tokens: Int, K: Int, mut qa: QActs, threads: Int = 0
+) raises:
+    """Quantizes `n_tokens` rows of `K` activations into `qa`, rows in parallel
+    on `worker_count(threads)` workers. Each row is independent, so the count
+    cannot change a byte."""
+    _ = quantize_acts_counted(x, n_tokens, K, qa, threads)
+
+
+def quantize_acts_counted(
+    x: F32Ptr, n_tokens: Int, K: Int, mut qa: QActs, threads: Int = 0
+) raises -> Int:
+    """`quantize_acts`, returning the number of workers that ran the loop."""
     if K != qa.K or n_tokens < 0 or n_tokens > qa.n_tokens:
         raise Error("activation buffer is too small for this matrix")
     if qa.block_size == 32:
-        _quantize_acts[32](x, n_tokens, K, qa)
-    else:
-        _quantize_acts[QK](x, n_tokens, K, qa)
+        return _quantize_acts[32](x, n_tokens, K, qa, worker_count(threads))
+    return _quantize_acts[QK](x, n_tokens, K, qa, worker_count(threads))
 
 
 def _quantize_acts[
     BLOCK: Int
-](x: F32Ptr, n_tokens: Int, K: Int, mut qa: QActs) raises:
+](x: F32Ptr, n_tokens: Int, K: Int, mut qa: QActs, workers: Int) raises -> Int:
     var qp = qa.q.i8()
     var dp = qa.d.ptr()
     var sp = qa.s.ptr()
@@ -113,7 +130,7 @@ def _quantize_acts[
                     d * Float32((q0 + q1).reduce_add()),
                 )
 
-    parallelize(work, n_tokens)
+    return parallel_for_counted(work, n_tokens, workers)
 
 
 @always_inline

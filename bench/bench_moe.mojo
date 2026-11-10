@@ -94,8 +94,10 @@ def main() raises:
         scales[e] = 0.75 + Float32(e % 17) / 32.0
     var weights = ExpertWeights(
         gate_up.addr,
+        gate_up.size,
         GGML_Q4_K,
         down.addr,
+        down.size,
         down_kind,
         hidden,
         ffn,

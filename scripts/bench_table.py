@@ -3,11 +3,19 @@
 
 usage: bench_table.py --write     rewrite the tables between the markers
        bench_table.py --check     exit 1 if a table differs from the evidence
+       --allow-noisy              with either: publish a timed GSM8K round that has noisy or unchecked rows
+
+Exactly one of --write and --check is required; anything else prints the usage line and exits 2.
 
 No benchmark number in this repository is typed by hand. The tables live
-between `<!-- bench:start -->` and `<!-- bench:end -->` and are produced from
-the result files that bench/run_bench.py writes. A partial result file (a run
-that was stopped) is refused, and so is a runtime that appears in two files.
+between marker pairs such as `<!-- bench:start -->` and `<!-- bench:end -->`
+and are produced from the evidence files: bench/results (the `bench` table),
+bench/parity (`parity`, `genparity`), bench/quality (`quality`) and bench/eval
+(`eval`). REQUIRED says which markers each document must hold: a missing
+document, a missing or misplaced marker, and a table whose evidence directory
+is empty are errors that name the file and the marker, because a document
+compared with itself passes. A partial result file (a run that was stopped) is
+refused, and so is a runtime that appears in two files.
 """
 
 from __future__ import annotations
@@ -16,12 +24,22 @@ import json
 import math
 import statistics
 import pathlib
+import re
 import sys
 from typing import NamedTuple
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "bench"))
+from parity_schema import ParityError, validate_parity  # noqa: E402  (bench/parity_schema.py)
 TARGETS = [ROOT / "README.md", ROOT / "docs" / "benchmarks.md", ROOT / "docs" / "correctness.md"]
 START, END = "<!-- bench:start -->", "<!-- bench:end -->"
+USAGE = "usage: bench_table.py --write | --check [--allow-noisy]"
+MARKERS = {key: (f"<!-- {key}:start -->", f"<!-- {key}:end -->") for key in ("bench", "parity", "genparity", "quality", "eval")}
+EVIDENCE = {"bench": "bench/results/*.json", "parity": "bench/parity/*.json", "genparity": "bench/parity/*.json",
+            "quality": "bench/quality/*.json", "eval": "bench/eval/*-vs-*.json"}
+# The tables each document must hold, by path relative to the repository root.
+REQUIRED = {"README.md": ("bench",), "docs/benchmarks.md": ("bench", "quality", "eval"),
+            "docs/correctness.md": ("parity", "genparity")}
 
 ROWS = [
     ("mojo-dllm-gpu", "**mojo-dllm** `--device gpu`", "Mojo"),
@@ -58,10 +76,26 @@ def check_summary(name: str, doc: dict) -> None:
         ok = [r for r in doc["runs"] if r["runtime"] == rt and r.get("ok")]
         if sm["runs_ok"] != len(ok):
             raise SystemExit(f"bench_table: {name}: the summary of {rt} says runs_ok {sm['runs_ok']}, its runs hold {len(ok)}")
+        for state in ("clean", "noisy", "unchecked"):
+            got = sum(1 for r in ok if window_state(r) == state)
+            if f"{state}_runs" in sm and sm[f"{state}_runs"] != got:
+                raise SystemExit(f"bench_table: {name}: the summary of {rt} says {state}_runs {sm[f'{state}_runs']}, "
+                                 f"its runs hold {got}")
         ms = [r["ms_per_step"] for r in ok if r.get("ms_per_step") is not None]
         if ms and not math.isclose(sm["ms_per_step_median"], statistics.median(ms), rel_tol=1e-9):
             raise SystemExit(f"bench_table: {name}: the summary of {rt} says ms_per_step_median "
                              f"{sm['ms_per_step_median']}, its runs give {statistics.median(ms)}")
+        # The other three rendered figures are derived the way run_bench.summarize_runs derives them.
+        gen_length = doc["config"]["gen_length"]
+        starts = [r["startup_s"] for r in ok if "startup_s" in r]
+        rates = [gen_length / r["generate_s"] for r in ok if "generate_s" in r]
+        peak = max((r["peak_rss_bytes"] for r in ok if "peak_rss_bytes" in r), default=0) / 1e9 or None
+        for field, value in (("tokens_per_s_median", statistics.median(rates) if rates else None),
+                             ("startup_s_median", statistics.median(starts) if starts else None),
+                             ("peak_rss_gb_max", peak)):
+            stored = sm.get(field)
+            if (stored is None) != (value is None) or (value is not None and not math.isclose(stored, value, rel_tol=1e-9)):
+                raise SystemExit(f"bench_table: {name}: the summary of {rt} says {field} {stored}, its runs give {value}")
 
 
 def load() -> dict[str, dict]:
@@ -81,6 +115,7 @@ def load() -> dict[str, dict]:
         g = groups.setdefault(label, dict(merged={}, meta={}, sources=[], gpu=gpu))
         check_summary(f.name, doc)
         g["sources"].append(f.name)
+        g.setdefault("source_versions", []).append((f.name, doc["versions"], list(doc["summary"])))
         g.setdefault("runs", []).extend(doc["runs"])
         g.setdefault("files", []).append((f.name, doc["runs"]))
         g.setdefault("busy_threshold", doc["config"].get("busy_threshold", 0.1))
@@ -203,32 +238,80 @@ def gpu_ratio(label: str, g: dict) -> PairedRatio | None:
     return pr
 
 
+def busy_before(r: dict) -> float:
+    """The CPU load a run started under; a run without it is refused, never read as a quiet machine."""
+    if "cpu_busy_before" not in r:
+        raise SystemExit(f"bench_table: run {r.get('runtime')} rep {r.get('rep')} has no cpu_busy_before")
+    return r["cpu_busy_before"]
+
+
+def window_state(r: dict) -> str:
+    """`clean`, `noisy` or `unchecked` for a run's isolation window (the same rule as bench/run_bench.py)."""
+    iso = r.get("isolation")
+    if not isinstance(iso, dict):
+        return "unchecked"
+    return "clean" if iso.get("clean") is True and not iso.get("noisy") else "noisy"
+
+
 def busy_note(runs: list[dict], threshold: float, rows: list) -> list[str]:
-    """Disclose runs that started on a busy CPU, with medians over the quiet ones.
+    """Disclose runs that started on a busy CPU or ended in a noisy window, with medians over the others.
 
     The harness waits for a quiet CPU but gives up after max_quiet_wait_s and
-    runs anyway, recording how busy the CPU was. Those runs stay in the table;
-    this note says how many there were and what the quiet runs alone give.
+    runs anyway, recording how busy the CPU was; a run whose isolation window
+    saw other CPU, swap, thermal or GPU activity is kept as `noisy`. Those runs
+    stay in the table; this note says how many there were and what the quiet
+    runs alone give. In a file where some runs have a window and some do not,
+    the runs without one are counted as unchecked.
     """
     ok = [r for r in runs if r.get("ok")]
-    busy = [r for r in ok if r.get("cpu_busy_before", 0) > threshold]
-    if not busy:
+    busy = [r for r in ok if busy_before(r) > threshold]
+    states = {id(r): window_state(r) for r in ok}
+    noisy = [r for r in ok if states[id(r)] == "noisy"]
+    has_windows = any(v != "unchecked" for v in states.values())
+    unchecked = [r for r in ok if states[id(r)] == "unchecked"] if has_windows else []
+    disturbed = [r for r in ok if busy_before(r) > threshold or states[id(r)] == "noisy"]
+    disturbed_ids = {id(r) for r in disturbed}
+    if not disturbed and not unchecked:
         return []
     parts = []
     for key, label, _ in rows:
-        quiet = [r for r in ok if r["runtime"] == key and r.get("cpu_busy_before", 0) <= threshold
-                 and r.get("ms_per_step") is not None]
-        if not quiet or not any(r["runtime"] == key for r in busy):
+        quiet = [r for r in ok if r["runtime"] == key and id(r) not in disturbed_ids and r.get("ms_per_step") is not None]
+        if not quiet or not any(r["runtime"] == key for r in disturbed):
             continue
         step = statistics.median(r["ms_per_step"] for r in quiet)
         start = statistics.median(r["startup_s"] for r in quiet)
         name = label.replace("**", "")
         parts.append(f"{name} {step:,.0f} ms / step and {start:.1f} s startup ({len(quiet)} runs)")
-    note = (f"{len(busy)} of {len(ok)} runs started with the CPU more than {threshold:.0%} busy "
-            "(the harness waits for a quiet CPU, then runs anyway and records the load).")
+    sentences = []
+    if busy:
+        sentences.append(f"{len(busy)} of {len(ok)} runs started with the CPU more than {threshold:.0%} busy "
+                         "(the harness waits for a quiet CPU, then runs anyway and records the load).")
+    if noisy:
+        sentences.append(f"{len(noisy)} of {len(ok)} runs ended in a noisy isolation window (other CPU, swap, "
+                         "thermal or GPU activity) and stay in the medians.")
+    if unchecked:
+        sentences.append(f"{len(unchecked)} of {len(ok)} runs carry no isolation window.")
+    note = " ".join(sentences)
     if parts:
         note += " The quiet runs alone give " + "; ".join(parts) + "."
     return ["", note]
+
+
+def mojo_dllm_versions(source_versions: list[tuple[str, dict, list[str]]]) -> str:
+    """The mojo-dllm commit under a table. Result files can record different commits (the diffuse-cpp rows were
+    measured in a later run than the mojo-dllm rows), so each commit is named with its file, and with "diffuse-cpp
+    rows only" when no mojo-dllm row comes from it. Commits that hold mojo-dllm rows come first."""
+    by_commit: dict[str, list[tuple[str, list[str]]]] = {}
+    for name, versions, rows in source_versions:
+        by_commit.setdefault(str(versions.get("mojo-dllm")), []).append((name, rows))
+    if len(by_commit) == 1:
+        return f"`{next(iter(by_commit))}`"
+    parts = []
+    for commit, files in sorted(by_commit.items(), key=lambda kv: all(r.startswith("diffuse") for _, rows in kv[1] for r in rows)):
+        names = ", ".join(re.sub(r"^\d{4}-\d{2}-\d{2}-|\.json$", "", n) for n, _ in files)
+        only = ", diffuse-cpp rows only" if all(r.startswith("diffuse") for _, rows in files for r in rows) else ""
+        parts.append(f"`{commit}` ({names}{only})")
+    return ", ".join(parts[:-1]) + " and " + parts[-1] if len(parts) > 2 else " and ".join(parts)
 
 
 def render() -> str:
@@ -283,7 +366,7 @@ def render() -> str:
         v = meta["versions"]
         out += [
             "",
-            f"Versions: mojo-dllm `{v.get('mojo-dllm')}`, {v.get('mojo')}, llama.cpp `{v.get('llama.cpp')}`"
+            f"Versions: mojo-dllm {mojo_dllm_versions(g['source_versions'])}, {v.get('mojo')}, llama.cpp `{v.get('llama.cpp')}`"
             + (f", diffuse-cpp `{v['diffuse-cpp']}`" if any(k.startswith("diffuse") for k in merged) else "")
             + f". Evidence: {', '.join(f'`bench/results/{s}`' for s in sources)}.",
         ]
@@ -308,6 +391,10 @@ def parity() -> tuple[str, str]:
     newest: dict[tuple[str, str, str], tuple[pathlib.Path, dict]] = {}
     for f in files:
         doc = json.loads(f.read_text())
+        try:
+            validate_parity(doc)
+        except ParityError as e:
+            raise SystemExit(f"bench_table: bench/parity/{f.name} is not a valid parity file: {e}") from None
         arch = doc.get("arch", "llada")
         key = (arch, doc.get("device", "cpu"), doc.get("model", arch))
         previous = newest.get(key)
@@ -400,14 +487,64 @@ def quality() -> str:
     return "\n".join(out)
 
 
-def eval_table() -> str:
+def count(v: object, spec: str = ".1f") -> str:
+    """A count or a mean for a table cell; `n/a` for a null (an engine that does not count forward passes)."""
+    return "n/a" if v is None else format(v, spec)
+
+
+def isolation_sentence(docs: list[dict]) -> str:
+    """What the timed rounds say about the machine they ran on, from their own `noisy_rows` and `unchecked_rows`.
+
+    A document written before isolation windows existed has neither key: nothing records that the machine
+    was otherwise idle, and the sentence says so instead of claiming it.
+    """
+    recorded = [d for d in docs if "noisy_rows" in d and "unchecked_rows" in d]
+    if len(recorded) < len(docs):
+        return ("These rounds carry no isolation record, so nothing here shows that the machine was otherwise "
+                "idle.")
+    noisy = sum(sum(d["noisy_rows"].values()) for d in docs)
+    unchecked = sum(sum(d["unchecked_rows"].values()) for d in docs)
+    if noisy == 0 and unchecked == 0:
+        return "Every timed problem ran in an isolation window that came back clean."
+    return (f"Isolation: {noisy} noisy and {unchecked} unchecked problem rows across the timed arms; "
+            "times average over the clean rows only where the table says so.")
+
+
+CI_NAMES = {
+    "newcombe-hybrid": "Newcombe hybrid score intervals",
+    "wald": "Wald intervals, which are too narrow when the arms disagree on few problems",
+}
+
+
+def ci_sentence(full: dict) -> str:
+    """Which interval each compare document holds; a file without `ci95_method` predates the choice and is Wald."""
+    methods = sorted({d.get("ci95_method", "wald") for _, d in full.values()})
+    unknown = [m for m in methods if m not in CI_NAMES]
+    if unknown:
+        raise SystemExit(f"bench_table: unknown ci95_method {unknown}")
+    return "The 95% CIs are " + " and ".join(CI_NAMES[m] for m in methods) + "."
+
+
+def refuse_unclean_timing(f: pathlib.Path, d: dict) -> None:
+    """A timed round whose clean rows are fewer than its problems is not published unless the caller says so."""
+    if "clean_rows" in d and d["clean_rows"] < d["problems"]:
+        raise SystemExit(
+            f"bench_table: {f.name} has {d['clean_rows']} clean rows for {d['problems']} problems "
+            f"(noisy {d.get('noisy_rows')}, unchecked {d.get('unchecked_rows')}); run the round again, "
+            "or pass --allow-noisy to publish it with those counts"
+        )
+
+
+def eval_table(allow_noisy: bool = False) -> str:
     """GSM8K paired comparisons from bench/eval/*-vs-*.json. Accuracy comes from the
-    full comparison; time per problem from the `--limit` one, a round that had the
-    machine to itself (generate_s in the other rounds carries whatever else ran)."""
+    full comparison; time per problem from the `--limit` one, the shorter round
+    (generate_s in the other rounds carries whatever else ran)."""
     full: dict[tuple, tuple] = {}
     timed: dict[tuple, tuple] = {}
     for f in sorted((ROOT / "bench" / "eval").glob("*-vs-*.json")):
         doc = json.loads(f.read_text())
+        if doc.get("limit") and not allow_noisy:
+            refuse_unclean_timing(f, doc)
         (timed if doc.get("limit") else full)[tuple(doc["arms"])] = (f, doc)
     if not full:
         return ""
@@ -424,7 +561,10 @@ def eval_table() -> str:
     def secs(pair: tuple, arm: str) -> str:
         if pair not in timed:
             return "not measured"
-        return f"{timed[pair][1]['generate_s_mean'][arm]:.1f} s"
+        d = timed[pair][1]
+        clean = (d.get("generate_s_mean_clean") or {}).get(arm)
+        mean = d["generate_s_mean"][arm] if clean is None and "generate_s_mean_clean" not in d else clean
+        return "no clean row" if mean is None else f"{mean:.1f} s"
 
     any_pair = next(iter(full))
     out = [
@@ -434,62 +574,91 @@ def eval_table() -> str:
         "| Arm | accuracy | vs baseline | 95% CI | discordant | McNemar p | passes / problem | time / problem |",
         "|---|---:|---:|---:|---:|---:|---:|---:|",
         f"| {base} | {first['accuracy'][base]:.1%} | | | | | "
-        f"{first['forward_passes_mean'][base]:.1f} | {secs(any_pair, base)} |",
+        f"{count(first['forward_passes_mean'][base])} | {secs(any_pair, base)} |",
     ]
+    other_weights: list[str] = []
     for pair, (f, d) in full.items():
         arm = pair[1]
-        lo, hi = d["ci95"]
+        ci = "not estimable" if d["ci95"] is None else f"{d['ci95'][0] * 100:+.1f} to {d['ci95'][1] * 100:+.1f} pt"
+        if d.get("weights_differ"):
+            other_weights.append(f"{arm} ran {d['models'][arm]}, the baseline {d['models'][base]}")
+            arm_cell = f"{arm} \u2021"
+        else:
+            arm_cell = arm
         out.append(
-            f"| {arm} | {d['accuracy'][arm]:.1%} | {d['difference'] * 100:+.1f} pt | "
-            f"{lo * 100:+.1f} to {hi * 100:+.1f} pt | {d['discordant']['a_only']} / {d['discordant']['b_only']} | "
-            f"{d['mcnemar_p']:.2f} | {d['forward_passes_mean'][arm]:.1f} | {secs(pair, arm)} |"
+            f"| {arm_cell} | {d['accuracy'][arm]:.1%} | {d['difference'] * 100:+.1f} pt | "
+            f"{ci} | {d['discordant']['a_only']} / {d['discordant']['b_only']} | "
+            f"{d['mcnemar_p']:.2f} | {count(d['forward_passes_mean'][arm])} | {secs(pair, arm)} |"
         )
     limits = sorted({d["limit"] for _, d in timed.values()})
     files = [f for f, _ in full.values()] + [f for f, _ in timed.values()]
     out += [
         "",
-        f"Discordant counts problems only the baseline solved / only the arm solved. Time per problem is "
-        f"the mean over the first {', '.join(map(str, limits))} problems of each arm, a round that ran with "
-        "nothing else on the machine.",
+        f"Discordant counts problems only the baseline solved / only the arm solved. {ci_sentence(full)} "
+        f"Time per problem is "
+        f"the mean over the first {', '.join(map(str, limits))} problems of each arm. "
+        + isolation_sentence([d for _, d in timed.values()]),
         "",
         "Evidence: " + ", ".join(f"`bench/eval/{f.name}`" for f in files) + ".",
     ]
+    if other_weights:
+        out[-3:-3] = ["", "\u2021 " + "; ".join(other_weights) + ": the accuracy difference includes the weights."]
     return "\n".join(out)
 
 
-def splice(text: str, table: str, start: str = START, end: str = END) -> str:
-    if start not in text or end not in text:
-        return text
+def splice(text: str, table: str, start: str = START, end: str = END, name: str = "the document") -> str:
+    """`text` with the table between the first `start` and `end` marker.
+
+    The pair must be there once, `start` before `end`: a missing or misplaced marker is an error that names the
+    document and the marker, not a no-op, because a table that is never rewritten is never checked either.
+    """
+    for marker in (start, end):
+        found = text.count(marker)
+        if found != 1:
+            raise SystemExit(f"bench_table: {name}: the marker `{marker}` is {'missing' if not found else f'there {found} times'}"
+                             "; it must appear exactly once")
+    if text.index(start) > text.index(end):
+        raise SystemExit(f"bench_table: {name}: `{end}` comes before `{start}`")
     head, rest = text.split(start, 1)
     _, tail = rest.split(end, 1)
     return f"{head}{start}\n{table}\n{end}{tail}"
 
 
-def main() -> int:
-    mode = sys.argv[1] if len(sys.argv) > 1 else "--check"
-    table = render()
+def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    allow_noisy = "--allow-noisy" in argv
+    modes = [a for a in argv if a != "--allow-noisy"]
+    if len(modes) != 1 or modes[0] not in ("--write", "--check"):
+        print(USAGE, file=sys.stderr)
+        return 2
+    mode = modes[0]
     logit_table, gen_table = parity()
-    quality_table = quality()
-    gsm8k_table = eval_table()
+    tables = {"bench": render(), "parity": logit_table, "genparity": gen_table, "quality": quality(),
+              "eval": eval_table(allow_noisy)}
     bad = []
     for t in TARGETS:
+        rel = t.relative_to(ROOT).as_posix()
         if not t.exists():
-            continue
+            raise SystemExit(f"bench_table: {rel} does not exist, so its tables cannot be checked")
         cur = t.read_text()
-        new = splice(cur, table)
-        new = splice(new, logit_table, "<!-- parity:start -->", "<!-- parity:end -->")
-        new = splice(new, gen_table, "<!-- genparity:start -->", "<!-- genparity:end -->")
-        if quality_table:
-            new = splice(new, quality_table, "<!-- quality:start -->", "<!-- quality:end -->")
-        if gsm8k_table:
-            new = splice(new, gsm8k_table, "<!-- eval:start -->", "<!-- eval:end -->")
+        new = cur
+        for key, (start, end) in MARKERS.items():
+            held = start in cur or end in cur
+            if not held and key not in REQUIRED.get(rel, ()):
+                continue
+            if not held:
+                raise SystemExit(f"bench_table: {rel}: the marker `{start}` is missing; the document must hold the {key} table")
+            if not tables[key]:
+                raise SystemExit(f"bench_table: {rel} holds the {key} table but there is no evidence for it ({EVIDENCE[key]} "
+                                 "is empty); restore the evidence or remove the markers")
+            new = splice(new, tables[key], start, end, rel)
         if mode == "--write":
             t.write_text(new)
-            print(f"bench_table: wrote {t.relative_to(ROOT)}")
+            print(f"bench_table: wrote {rel}")
         elif new != cur:
-            bad.append(str(t.relative_to(ROOT)))
+            bad.append(rel)
     if bad:
-        print("bench_table: out of date with bench/results: " + ", ".join(bad), file=sys.stderr)
+        print("bench_table: out of date with the evidence: " + ", ".join(bad), file=sys.stderr)
         print("            run: python3 scripts/bench_table.py --write", file=sys.stderr)
         return 1
     if mode == "--check":

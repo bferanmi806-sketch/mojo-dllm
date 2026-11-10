@@ -52,7 +52,9 @@ struct EmbeddingT(Movable):
             )
         self.vocab = vocab
         self.hidden = hidden
-        self.data = Floats(vocab * hidden)
+        # Every element is written below (each block stores its rows' columns),
+        # so the table is not zeroed first.
+        self.data = Floats(vocab * hidden, zero=False)
         var row_bytes = ggml_row_bytes(ggml_type, hidden)
         var dp = self.data.ptr()
         var blocks = (vocab + ROWS_PER_BLOCK - 1) // ROWS_PER_BLOCK
@@ -124,7 +126,8 @@ def soft_embed(
     var parts = min(MAX_PARTS, vocab // W)
     var per = ((vocab + parts - 1) // parts + W - 1) // W * W
     parts = (vocab + per - 1) // per
-    var partial = Floats(parts * rows * hidden)
+    # Each part zeroes its own slice before it accumulates into it.
+    var partial = Floats(parts * rows * hidden, zero=False)
     var pp = partial.ptr()
     var et = embt.data.ptr()
 

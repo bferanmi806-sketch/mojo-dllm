@@ -30,7 +30,7 @@ def bench(N: Int, K: Int, w_type: Int, L: Int, threads: Int) raises:
         x[i] = Float32((i * 37) % 101 - 50) / 50.0
     var qa = QActs(L, K)
     var out = Floats(L * N)
-    var pm = PackedMatrix(w.addr, w_type, N, K)
+    var pm = PackedMatrix(w.addr, w.size, w_type, N, K)
     quantize_acts(x.ptr(), L, K, qa)
     pgemm(pm, qa, L, out.ptr(), N, threads)
     var best = Float64(1e30)

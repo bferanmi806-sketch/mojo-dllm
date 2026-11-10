@@ -22,14 +22,17 @@ afterwards, open a new terminal or run `source ~/.local/bin/env`.
 1. **Toolchain.** It checks the platform, glibc and AVX2, stops
    on anything that cannot work, and runs `uv sync --frozen`.
 2. **Build.** It compiles `build/mojo-dllm`, or reports that the binary is
-   newer than the sources.
+   newer than its inputs and was built for this Mojo version and GPU architecture.
 3. **Model.** It asks before downloading LLaDA-8B-Instruct Q4_K_M (4.9 GB)
    into the Hugging Face cache, and checks the file's sha256 against the one
    the hub publishes. `--yes` answers the question for you; `--no-model` skips
    the step; `--model` picks another model.
 4. **Check.** It generates 16 tokens to prove the binary, the model and the
-   device work together.
+   device work together. The check fails when the binary exits non-zero, prints
+   nothing, or runs longer than 300 seconds. With `--no-model` the step is
+   skipped and setup ends with `Setup complete (no smoke test).`
 
+`setup --offline` (or `HF_HUB_OFFLINE=1`) uses the model cache only, as `run` and `pull` do.
 Without a terminal to ask on (a script, CI), `setup` does not download
 anything unless you pass `--yes`. It then exits 3 and prints the command that
 finishes the job.
@@ -47,9 +50,16 @@ missing GPU it says that the CPU will be used.
 ```
 
 The prompt is the first word that is not a flag; quote it. `run` rebuilds the
-binary if a source file changed, finds the model, picks the device and hands
+binary if a source file, `pyproject.toml`, `uv.lock` or `scripts/build.sh` changed, or if the
+Mojo pin or the GPU architecture (`MOJO_DLLM_GPU_ARCH`, else the local GPU) differs from the one
+recorded in `build/mojo-dllm.stamp`, finds the model, picks the device and hands
 the rest of the flags to `build/mojo-dllm run`. [Command line](cli.md) lists
 them all.
+
+A flag and its value are two arguments: `--steps 8`, not `--steps=8`. The launcher
+refuses the `=` form and prints the two-argument form to use. A prompt that starts
+with `-` goes after `--` (`./mojo-dllm run -- "-h"`); `-h` and `--help` after `--`
+belong to the prompt and do not print the help.
 
 `--max-tokens` sets the canvas size, `--steps` the number of denoising passes.
 Fewer steps run faster and commit more tokens per step, which costs quality.
@@ -64,7 +74,15 @@ raw text instead.
 
 `--device auto` is the default. It picks the first NVIDIA GPU with compute
 capability 8.0 or newer that `nvidia-smi` lists, and the CPU when there is
-none. Status lines go to stderr, so stdout holds only the model's text:
+none. The binary opens CUDA's default device, which can be another card than
+the first one `nvidia-smi` lists, so the launcher sets `CUDA_VISIBLE_DEVICES` to
+the UUID of the card it named (with `CUDA_DEVICE_ORDER=PCI_BUS_ID`) before it
+starts the binary. A `CUDA_VISIBLE_DEVICES` you already set (even an empty one)
+is kept: the launcher does not pin the card and prints a warning saying so.
+`--device gpu` runs the same check: it pins the first
+qualifying card, and prints a warning when `nvidia-smi`
+finds no card or only one below compute capability 8.0. Status lines go to
+stderr, so stdout holds only the model's text:
 
 ```text
 device: gpu (NVIDIA GeForce RTX 3050 6GB Laptop GPU, compute 8.6, 585 MiB free)
@@ -85,10 +103,12 @@ anyway.
 | the alias | `-m llada-8b` | `mradermacher/LLaDA-8B-Instruct-GGUF`, Q4_K_M (the default) |
 | a repo | `-m owner/Some-Model-GGUF:Q4_K_M` | the file matching that quant, downloaded once |
 
-Without `:QUANT`, a repo resolves to its Q4_K_M file, then Q8_0, then the
-first `.gguf` it lists, the order llama.cpp uses. A quant that matches nothing
-lists the files the repo has. Split (sharded) GGUF files are not supported. A Q8_0
-file downloads but does not load: the matrix kernels need Q4_K or Q6_K.
+Without `:QUANT`, a repo resolves to its Q4_K_M file, then Q4_K_S, then Q6_K,
+the quants the matrix kernels load. A repo with none of them, and a quant that
+matches nothing, fail with the list of files the repo has, and `owner/repo:QUANT`
+selects one. Split (sharded) GGUF files are not supported. A Q8_0 file downloads
+when you ask for it with `:Q8_0` but does not load: the matrix kernels need Q4_K
+or Q6_K.
 
 Tested Q4_K_M checkpoints are LLaDA-8B-Instruct, LLaDA-1.5,
 Dream-v0-Instruct-7B, Dream-Coder-v0-Instruct-7B and DiffuCoder-7B-cpGRPO.
@@ -111,7 +131,9 @@ against the hub's sha256 the first time it is used, and the launcher
 remembers the result in `~/.cache/mojo-dllm/verified.json` (under
 `$XDG_CACHE_HOME` when that is set). A file that fails the check is deleted,
 and the next run downloads it again. With `--offline` the check cannot run,
-so an unchecked file is used after a warning.
+so an unchecked file is used after a warning. `pull --offline` and `setup`
+then print `already downloaded (not verified)` and exit with status 3, and
+`doctor` marks the model with `!`. Run `./mojo-dllm pull` once online to check it.
 
 ## 4. Offline
 

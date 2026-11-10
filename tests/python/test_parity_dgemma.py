@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -133,19 +134,24 @@ def test_a_result_equal_to_the_bound_passes_and_each_metric_can_fail_alone() -> 
 
 
 def make_case(
-    workdir: Path, variants: tuple[str, ...] = parity.DG_VARIANTS, mojo: tuple[str, ...] = (), spread: bool = True
+    workdir: Path, variants: tuple[str, ...] = parity.DG_VARIANTS, mojo: tuple[str, ...] = (), spread: bool = True,
+    commit: str = "abc1234",
 ) -> Path:
-    case = workdir / "case0"
-    case.mkdir(parents=True)
-    meta = {"prompt": "p", "prompt_tokens": [2, 3], "canvas_tokens": [5, 6]}
-    if spread:
-        meta["ref_spread"] = {"cached vs unified": dict(min_cosine=1.0, argmax_agree=64, rows=64)}
-    (case / "case.json").write_text(json.dumps(meta))
-    for v in variants:
-        (case / f"{v}.ref.f32").write_bytes(b"ref:" + v.encode())
-    for v in mojo:
-        (case / f"{v}.mojo.f32").write_bytes(b"mojo:" + v.encode())
-    return case
+    """The folder `--phase ref` leaves: one case per entry of LOGIT_CASES. Returns case0."""
+    for i, logit_case in enumerate(parity.LOGIT_CASES):
+        case = workdir / f"case{i}"
+        case.mkdir(parents=True)
+        meta = {"prompt": logit_case.prompt, "prompt_tokens": [2, 3 + i], "canvas_tokens": [5, 6]}
+        if spread:
+            meta["ref_spread"] = {"cached vs unified": dict(min_cosine=1.0, argmax_agree=64, rows=64)}
+        (case / "case.json").write_text(json.dumps(meta))
+        for v in variants:
+            (case / f"{v}.ref.f32").write_bytes(b"ref:" + v.encode())
+        for v in mojo:
+            (case / f"{v}.mojo.f32").write_bytes(b"mojo:" + v.encode())
+            side = dict(case_sha256=parity.dg_case_hash(meta), mojo_dllm_commit=commit)
+            (case / f"{v}.mojo.f32.json").write_text(json.dumps(side))
+    return workdir / "case0"
 
 
 def fake_compare(a: object, b: object, first_mask: int) -> dict:
@@ -163,7 +169,7 @@ def test_missing_mojo_output_stops_the_comparison_and_names_the_file(tmp_path: P
     with pytest.raises(SystemExit) as e:
         parity.dg_compare(tmp_path, BOUND, load=lambda p: p.read_bytes(), compare_fn=compare)
     message = str(e.value)
-    assert str(case / "unified.mojo.f32") in message and "#64" in message
+    assert str(case / "unified.mojo.f32") in message and "mojo-dllm logits" in message
     assert calls == [], "nothing may be compared while a mojo-dllm output is missing"
 
 
@@ -181,8 +187,8 @@ def test_a_complete_set_is_compared_variant_by_variant(tmp_path: Path) -> None:
         tmp_path, BOUND, load=lambda p: p.read_bytes(), compare_fn=fake_compare
     )
     assert violations == []
-    assert [e["variant"] for e in entries] == list(parity.DG_VARIANTS)
-    assert all(e["prompt"] == "p" and e["rows"] == 64 for e in entries)
+    assert [e["variant"] for e in entries] == list(parity.DG_VARIANTS) * len(parity.LOGIT_CASES)
+    assert all(e["rows"] == 64 and e["mojo_dllm_commit"] == "abc1234" for e in entries)
 
 
 def test_a_variant_outside_the_bound_is_reported_with_its_name(tmp_path: Path) -> None:
@@ -192,7 +198,8 @@ def test_a_variant_outside_the_bound_is_reported_with_its_name(tmp_path: Path) -
         return dict(GOOD, min_cosine=0.5) if a.endswith(b"cached-sc") else dict(GOOD)
 
     _, violations = parity.dg_compare(tmp_path, BOUND, load=lambda p: p.read_bytes(), compare_fn=compare)
-    assert len(violations) == 1 and "cached-sc" in violations[0] and "min_cosine" in violations[0]
+    assert len(violations) == len(parity.LOGIT_CASES)
+    assert all("cached-sc" in v and "min_cosine" in v for v in violations)
 
 
 def test_no_cases_is_an_error_not_an_empty_pass(tmp_path: Path) -> None:
@@ -233,7 +240,8 @@ def test_each_entry_carries_the_reference_spread_of_its_case(tmp_path: Path) -> 
     meta = json.loads((case / "case.json").read_text())
     (case / "case.json").write_text(json.dumps(dict(meta, ref_spread=spread)))
     entries, _ = parity.dg_compare(tmp_path, BOUND, load=lambda p: p.read_bytes(), compare_fn=fake_compare)
-    assert all(e["reference_spread"] == spread for e in entries)
+    first = [e for e in entries if e["prompt"] == parity.LOGIT_CASES[0].prompt]
+    assert first and all(e["reference_spread"] == spread for e in first)
 
 
 def test_a_case_without_a_recorded_spread_is_refused(tmp_path: Path) -> None:
@@ -280,3 +288,107 @@ def test_dg_metrics_reads_row_maxima_along_axis_one(monkeypatch: pytest.MonkeyPa
     # It differs from every other metric's view of the same data: the cap-removed case has equal argmax.
     same = parity.dg_metrics(Rows([[10.0, 1.0]]), Rows([[10.0, 1.0]]), 0)
     assert same["top1_max_rel_err"] == 0.0
+
+
+def run_compare(workdir: Path) -> tuple[list[dict], list[str]]:
+    return parity.dg_compare(workdir, BOUND, load=lambda p: p.read_bytes(), compare_fn=fake_compare)
+
+
+def test_a_case_set_cut_short_is_refused_by_name(tmp_path: Path) -> None:
+    make_case(tmp_path, mojo=parity.DG_VARIANTS)
+    for f in (tmp_path / "case1").iterdir():
+        f.unlink()
+    (tmp_path / "case1").rmdir()
+    with pytest.raises(SystemExit) as e:
+        run_compare(tmp_path)
+    assert "case1" in str(e.value) and "case set" in str(e.value)
+
+
+def test_an_extra_case_folder_from_an_older_set_is_refused(tmp_path: Path) -> None:
+    make_case(tmp_path, mojo=parity.DG_VARIANTS)
+    (tmp_path / "case2").mkdir()
+    (tmp_path / "case2" / "case.json").write_text(json.dumps({"prompt": "old"}))
+    with pytest.raises(SystemExit) as e:
+        run_compare(tmp_path)
+    assert "case2" in str(e.value)
+
+
+def test_a_case_made_for_another_prompt_is_refused_by_name(tmp_path: Path) -> None:
+    make_case(tmp_path, mojo=parity.DG_VARIANTS)
+    meta = json.loads((tmp_path / "case1" / "case.json").read_text())
+    (tmp_path / "case1" / "case.json").write_text(json.dumps(dict(meta, prompt="an older prompt")))
+    with pytest.raises(SystemExit) as e:
+        run_compare(tmp_path)
+    assert "case1" in str(e.value) and "an older prompt" in str(e.value)
+
+
+def test_a_mojo_dump_written_for_another_case_is_refused_by_name(tmp_path: Path) -> None:
+    make_case(tmp_path, mojo=parity.DG_VARIANTS)
+    side = tmp_path / "case1" / "unified.mojo.f32.json"
+    side.write_text(json.dumps(dict(case_sha256="0" * 64, mojo_dllm_commit="abc1234")))
+    with pytest.raises(SystemExit) as e:
+        run_compare(tmp_path)
+    assert "case1" in str(e.value) and "different case" in str(e.value) and "unified.mojo.f32" in str(e.value)
+
+
+def test_a_mojo_dump_without_a_sidecar_is_refused(tmp_path: Path) -> None:
+    make_case(tmp_path, mojo=parity.DG_VARIANTS)
+    (tmp_path / "case0" / "cached.mojo.f32.json").unlink()
+    with pytest.raises(SystemExit) as e:
+        run_compare(tmp_path)
+    assert "cached.mojo.f32.json" in str(e.value) and "missing" in str(e.value)
+
+
+def test_a_sidecar_without_a_commit_is_refused(tmp_path: Path) -> None:
+    make_case(tmp_path, mojo=parity.DG_VARIANTS, commit="  ")
+    with pytest.raises(SystemExit) as e:
+        run_compare(tmp_path)
+    assert "mojo_dllm_commit" in str(e.value)
+
+
+def test_dumps_from_two_builds_are_refused(tmp_path: Path) -> None:
+    make_case(tmp_path, mojo=parity.DG_VARIANTS)
+    side = tmp_path / "case1" / "unified.mojo.f32.json"
+    side.write_text(json.dumps(dict(json.loads(side.read_text()), mojo_dllm_commit="fff9999")))
+    with pytest.raises(SystemExit) as e:
+        run_compare(tmp_path)
+    assert "different builds" in str(e.value)
+
+
+def test_the_case_hash_ignores_the_spread_added_after_the_reference_ran() -> None:
+    meta = {"prompt": "p", "prompt_tokens": [1], "canvas_tokens": [2]}
+    assert parity.dg_case_hash(meta) == parity.dg_case_hash(dict(meta, ref_spread={"x": 1}))
+    assert parity.dg_case_hash(meta) != parity.dg_case_hash(dict(meta, canvas_tokens=[3]))
+
+
+def test_check_dg_bound_refuses_the_same_partial_sets(tmp_path: Path) -> None:
+    check = load_module("check_dg_bound_p231", ROOT / "bench/check_dg_bound.py")
+    make_case(tmp_path)
+    shutil.rmtree(tmp_path / "case1")
+    with pytest.raises(SystemExit) as e:
+        check.load_cases(tmp_path)
+    assert "case1" in str(e.value)
+
+
+def test_the_reference_phase_deletes_every_old_mojo_dump_and_sidecar(tmp_path: Path, monkeypatch) -> None:
+    make_case(tmp_path, mojo=parity.DG_VARIANTS)
+    model = tmp_path / "m.gguf"
+    model.write_bytes(b"gguf")
+
+    def fake_run(cmd: list[str]) -> str:
+        if cmd[1:2] == ["info"]:
+            return "n_vocab=8\ncanvas_length=2\nfinal_logit_softcapping=30.0\n"
+        assert "logits" in cmd, f"unexpected command {cmd}"  # nothing else may run
+        return ""
+
+    monkeypatch.setattr(parity, "run", fake_run)
+    monkeypatch.setattr(parity, "dg_pinned_commit", lambda root: "a" * 40)
+    monkeypatch.setattr(parity, "dg_require_commit", lambda src, pin: pin)
+    monkeypatch.setattr(parity, "dg_tokenize", lambda src, m, prompt: [2, 3])
+    monkeypatch.setattr(parity, "dg_write_noisy", lambda src, dst, vocab: 1e-3)
+    monkeypatch.setattr(parity, "dg_spread", lambda d, vocab: {})
+    monkeypatch.setattr(parity, "dg_spread_lines", lambda spread: [])
+    args = type("A", (), {"ref": "dg_ref", "model": str(model), "threads": "1"})()
+    parity.dg_reference(args, tmp_path, tmp_path)
+    left = sorted(p.name for p in tmp_path.glob("case*/*.mojo.f32*"))
+    assert left == [], left

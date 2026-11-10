@@ -179,6 +179,32 @@ def test_tiny_token_and_type_counts_must_agree() raises:
         _ = _tok("short-types.gguf")
 
 
+def test_tiny_an_unknown_token_type_is_refused() raises:
+    with assert_raises(
+        contains=(
+            "tokenizer.ggml.token_type[265] is 9, expected a type from 0 to 6"
+        )
+    ):
+        _ = _tok("unknown-token-type.gguf")
+
+
+def test_tiny_a_negative_token_type_is_refused() raises:
+    with assert_raises(
+        contains=(
+            "tokenizer.ggml.token_type[265] is -1, expected a type from 0 to 6"
+        )
+    ):
+        _ = _tok("negative-token-type.gguf")
+
+
+def test_tiny_a_negative_special_id_other_than_minus_one_is_refused() raises:
+    with assert_raises(
+        contains="metadata key tokenizer.ggml.padding_token_id is -2"
+    ):
+        _ = _tok("special-negative.gguf")
+    assert_equal(_tok("special-minus-one.gguf").pad_id, -1)
+
+
 def test_tiny_a_missing_bos_id_is_named() raises:
     with assert_raises(contains="tokenizer.ggml.bos_token_id is required"):
         _ = _tok("no-bos-id.gguf")

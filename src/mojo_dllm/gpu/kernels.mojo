@@ -1,7 +1,8 @@
 """GPU kernels for the masked-diffusion forward pass (NVIDIA, via Mojo's DeviceContext).
 
-Each kernel mirrors a CPU function in `kernels/ops.mojo` or `kernels/qgemm.mojo`,
-and tests/gpu/test_gpu.mojo compares them one to one.
+Most kernels mirror a CPU function in `kernels/ops.mojo`, `kernels/qgemm.mojo` or
+`models/transformer.mojo`, and tests/gpu/test_gpu.mojo compares them one to one;
+a fused kernel is compared with the chain of kernels it replaces.
 
 The linear layers read GGUF K-quant blocks in place. Activations are quantized
 to int8 with one f32 scale per 32 values (llama.cpp's Q8_1 shape), so a
@@ -983,7 +984,8 @@ def stage_matrix(
 # it runs one mma.m16n8k32 (Q6_K: two m16n8k16, one per 16-group scale) per
 # 8 tokens and folds the int32 result into f32 with the sub-block's scales.
 #
-# Fragment layouts (verified against a CPU matmul, scratch/gpu/mma_layout):
+# Fragment layouts (checked against a CPU matmul by test_mma_k32_fragment_layout
+# and test_mma_k16_fragment_layout, which run `mma_tile_gpu`):
 #   g = lane / 4, t = lane % 4
 #   A row-major 16 x 32: a0 (g, 4t..), a1 (g+8, 4t..), a2 (g, 16+4t..), a3 (g+8, 16+4t..)
 #   B as 8 token rows x 32: b0 (n=g, 4t..), b1 (n=g, 16+4t..)
@@ -993,8 +995,6 @@ comptime BM = 64
 comptime BN_MAX = 80
 """Widest token tile; gemm_gpu picks the width per call (see _pick_bn)."""
 comptime GEMM_THREADS = 128
-comptime WS4 = 9
-"""Shared row stride of the Q4_K sub-block scales (8 used)."""
 comptime SW = 68
 """Shared row stride in 32-bit words: 256 bytes plus 16 of padding, so the 8
 rows a fragment load touches fall in different banks."""
@@ -1027,63 +1027,6 @@ comptime SharedI32 = Pointer[
 ]
 
 
-@always_inline
-def _stage_acts[
-    BN: Int
-](
-    aq: I8Ptr,
-    ad: F32Ptr,
-    as_: F32Ptr,
-    k: Int,
-    T: Int,
-    t0: Int,
-    b: Int,
-    sA: SharedI32,
-    sAds: SharedF32,
-):
-    """Copy BN tokens' activations for super-block b into shared memory.
-
-    Scales go to sAds as [sub-block j][token][d, s]: the token pair a thread
-    folds after an mma is then four consecutive floats, one 128-bit load,
-    and the four lanes of a quad read disjoint banks.
-    """
-    var th = Int(thread_idx.x)
-    comptime for rep in range((BN * 4 + GEMM_THREADS - 1) // GEMM_THREADS):
-        var unit = th + rep * GEMM_THREADS
-        if unit >= BN * 4:
-            break
-        var tok = unit >> 2
-        var qtr = unit & 3
-        var dst = sA.unsafe_offset(tok * SW + qtr * 16)
-        if t0 + tok < T:
-            var src = aq.unsafe_offset(
-                (t0 + tok) * k + b * 256 + qtr * 64
-            ).unsafe_bitcast[Int32]()
-            comptime for i in range(16):
-                dst[unsafe_offset=i] = src[unsafe_offset=i]
-        else:
-            comptime for i in range(16):
-                dst[unsafe_offset=i] = 0
-    var nsub = k // QK
-    comptime for e in range((BN * 8 + GEMM_THREADS - 1) // GEMM_THREADS):
-        var idx = th + e * GEMM_THREADS
-        if idx >= BN * 8:
-            break
-        var tk = idx >> 3
-        var j = idx & 7
-        var o = (j * BN + tk) * 2
-        if t0 + tk < T:
-            sAds[unsafe_offset=o] = ad[
-                unsafe_offset=(t0 + tk) * nsub + b * 8 + j
-            ]
-            sAds[unsafe_offset=o + 1] = as_[
-                unsafe_offset=(t0 + tk) * nsub + b * 8 + j
-            ]
-        else:
-            sAds[unsafe_offset=o] = 0
-            sAds[unsafe_offset=o + 1] = 0
-
-
 comptime BM4 = 128
 """Weight rows per Q4_K thread block: 16 per warp, 8 warps."""
 comptime Q4K_THREADS = 256
@@ -1091,54 +1034,6 @@ comptime SWQ = 36
 """Shared row stride of the packed Q4_K nibbles in 32-bit words: 128 bytes
 plus 16 of padding, so the 8 rows a fragment load reads fall in different
 banks."""
-
-
-@always_inline
-def _stage_acts16[
-    BN: Int, NTH: Int
-](
-    aq: I8Ptr,
-    ad: F32Ptr,
-    as_: F32Ptr,
-    k: Int,
-    T: Int,
-    t0: Int,
-    b: Int,
-    sA: SharedI32,
-    sAds: SharedF32,
-):
-    """`_stage_acts` with 128-bit copies and NTH threads."""
-    var th = Int(thread_idx.x)
-    comptime for rep in range((BN * 16 + NTH - 1) // NTH):
-        var unit = th + rep * NTH
-        if unit < BN * 16:
-            var tok = unit >> 4
-            var c = unit & 15
-            var v = SIMD[DType.int32, 4](0)
-            if t0 + tok < T:
-                v = (
-                    aq.unsafe_offset((t0 + tok) * k + b * 256 + c * 16)
-                    .unsafe_bitcast[Int32]()
-                    .unsafe_load[width=4, alignment=16]()
-                )
-            sA.unsafe_offset(tok * SW + c * 4).unsafe_store[alignment=16](v)
-    var nsub = k // QK
-    comptime for e in range((BN * 8 + NTH - 1) // NTH):
-        var idx = th + e * NTH
-        if idx < BN * 8:
-            var tk = idx >> 3
-            var j = idx & 7
-            var o = (j * BN + tk) * 2
-            if t0 + tk < T:
-                sAds[unsafe_offset=o] = ad[
-                    unsafe_offset=(t0 + tk) * nsub + b * 8 + j
-                ]
-                sAds[unsafe_offset=o + 1] = as_[
-                    unsafe_offset=(t0 + tk) * nsub + b * 8 + j
-                ]
-            else:
-                sAds[unsafe_offset=o] = 0
-                sAds[unsafe_offset=o + 1] = 0
 
 
 @always_inline
@@ -1762,9 +1657,9 @@ def _pick_q6_bn(n_tokens: Int, n_rows: Int, sm_count: Int) -> Int:
     """Balance short Q6_K tile work against scheduling waves on RTX Blackwell.
 
     A 16-token overhead per wave approximates staging/barrier work. Unlike
-    just minimizing the number of token tiles, this accounts for narrow GQA
+    minimizing the number of token tiles alone, this accounts for narrow GQA
     projections and for shapes whose 32-token grid fits in two SM waves.
-    It is a measured dispatch heuristic, not an occupancy estimate.
+    The rule is a dispatch heuristic chosen by timing; occupancy was not modelled.
     Preserve the previous rule for long canvases and other architectures.
     """
     var best = _pick_bn(n_tokens)
@@ -1785,11 +1680,12 @@ def _pick_q6_bn(n_tokens: Int, n_rows: Int, sm_count: Int) -> Int:
 def _pick_q4_bn(n_tokens: Int, n_rows: Int, sm_count: Int) -> Int:
     """Use the narrowest Q4_K tile that does not add a block wave.
 
-    Estimate one resident block per SM; this is a scheduling heuristic,
-    not a measured occupancy guarantee. Fewer token tiles alone can waste
+    Estimate one resident block per SM. The rule is a scheduling heuristic;
+    occupancy was not measured. Fewer token tiles alone can waste
     lanes on a wide GPU: at
     148 tokens and 4096 weight rows, both BN=80 (64 blocks) and BN=64
-    (96 blocks) fit in one 156-SM wave. The narrower tile does less work.
+    (96 blocks) fit in one wave on a GPU with at least 96 SMs. The narrower tile
+    does less work.
     Zero SMs preserves the existing policy for unmeasured device families.
     """
     var best = _pick_bn(n_tokens)

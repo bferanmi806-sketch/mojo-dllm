@@ -1,8 +1,10 @@
-"""Reference decoders for the GGML block formats a Q4_K_M LLaDA file contains.
+"""Scalar decoders for the GGML block formats the runtime reads: F32, F16, BF16,
+Q5_0, Q8_0, Q4_K, Q5_K and Q6_K.
 
-These are scalar and written for clarity. The hot path never calls them for
-weight matrices (see `kernels/qgemm.mojo`, which consumes the blocks in place);
-they decode embedding rows, norm vectors, and serve as the oracle for tests.
+They are written for clarity. The hot path never calls them for weight matrices:
+`PackedMatrix` and `pgemm` in `kernels/packed.mojo` repack and multiply the
+blocks. They decode embedding rows and norm vectors, and serve as the oracle
+for tests.
 
 Block layouts, from ggml-common.h:
 

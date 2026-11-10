@@ -72,18 +72,8 @@ hygiene() {
     fi
 }
 fmt_check() {
-    # Compare the tree before and after formatting, so uncommitted edits that
-    # are already formatted pass and only formatter changes fail.
-    need "${MOJO%% *}" || return 1
-    local before after
-    before="$(git diff -- src tests bench | sha256sum)"
-    $MOJO format -q src tests bench || return 1
-    after="$(git diff -- src tests bench | sha256sum)"
-    if [ "$before" != "$after" ]; then
-        echo "mojo format changed files; review and commit the result" >&2
-        git diff --stat -- src tests bench >&2
-        return 1
-    fi
+    # scripts/check_format.sh compares file contents before and after formatting, so untracked files count.
+    bash scripts/check_format.sh
 }
 build() {
     need "${MOJO%% *}" || return 1
@@ -96,15 +86,23 @@ yaml_lint() {
     need uv && uv run --frozen --only-group lint yamllint --strict .github
 }
 md_lint() {
-    need markdownlint-cli2 && markdownlint-cli2 "*.md" "docs/**/*.md" "#docs/spec.md" "#node_modules"
+    need markdownlint-cli2 && markdownlint-cli2 "*.md" "docs/**/*.md" "assets/*.md" ".github/*.md" "#node_modules"
 }
 launcher_tests() {
-    need uv && uv run --frozen --only-group test pytest tests/python -q
+    need uv && uv run --locked --only-group test pytest tests/python -q
+}
+script_lock() {
+    # The lock `uv run --script` uses; fails when it is missing or does not match the script header.
+    need uv && uv lock --script mojo-dllm --check
 }
 claims() {
     need uv && uv run --no-project python scripts/bench_table.py --check &&
         uv run --no-project python bench/eval_gsm8k.py --self-test &&
         timeout 300 uv run --frozen --only-group fixtures python scripts/check_weights.py --self-test
+}
+fixtures_match() {
+    # Regenerates every fixture a script makes into a scratch directory and compares the bytes.
+    need uv && uv run --frozen --only-group fixtures python scripts/check_fixtures.py
 }
 action_pins() {
     # Resolves each pinned SHA's tag through the GitHub API, so it needs gh.
@@ -121,17 +119,23 @@ if [ "$mode" = full ]; then
     step "tests (count pinned)" bash scripts/run-tests.sh
     step "--device gpu without a GPU fails cleanly" bash scripts/check_no_gpu.sh
     step "--visual-interval errors before model loading" bash scripts/check_visual.sh
+    step "GPU test count matches its pin" bash scripts/check_gpu_test_count.sh
     gpus="$(nvidia-smi -L 2>/dev/null)"
     if grep -q '^GPU ' <<<"$gpus"; then
         step "GPU tests (count pinned)" bash scripts/run-gpu-tests.sh
     else
+        # CI builds the suite on its GPU-less runner; so does a machine without a GPU.
+        step "GPU test suite builds" bash scripts/build.sh tests/gpu/test_gpu.mojo build/tests/test_gpu
         RESULTS+=("SKIP  GPU tests (no NVIDIA GPU on this machine; nothing was checked)")
     fi
     step "shellcheck" shell_lint
     step "yamllint" yaml_lint
     step "markdownlint" md_lint
     step "launcher tests" launcher_tests
-    step "README numbers match bench/results" claims
+    step "launcher script lock is current" script_lock
+    step "tests that need the fixtures and lint groups" bash scripts/run_extra_group_tests.sh
+    step "published numbers match their evidence (tables, GSM8K and checker self-tests)" claims
+    step "fixtures match their generators" fixtures_match
     step "docs build + links" docs_build
     step "action pins match their tags" action_pins
 fi

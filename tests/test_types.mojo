@@ -1,5 +1,5 @@
 from std.testing import assert_equal, assert_true, assert_raises, TestSuite
-from mojo_dllm.formats.gguf import GGUFFile, TensorInfo
+from mojo_dllm.formats.gguf import GGUFFile, TensorInfo, ggml_block_bytes
 from mojo_dllm.quant.kquants import (
     has_decoder,
     has_matrix_kernel,
@@ -20,7 +20,9 @@ def test_decoder_and_matrix_support() raises:
 
 
 def tensor_type(t: Int) -> TensorInfo:
-    return TensorInfo("blk.0.attn_q.weight", 2, 256, 8, 1, 1, t, 0, 0)
+    return TensorInfo(
+        "blk.0.attn_q.weight", 2, 256, 8, 1, 1, t, 0, 0, ggml_block_bytes(t) > 0
+    )
 
 
 def test_matrix_type_errors_name_tensor() raises:
@@ -49,7 +51,17 @@ def test_cpu_loader_rejects_decodable_matrix() raises:
     with assert_raises(
         contains="tensor q8_0 is Q8_0: matrix kernels exist for Q4_K and Q6_K"
     ):
-        _ = _load_matrix(g, "q8_0", 4, 96)
+        _ = _load_matrix(g, "q8_0", 4, 96, 1)
+
+
+def test_gpu_loader_refuses_a_short_embedding_before_a_device_exists() raises:
+    # ModelConfig runs before the device is created, so this needs no GPU.
+    with assert_raises(
+        contains="tensor shape mismatch for token_embd.weight: [256, 6]"
+    ):
+        _ = GpuDiffusionLM(
+            "tests/fixtures/metadata/embd-rows-short.gguf", max_tokens=4
+        )
 
 
 def test_gpu_planner_rejects_decodable_matrix_before_allocation() raises:
@@ -87,7 +99,7 @@ def test_gpu_constructor_checks_embedding_before_device_creation() raises:
 def test_embedding_types_accept_all_decoders_and_name_unknown_tensor() raises:
     for t in List[Int]([0, 1, 30, 6, 8, 12, 13, 14]):
         check_embedding_type(
-            TensorInfo("token_embd.weight", 2, 256, 1, 1, 1, t, 0, 0)
+            TensorInfo("token_embd.weight", 2, 256, 1, 1, 1, t, 0, 0, True)
         )
     with assert_raises(
         contains=(
@@ -95,7 +107,7 @@ def test_embedding_types_accept_all_decoders_and_name_unknown_tensor() raises:
         )
     ):
         check_embedding_type(
-            TensorInfo("token_embd.weight", 2, 256, 1, 1, 1, 16, 0, 0)
+            TensorInfo("token_embd.weight", 2, 256, 1, 1, 1, 16, 0, 0, False)
         )
 
 

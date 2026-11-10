@@ -8,12 +8,35 @@ from pathlib import Path
 
 import pytest
 
+from conftest import make_probes
 from launcher import cli
 from launcher.ui import Style
 
 COMMANDS = ["setup", "pull", "run", "doctor", "help"]
 ROOT = Path(__file__).resolve().parents[2]
 ENV_VARS = ["HF_TOKEN", "HF_HOME", "HF_HUB_CACHE", "MOJO_DLLM_GPU_ARCH"]
+
+
+def _help_section(title: str) -> list[str]:
+    lines = cli.help_text(Style(False)).splitlines()
+    start = lines.index(title)
+    end = next((i for i in range(start + 1, len(lines)) if lines[i] and not lines[i].startswith(" ")), len(lines))
+    return lines[start + 1 : end]
+
+
+def test_the_command_rows_of_the_help_are_the_launcher_commands() -> None:
+    rows = [m.group(1) for line in _help_section("Commands") if (m := re.match(r"^  ([a-z]+) {2,}\S", line))]
+    assert rows == list(cli.LAUNCHER_COMMANDS)
+
+
+def test_the_help_names_every_environment_variable_the_launcher_reads() -> None:
+    reads: set[str] = set()
+    for source in sorted((ROOT / "launcher").glob("*.py")):
+        reads |= set(re.findall(r'(?:env|environ)(?:\.get\(|\[)\s*"([A-Z][A-Z0-9_]+)"', source.read_text()))
+    documented = {line.split()[0].split("=")[0] for line in _help_section("Environment")}
+    assert reads >= {"HF_HUB_CACHE", "HF_HOME", "XDG_CACHE_HOME", "HF_HUB_OFFLINE", "MOJO_DLLM_GPU_ARCH"}, reads
+    assert reads <= documented, sorted(reads - documented)
+    assert {"HF_TOKEN", "NO_COLOR"} <= documented  # read by the hub library and by ui
 
 
 def test_help_lists_every_command_and_the_environment() -> None:
@@ -69,6 +92,17 @@ def test_pull_nonsense_is_an_error(capsys: pytest.CaptureFixture[str]) -> None:
 def test_setup_usage_error_exits_2(capsys: pytest.CaptureFixture[str]) -> None:
     assert cli.main(["setup", "--bogus"]) == 2
     assert capsys.readouterr().err.startswith("error:")
+
+
+def test_setup_offline_reaches_the_environment_it_builds(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[object] = []
+    monkeypatch.setattr(cli, "real_env", lambda offline=False: seen.append(("env", offline)) or "ENV")
+    monkeypatch.setattr(cli, "run_setup", lambda args, env: seen.append(("run", args.offline, env)) or 0)
+    assert cli.main(["setup", "--offline"]) == 0
+    assert seen == [("env", True), ("run", True, "ENV")]
+    seen.clear()
+    assert cli.main(["setup"]) == 0
+    assert seen == [("env", False), ("run", False, "ENV")]
 
 
 @pytest.mark.parametrize(
@@ -133,13 +167,23 @@ def test_a_word_close_to_nothing_still_points_at_help(
     assert "did you mean" not in err and "./mojo-dllm help" in err
 
 
+class _Exec(Exception):
+    """Raised by the fake execv: the real one never returns, so main must not run on after it."""
+
+
 @pytest.mark.parametrize("command", ["inspect", "tokenize", "logits"])
 def test_each_binary_command_is_forwarded(command: str, monkeypatch: pytest.MonkeyPatch) -> None:
-    seen: list[list[str]] = []
+    seen: list[tuple[str, list[str]]] = []
+
+    def execv(path: str, argv: list[str]) -> None:
+        seen.append((path, argv))
+        raise _Exec
+
     monkeypatch.setattr(cli, "ensure_built", lambda: False)
-    monkeypatch.setattr(os, "execv", lambda path, argv: seen.append(argv))
-    cli.main([command, "--x"])
-    assert seen == [[str(cli.BINARY), command, "--x"]]
+    monkeypatch.setattr(os, "execv", execv)
+    with pytest.raises(_Exec):
+        cli.main([command, "--x"])
+    assert seen == [(str(cli.BINARY), [str(cli.BINARY), command, "--x"])]
 
 
 def test_binary_commands_match_src_main_mojo() -> None:
@@ -161,3 +205,73 @@ def test_a_missing_binary_after_the_build_names_doctor(
     assert cli.main(["inspect", "m.gguf"]) == 1
     err = capsys.readouterr().err
     assert err.startswith("error:") and "./mojo-dllm doctor" in err and "absent" in err
+
+
+def test_an_os_error_prints_its_path_and_reason_not_a_traceback(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def boom(argv: list[str]) -> int:
+        raise PermissionError(13, "Permission denied", "/home/u/.cache/huggingface/hub/x")
+
+    monkeypatch.setattr(cli, "cmd_pull", boom)
+    assert cli.main(["pull"]) == 1
+    err = capsys.readouterr().err
+    assert err.startswith("error: ") and "/home/u/.cache/huggingface/hub/x" in err and "Permission denied" in err
+    assert "Traceback" not in err and err.count("\n") == 1
+
+
+def test_an_os_error_without_a_path_still_prints_one_line(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(cli, "cmd_run", lambda argv: (_ for _ in ()).throw(OSError(28, "No space left on device")))
+    assert cli.main(["run", "hi"]) == 1
+    err = capsys.readouterr().err
+    assert "No space left on device" in err and "Traceback" not in err
+
+
+def test_ctrl_c_is_one_line_and_exit_130(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def interrupted(argv: list[str]) -> int:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "cmd_pull", interrupted)
+    assert cli.main(["pull"]) == 130
+    err = capsys.readouterr().err
+    assert err == "interrupted\n"
+
+
+@pytest.mark.parametrize("command", ["run", "pull", "doctor"])
+@pytest.mark.parametrize("flag", ["-h", "--help"])
+def test_help_after_double_dash_is_not_a_help_request(
+    command: str, flag: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    seen: list[list[str]] = []
+    for name in ("cmd_run", "cmd_pull"):
+        monkeypatch.setattr(cli, name, lambda argv: seen.append(argv) or 0)
+    monkeypatch.setattr(cli, "real_probes", lambda: seen.append(["probes"]) or make_probes())
+    cli.main([command, "--", flag])
+    assert "Quick start" not in capsys.readouterr().out
+    assert seen, "the command did not run: help was printed instead"
+
+
+@pytest.mark.parametrize("flag", ["-h", "--help"])
+def test_setup_takes_no_words_after_double_dash_and_says_so_instead_of_printing_help(
+    flag: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert cli.main(["setup", "--", flag]) == 2
+    captured = capsys.readouterr()
+    assert "Quick start" not in captured.out and captured.err.startswith("error:")
+
+
+def test_run_double_dash_dash_h_forwards_the_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[list[str]] = []
+    monkeypatch.setattr(cli, "cmd_run", lambda argv: seen.append(argv) or 0)
+    assert cli.main(["run", "--", "-h"]) == 0
+    assert seen == [["--", "-h"]]
+
+
+@pytest.mark.parametrize("argv", [["run", "-h"], ["run", "hi", "--help"], ["pull", "--help"], ["run", "--model", "x", "-h", "--", "p"]])
+def test_help_before_double_dash_still_prints_help(argv: list[str], capsys: pytest.CaptureFixture[str]) -> None:
+    assert cli.main(argv) == 0
+    assert "Quick start" in capsys.readouterr().out

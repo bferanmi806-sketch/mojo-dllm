@@ -1,9 +1,9 @@
 """DiffusionGemma's entropy-bounded denoiser against exact oracles.
 
 The reference is `diffusion_generate_entropy_bound` in llama.cpp PR 24423
-(2e715c0639). There is no DiffusionGemma forward pass yet, so a scripted
-model hands the sampler logits rows chosen so that every entropy, argmax and
-accepted set is known in advance.
+(2e715c0639). The DiffusionGemma forward pass (#64) is not a `DenoisingModel`
+yet (#277), so a scripted model hands the sampler logits rows chosen so that every
+entropy, argmax and accepted set is known in advance.
 """
 
 from std.math import ceil, exp, log
@@ -59,6 +59,7 @@ struct ScriptedModel(DenoisingModel, Movable):
         self.cfg.vocab = vocab
         self.cfg.shift_logits = False
         self.cfg.mask_id = 4
+        self.cfg.canvas = len(script[0]) // vocab if len(script) > 0 else 0
         self.script = script^
         self.seen = List[List[Int]]()
         self.asked = List[List[Int]]()
@@ -468,7 +469,7 @@ def test_run_stops_at_step_two_when_stable_and_confident() raises:
     var prompt: List[Int] = [1, 2]
     var obs = Accepted(len(prompt))
     var res = _generate_diffusion_gemma(m, prompt, _cfg(3), obs)
-    assert_equal(res.steps_taken, 2)
+    assert_equal(res.steps_taken(), 2)
     assert_equal(res.forward_passes, 2)
     assert_equal(res.stop_reason, "converged")
     assert_true(res.stopped_early)
@@ -476,6 +477,29 @@ def test_run_stops_at_step_two_when_stable_and_confident() raises:
     _same(obs.totals, [48, 48], "observer total is the step budget")
     _same(res.tokens, [1, 2, 3, 1, 5], "the output is prompt + argmax canvas")
     assert_equal(len(m.seen), 2)
+
+
+def test_the_canvas_must_match_the_models_canvas_length() raises:
+    # The model scores [prompt | canvas] with the canvas it declares; a
+    # generation length that differs would overflow its logits buffer or move
+    # the prompt boundary.
+    var vocab = 6
+    var step = _step(_one_hot(vocab, 3), _one_hot(vocab, 1), _one_hot(vocab, 5))
+    var m = ScriptedModel(vocab, [step.copy()])
+    var prompt: List[Int] = [1, 2]
+    for bad in List[Int]([2, 4]):
+        var obs = Accepted(len(prompt))
+        with assert_raises(
+            contains=(
+                "generation length "
+                + String(bad)
+                + " must equal the model's canvas length 3"
+            )
+        ):
+            _ = _generate_diffusion_gemma(m, prompt, _cfg(bad), obs)
+    assert_equal(len(m.seen), 0)
+    var ok = Accepted(len(prompt))
+    _ = _generate_diffusion_gemma(m, prompt, _cfg(3), ok)
 
 
 def test_run_does_not_stop_when_stable_but_not_confident() raises:
@@ -487,7 +511,7 @@ def test_run_does_not_stop_when_stable_but_not_confident() raises:
     var prompt: List[Int] = [1]
     var obs = Accepted(len(prompt))
     var res = _generate_diffusion_gemma(m, prompt, _cfg(2, 6), obs)
-    assert_equal(res.steps_taken, 6)
+    assert_equal(res.steps_taken(), 6)
     assert_equal(res.stop_reason, "max_steps")
     assert_true(not res.stopped_early)
     _same(res.tokens, [1, 1, 1], "argmax canvas of the last step")
@@ -504,7 +528,7 @@ def test_run_does_not_stop_when_confident_but_not_stable() raises:
     var prompt: List[Int] = [1]
     var obs = Accepted(len(prompt))
     var res = _generate_diffusion_gemma(m, prompt, _cfg(2, 5), obs)
-    assert_equal(res.steps_taken, 5)
+    assert_equal(res.steps_taken(), 5)
     assert_equal(res.stop_reason, "max_steps")
     _same(res.tokens, [1, 2, 3], "step 5 is the a-step")
 
@@ -518,7 +542,7 @@ def test_run_with_stability_three_needs_four_steps() raises:
     c.eb_stability = 3
     var obs = Accepted(len(prompt))
     var res = _generate_diffusion_gemma(m, prompt, c, obs)
-    assert_equal(res.steps_taken, 4)
+    assert_equal(res.steps_taken(), 4)
     assert_equal(res.stop_reason, "converged")
 
 
@@ -530,7 +554,7 @@ def test_run_stop_rule_can_fire_on_the_last_step() raises:
     var m = ScriptedModel(vocab, [step.copy()])
     var prompt: List[Int] = [1]
     var res = _run(m, prompt, _cfg(2, 2))
-    assert_equal(res.steps_taken, 2)
+    assert_equal(res.steps_taken(), 2)
     assert_equal(res.stop_reason, "converged")
     assert_true(not res.stopped_early, "no step was skipped")
 
@@ -548,7 +572,7 @@ def test_run_confidence_threshold_follows_the_temperature_schedule() raises:
     var m = ScriptedModel(vocab, [step.copy()])
     var prompt: List[Int] = [1]
     var res = _run(m, prompt, _cfg(2))
-    assert_equal(res.steps_taken, 43)
+    assert_equal(res.steps_taken(), 43)
     assert_equal(res.stop_reason, "converged")
 
 
@@ -632,7 +656,7 @@ def test_run_a_change_resets_the_stability_count() raises:
     var c = _cfg(1)
     c.eb_stability = 2
     var res = _run(m, prompt, c)
-    assert_equal(res.steps_taken, 5)
+    assert_equal(res.steps_taken(), 5)
     assert_equal(res.stop_reason, "converged")
     _same(res.tokens, [1, 4], "the output is the last argmax")
 
@@ -717,7 +741,7 @@ def test_run_uses_the_given_t_min_t_max_and_confidence() raises:
     c.eb_t_max = 0.6
     c.eb_confidence = 0.02
     var res = _run(m, prompt, c)
-    assert_equal(res.steps_taken, 4)
+    assert_equal(res.steps_taken(), 4)
     assert_equal(res.stop_reason, "converged")
 
 
@@ -729,7 +753,7 @@ def test_run_with_stability_zero_stops_at_step_one() raises:
     var c = _cfg(2)
     c.eb_stability = 0
     var res = _run(m, prompt, c)
-    assert_equal(res.steps_taken, 1)
+    assert_equal(res.steps_taken(), 1)
     assert_equal(res.stop_reason, "converged")
     assert_true(res.stopped_early)
 
@@ -852,10 +876,10 @@ def test_bad_tunables_are_refused_by_name() raises:
     # Zero is valid for t_min and for stability (the reference allows both).
     c = _cfg(1)
     c.eb_t_min = 0.0
-    assert_equal(_run(m, prompt, c).steps_taken, 2)
+    assert_equal(_run(m, prompt, c).steps_taken(), 2)
     c = _cfg(1)
     c.eb_stability = 0
-    assert_equal(_run(m, prompt, c).steps_taken, 1)
+    assert_equal(_run(m, prompt, c).steps_taken(), 1)
     c = _cfg(1)
     c.eb_bound = -0.1
     with assert_raises(contains="--eb-bound"):
@@ -893,7 +917,7 @@ def test_generate_dispatches_on_the_architecture() raises:
     var prompt: List[Int] = [1]
     var res = generate(m, prompt, _cfg(1))
     assert_equal(res.stop_reason, "converged")
-    assert_equal(res.steps_taken, 2)
+    assert_equal(res.steps_taken(), 2)
 
 
 def main() raises:

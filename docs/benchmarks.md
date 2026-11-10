@@ -11,7 +11,7 @@
 | diffuse-cpp, cache off | 9,996 | 0.40 | 2.3 s | 8.2 GB | C++ |
 | diffuse-cpp, cache + `entropy_exit` † | 4,380 | 1.12 | 2.6 s | 8.4 GB | C++ |
 
-Versions: mojo-dllm `bdd268b`, Mojo 1.1.0 (8189361e), llama.cpp `836d571`, diffuse-cpp `1d2bd6a`. Evidence: `bench/results/2026-10-03-cpu-diffuse.json`, `bench/results/2026-10-03-cpu-llada.json`.
+Versions: mojo-dllm `bdd268b` (cpu-llada) and `dd0a647` (cpu-diffuse, diffuse-cpp rows only), Mojo 1.1.0 (8189361e), llama.cpp `836d571`, diffuse-cpp `1d2bd6a`. Evidence: `bench/results/2026-10-03-cpu-diffuse.json`, `bench/results/2026-10-03-cpu-llada.json`.
 
 † Not the same work: the inter-step cache reuses stale K/V and `entropy_exit` can stop early. Shown because it is diffuse-cpp's recommended mode.
 
@@ -237,7 +237,7 @@ of a long problem; the numbers are in the next paragraph.
 the reference laptop with the shared machine in its normal state: 60 windows of 10 s around a child that burns one
 core, other-process share of total capacity: mean of the window means 9.0%, median 8.0%, 95th percentile 20.6%,
 maximum 25.3%; peak share mean 19.5%, 95th percentile 39.7%, maximum 47.5%. Only 14 of the 60 windows came out clean at
-these limits, because other sessions were using the machine; the windows named them (`claude`, `python3`, `qemu`).
+these limits, because other sessions were using the machine; the windows named them (a terminal session, `python3`, `qemu`).
 Since the baseline is far above 1%, the limits are not tightened. The consequence is a blind spot: one stolen
 core for 30 s of a 90 s problem is 2.8% mean and 8.3% peak of 12 CPUs, and the CPU rules do not flag it. On a quiet
 machine (`scripts/bench-quiet.sh`, no other session) rerun the baseline and lower the limits by passing a `Thresholds`.
@@ -250,7 +250,9 @@ and `max_quiet_wait_s` config keys for this wait, and records `cpu_busy_before` 
 **Reading `ARM.env.json`.** The eval runners write `bench/eval/runs/ARM.env.json` and `run_bench.py` writes
 `bench/results/env/NAME.env.json`. It holds one entry per start of the arm under `sessions`: the preflight report
 (each check with its status and detail), `snapshot_start` and `snapshot_end`, the `thresholds` used, `tuned` (the
-profile before and after `--tune`), `bench_quiet` (true when the run was started under `scripts/bench-quiet.sh`),
+profile before and after `--tune`), `bench_quiet` (true when the run was started under `scripts/bench-quiet.sh`) and `bench_quiet_changes` (what that
+script changed: `timers_stopped`, `gpus_persistence_on`, `gpus_clocks_locked`, and `refused`, the changes it tried and
+could not make, a refused clock lock among them; null when the script gave no detail),
 `preflight_failed_allowed` (true when `--allow-noisy` continued past a FAIL), a `session_id`, the retry limit and tool
 versions. Each row of an arm file carries `isolation`: the window values above, `clean`, `reasons`, `retries` (how
 many repeats this problem took), `noisy`, `cpu_busy_before`, `waited_s`, `session` (the `session_id` of the start
@@ -319,10 +321,19 @@ answer right (`bench/eval_gsm8k.py`, see [Development](development.md)):
 | dualcache | 81.5% | +1.0 pt | -4.4 to +6.4 pt | 14 / 16 | 0.86 | 236.6 | 15.8 s |
 | threshold09 | 80.0% | -0.5 pt | -2.2 to +1.2 pt | 2 / 1 | 1.00 | 73.4 | 24.1 s |
 
-Discordant counts problems only the baseline solved / only the arm solved. Time per problem is the mean over the first 50 problems of each arm, a round that ran with nothing else on the machine.
+Discordant counts problems only the baseline solved / only the arm solved. The 95% CIs are Wald intervals, which are too narrow when the arms disagree on few problems. Time per problem is the mean over the first 50 problems of each arm. These rounds carry no isolation record, so nothing here shows that the machine was otherwise idle.
 
 Evidence: `bench/eval/2026-10-29-baseline-vs-dualcache.json`, `bench/eval/2026-10-29-baseline-vs-threshold09.json`, `bench/eval/2026-10-29-baseline-vs-dualcache-first50.json`, `bench/eval/2026-10-29-baseline-vs-threshold09-first50.json`.
 <!-- eval:end -->
+
+Each row of an arm file (`bench/eval/runs/ARM.jsonl`) has a `schema`: `mojo-cli` for `eval_gsm8k.py run`, `engine` for
+`eval_engine.py run`. `forward_passes` is a count the engine measured and is null when it does not count them; an engine
+row then carries the configured count in `steps`, and `eval_gsm8k.py compare` reads the arm's
+`flags.forward_passes_measured` and prints no mean for an arm that did not measure. `stopped_early` is true when the
+answer-fixed stop rule fired on the step the run ended, and that step can be the last one scheduled: 140 of the 200
+baseline rows are `stopped_early` with all 256 passes, so compare `forward_passes` with the configured steps to see how
+much work a row did. Engine rows also record `completion_tokens` and `finish_reason`; `length` means the token limit cut
+the answer off.
 
 ### The authors' own code (Transformers arm)
 
@@ -824,7 +835,7 @@ Weights differ between rows, so every comparison includes the precision as well 
 | llama.cpp reference (the branch of ggml-org/llama.cpp#24423) | `diffusiongemma-26B-A4B-it-Q4_K_M.gguf`, the file `docs/correctness.md` names | that branch's own loop; I did not read it for this table | the build is `scripts/build_dg_ref.sh`; the GSM8K runner for llama.cpp's diffusion CLI is issue #177 (open), and I have not checked that `bench/engines/llamacpp.py` drives this build | no committed run yet |
 | vLLM | `diffusiongemma-26B-A4B-it\|fp8-dynamic`, or the bf16 checkpoint (the choice is the maintainer's, see the vLLM runbook) | vLLM's entropy-bound sampler, as the recipe page describes it | `--engine vllm` (issue #179), runbook above | no committed run yet |
 | SGLang | `diffusiongemma-26B-A4B-it\|bfloat16` | `Gemma4Renoise` | `--engine sglang` (issue #180), runbook above | no committed run yet |
-| mojo-dllm | the Q4_K_M GGUF of the llama.cpp row | its own entropy-bound loop, `docs/diffusion.md` ("DiffusionGemma's loop") | `mojo-dllm run` does not run DiffusionGemma yet: the generation loop is issue #64 (open), see `docs/introduction.md` | no committed run yet |
+| mojo-dllm | the Q4_K_M GGUF of the llama.cpp row | its own entropy-bound loop, `docs/diffusion.md` ("DiffusionGemma's loop") | `mojo-dllm run` does not run DiffusionGemma yet: wiring the model into the generation loop is issue #277 (open), see `docs/introduction.md` | no committed run yet |
 
 The six defaults in `docs/cli.md` (`--eb-steps` 48, `--eb-t-min` 0.4, `--eb-t-max` 0.8, `--eb-bound` 0.1,
 `--eb-stability` 1, `--eb-confidence` 0.005) are the values the SGLang cookbook lists for `Gemma4Renoise`

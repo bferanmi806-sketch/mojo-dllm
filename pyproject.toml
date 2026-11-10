@@ -1,6 +1,6 @@
 [project]
 name = "mojo-dllm"
-version = "0.1.0"
+version = "0.2.0"
 description = "Portable local inference for diffusion language models, written in Mojo."
 readme = "README.md"
 license = "Apache-2.0"
@@ -27,5 +27,7 @@ environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests/python"]
-# The launcher package sits at the repo root and is not installed.
-pythonpath = ["."]
+# The launcher package sits at the repo root and is not installed; skip_policy.py lives in tests/python.
+pythonpath = [".", "tests/python"]
+# -rs lists every skip. skip_policy fails the run on a skip that tests/python/allowed-skips.txt does not name.
+addopts = "-rs -p skip_policy"

@@ -39,7 +39,7 @@ from mojo_dllm.gpu.kernels import (
     _launch,
     _launch_q6,
 )
-from mojo_dllm.gpu.model import GpuDiffusionLM
+from mojo_dllm.gpu.model import GpuDiffusionLM, _Planner, _plan_matrix, _vec_len
 from mojo_dllm.kernels.ops import (
     rmsnorm,
     rope_table,
@@ -890,7 +890,6 @@ def test_generation_with_device_stats_matches_host_scoring() raises:
     c.gen_length = 8
     c.block_length = 4
     c.steps = 4
-    c.mask_id = 511
     var device = generate(m, prompt, c)
     # full_logits copies every row to the host and scores it there.
     var h = c.copy()
@@ -911,7 +910,6 @@ def test_dual_cache_generation_on_the_host_logits_path() raises:
     c.gen_length = 8
     c.block_length = 4
     c.steps = 2
-    c.mask_id = 511
     var plain = GpuDiffusionLM(FIX + "tiny-llada.gguf", max_tokens=16)
     var a = generate(plain, prompt, c)
     var cached = GpuDiffusionLM(
@@ -923,6 +921,119 @@ def test_dual_cache_generation_on_the_host_logits_path() raises:
     assert_equal(len(a.tokens), len(b.tokens))
     for i in range(len(a.tokens)):
         assert_equal(a.tokens[i], b.tokens[i], "token " + String(i))
+
+
+def test_plan_matrix_refuses_a_shape_that_is_not_the_tensors() raises:
+    # The GPU twin of test_load_matrix_refuses_a_shape_that_is_not_the_tensors.
+    var g = GGUFFile(FIX + "kquants.gguf")
+    var plan = _Planner()
+    var m = _plan_matrix(g, plan, "q4k", 4, 512)
+    assert_equal(m.rows, 4)
+    assert_true(plan.size > 0)
+    with assert_raises(
+        contains="tensor shape mismatch for q4k: [512, 4], expected [512, 8]"
+    ):
+        _ = _plan_matrix(g, plan, "q4k", 8, 512)
+    with assert_raises(
+        contains="tensor shape mismatch for q4k: [512, 4], expected [256, 4]"
+    ):
+        _ = _plan_matrix(g, plan, "q4k", 4, 256)
+    with assert_raises(contains="tensor f16 is F16: matrix kernels exist"):
+        _ = _plan_matrix(g, plan, "f16", 2, 64)
+
+
+def test_vec_len_refuses_a_length_that_is_not_the_tensors() raises:
+    var g = GGUFFile(FIX + "kquants.gguf")
+    assert_equal(_vec_len(g, "f16", 128), 128)
+    with assert_raises(contains="tensor shape mismatch for f16: [64, 2]"):
+        _ = _vec_len(g, "f16", 64)
+    with assert_raises(contains="tensor shape mismatch for f16: [64, 2]"):
+        _ = _vec_len(g, "f16", 129)
+
+
+def _gpu_refuses_window(
+    mut m: GpuDiffusionLM,
+    toks: List[Int],
+    lo: Int,
+    hi: Int,
+    rows: List[Int],
+    needle: String,
+) raises:
+    """The GPU twin of test_model's `_refuses_window`."""
+    var out = Floats(9 * 512)
+    for i in range(out.n):
+        out[i] = 7.0
+    try:
+        m.forward_window(toks, lo, hi, rows, out.ptr())
+    except e:
+        if needle not in String(e):
+            raise Error(
+                "window ("
+                + String(lo)
+                + ", "
+                + String(hi)
+                + "): the error does not say '"
+                + needle
+                + "': "
+                + String(e)
+            )
+        for i in range(out.n):
+            assert_equal(out[i], 7.0, "the refused pass wrote to the logits")
+        return
+    raise Error("window (" + String(lo) + ", " + String(hi) + "): accepted")
+
+
+def test_gpu_forward_refuses_bad_windows_rows_and_tokens() raises:
+    var m = GpuDiffusionLM(FIX + "tiny-llada.gguf", max_tokens=16)
+    var toks: List[Int] = [5, 17, 300, 511, 511, 42, 511, 7]
+    var ascending = "output rows must be ascending positions inside the window"
+    var a: List[Int] = [3, 3]
+    _gpu_refuses_window(m, toks, 0, 8, a, ascending)
+    var b: List[Int] = [4, 3]
+    _gpu_refuses_window(m, toks, 0, 8, b, ascending)
+    var c: List[Int] = [8]
+    _gpu_refuses_window(m, toks, 0, 8, c, ascending)
+    var d: List[Int] = [-1]
+    _gpu_refuses_window(m, toks, 0, 8, d, ascending)
+    var none = List[Int]()
+    _gpu_refuses_window(
+        m, toks, 0, 8, none, "forward called with no output rows"
+    )
+    var rows: List[Int] = [3]
+    var needle = "forward window must be a non-empty range inside the input"
+    _gpu_refuses_window(m, toks, 0, 0, rows, needle)
+    _gpu_refuses_window(m, toks, -1, 4, rows, needle)
+    _gpu_refuses_window(m, toks, 2, 9, rows, needle)
+    var bad = toks.copy()
+    bad[2] = -1
+    var out = Floats(512)
+    with assert_raises(contains="token id -1 is outside the vocabulary"):
+        m.forward(bad, rows, out.ptr())
+    # The model still runs after each refusal.
+    m.forward(toks, rows, out.ptr())
+
+
+def test_attention_gpu_refuses_a_head_dimension_it_has_no_kernel_for() raises:
+    var ctx = DeviceContext()
+    var q = ctx.enqueue_create_buffer[DType.float32](96)
+    var k = ctx.enqueue_create_buffer[DType.float32](96)
+    var v = ctx.enqueue_create_buffer[DType.float32](96)
+    var o = ctx.enqueue_create_buffer[DType.float32](96)
+    for hd in [32, 96]:
+        with assert_raises(
+            contains="GPU attention supports head dimensions 64 and 128, got"
+        ):
+            attention_gpu(
+                ctx,
+                dev_f32(q),
+                dev_f32(k),
+                dev_f32(v),
+                dev_f32(o),
+                1,
+                1,
+                1,
+                hd,
+            )
 
 
 def test_the_gpu_model_reads_but_does_not_run_diffusion_gemma() raises:
