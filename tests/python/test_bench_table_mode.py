@@ -31,15 +31,18 @@ def site(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Three documents with the markers, and tables that are stubs: a refused mode must leave them as they were."""
     root = tmp_path / "site"
     (root / "docs").mkdir(parents=True)
-    text = "# t\n\n<!-- bench:start -->\nold\n<!-- bench:end -->\n"
-    for rel in ("README.md", "docs/benchmarks.md", "docs/correctness.md"):
-        (root / rel).write_text(text)
+    def doc(*keys: str) -> str:
+        return "# t\n\n" + "".join(f"<!-- {k}:start -->\nold\n<!-- {k}:end -->\n\n" for k in keys)
+
+    (root / "README.md").write_text(doc("bench"))
+    (root / "docs/benchmarks.md").write_text(doc("bench", "quality", "eval"))
+    (root / "docs/correctness.md").write_text(doc("parity", "genparity"))
     monkeypatch.setattr(bt, "ROOT", root)
     monkeypatch.setattr(bt, "TARGETS", [root / "README.md", root / "docs/benchmarks.md", root / "docs/correctness.md"])
     monkeypatch.setattr(bt, "render", lambda: "BENCH")
     monkeypatch.setattr(bt, "parity", lambda: ("PARITY", "GENPARITY"))
-    monkeypatch.setattr(bt, "quality", lambda: "")
-    monkeypatch.setattr(bt, "eval_table", lambda allow_noisy=False: "")
+    monkeypatch.setattr(bt, "quality", lambda: "QUALITY")
+    monkeypatch.setattr(bt, "eval_table", lambda allow_noisy=False: "EVAL")
     return root
 
 
@@ -67,7 +70,7 @@ def test_the_script_itself_exits_two_on_a_typo_and_on_no_argument() -> None:
 
 def test_a_mode_with_allow_noisy_runs_and_passes_the_flag_on(site: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     seen: list[bool] = []
-    monkeypatch.setattr(bt, "eval_table", lambda allow_noisy=False: seen.append(allow_noisy) or "")
+    monkeypatch.setattr(bt, "eval_table", lambda allow_noisy=False: seen.append(allow_noisy) or "EVAL")
     assert run(["--check", "--allow-noisy"]) == 1          # ran (the stub table differs from the document), not a usage error
     assert run(["--allow-noisy", "--write"]) == 0
     assert seen == [True, True]

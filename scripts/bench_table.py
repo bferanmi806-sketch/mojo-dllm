@@ -8,9 +8,14 @@ usage: bench_table.py --write     rewrite the tables between the markers
 Exactly one of --write and --check is required; anything else prints the usage line and exits 2.
 
 No benchmark number in this repository is typed by hand. The tables live
-between `<!-- bench:start -->` and `<!-- bench:end -->` and are produced from
-the result files that bench/run_bench.py writes. A partial result file (a run
-that was stopped) is refused, and so is a runtime that appears in two files.
+between marker pairs such as `<!-- bench:start -->` and `<!-- bench:end -->`
+and are produced from the evidence files: bench/results (the `bench` table),
+bench/parity (`parity`, `genparity`), bench/quality (`quality`) and bench/eval
+(`eval`). REQUIRED says which markers each document must hold: a missing
+document, a missing or misplaced marker, and a table whose evidence directory
+is empty are errors that name the file and the marker, because a document
+compared with itself passes. A partial result file (a run that was stopped) is
+refused, and so is a runtime that appears in two files.
 """
 
 from __future__ import annotations
@@ -28,6 +33,12 @@ from parity_schema import ParityError, validate_parity  # noqa: E402  (bench/par
 TARGETS = [ROOT / "README.md", ROOT / "docs" / "benchmarks.md", ROOT / "docs" / "correctness.md"]
 START, END = "<!-- bench:start -->", "<!-- bench:end -->"
 USAGE = "usage: bench_table.py --write | --check [--allow-noisy]"
+MARKERS = {key: (f"<!-- {key}:start -->", f"<!-- {key}:end -->") for key in ("bench", "parity", "genparity", "quality", "eval")}
+EVIDENCE = {"bench": "bench/results/*.json", "parity": "bench/parity/*.json", "genparity": "bench/parity/*.json",
+            "quality": "bench/quality/*.json", "eval": "bench/eval/*-vs-*.json"}
+# The tables each document must hold, by path relative to the repository root.
+REQUIRED = {"README.md": ("bench",), "docs/benchmarks.md": ("bench", "quality", "eval"),
+            "docs/correctness.md": ("parity", "genparity")}
 
 ROWS = [
     ("mojo-dllm-gpu", "**mojo-dllm** `--device gpu`", "Mojo"),
@@ -565,9 +576,19 @@ def eval_table(allow_noisy: bool = False) -> str:
     return "\n".join(out)
 
 
-def splice(text: str, table: str, start: str = START, end: str = END) -> str:
-    if start not in text or end not in text:
-        return text
+def splice(text: str, table: str, start: str = START, end: str = END, name: str = "the document") -> str:
+    """`text` with the table between the first `start` and `end` marker.
+
+    The pair must be there once, `start` before `end`: a missing or misplaced marker is an error that names the
+    document and the marker, not a no-op, because a table that is never rewritten is never checked either.
+    """
+    for marker in (start, end):
+        found = text.count(marker)
+        if found != 1:
+            raise SystemExit(f"bench_table: {name}: the marker `{marker}` is {'missing' if not found else f'there {found} times'}"
+                             "; it must appear exactly once")
+    if text.index(start) > text.index(end):
+        raise SystemExit(f"bench_table: {name}: `{end}` comes before `{start}`")
     head, rest = text.split(start, 1)
     _, tail = rest.split(end, 1)
     return f"{head}{start}\n{table}\n{end}{tail}"
@@ -581,29 +602,33 @@ def main(argv: list[str] | None = None) -> int:
         print(USAGE, file=sys.stderr)
         return 2
     mode = modes[0]
-    table = render()
     logit_table, gen_table = parity()
-    quality_table = quality()
-    gsm8k_table = eval_table(allow_noisy)
+    tables = {"bench": render(), "parity": logit_table, "genparity": gen_table, "quality": quality(),
+              "eval": eval_table(allow_noisy)}
     bad = []
     for t in TARGETS:
+        rel = t.relative_to(ROOT).as_posix()
         if not t.exists():
-            continue
+            raise SystemExit(f"bench_table: {rel} does not exist, so its tables cannot be checked")
         cur = t.read_text()
-        new = splice(cur, table)
-        new = splice(new, logit_table, "<!-- parity:start -->", "<!-- parity:end -->")
-        new = splice(new, gen_table, "<!-- genparity:start -->", "<!-- genparity:end -->")
-        if quality_table:
-            new = splice(new, quality_table, "<!-- quality:start -->", "<!-- quality:end -->")
-        if gsm8k_table:
-            new = splice(new, gsm8k_table, "<!-- eval:start -->", "<!-- eval:end -->")
+        new = cur
+        for key, (start, end) in MARKERS.items():
+            held = start in cur or end in cur
+            if not held and key not in REQUIRED.get(rel, ()):
+                continue
+            if not held:
+                raise SystemExit(f"bench_table: {rel}: the marker `{start}` is missing; the document must hold the {key} table")
+            if not tables[key]:
+                raise SystemExit(f"bench_table: {rel} holds the {key} table but there is no evidence for it ({EVIDENCE[key]} "
+                                 "is empty); restore the evidence or remove the markers")
+            new = splice(new, tables[key], start, end, rel)
         if mode == "--write":
             t.write_text(new)
-            print(f"bench_table: wrote {t.relative_to(ROOT)}")
+            print(f"bench_table: wrote {rel}")
         elif new != cur:
-            bad.append(str(t.relative_to(ROOT)))
+            bad.append(rel)
     if bad:
-        print("bench_table: out of date with bench/results: " + ", ".join(bad), file=sys.stderr)
+        print("bench_table: out of date with the evidence: " + ", ".join(bad), file=sys.stderr)
         print("            run: python3 scripts/bench_table.py --write", file=sys.stderr)
         return 1
     if mode == "--check":
