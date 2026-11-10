@@ -8,6 +8,7 @@ installed, and CI runs it in its own step under the `fixtures` group (`uv run --
 from __future__ import annotations
 
 import importlib.util
+import json
 import math
 import sys
 from pathlib import Path
@@ -97,3 +98,48 @@ def test_the_top_logit_error_refuses_a_zero_reference_row_maximum() -> None:
     with pytest.raises(SystemExit, match="zero"):
         parity.dg_top1_error([1.0, 2.0], [1.0, 0.0])
     assert parity.dg_top1_error([1.0, 3.0], [1.0, 2.0]) == pytest.approx(0.5)
+
+
+# dg_compare's own shape and empty guard, on real files (#165) ----------------------------------------------------
+
+BOUND = dict(min_cosine=0.5, argmax_fraction=0.0, mean_top5_overlap=0.0, max_rel_rms=10.0, max_top1_rel_err=10.0)
+VOCAB = 4
+
+
+def dg_folder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mojo_rows: int | None = 3, ref_rows: int = 3) -> Path:
+    """Case folders with real f32 files; `mojo_rows` None writes an empty mojo file. The sidecar check is stubbed."""
+    work = tmp_path / "work"
+    cases = []
+    for i, logit_case in enumerate(parity.LOGIT_CASES):
+        d = work / f"case{i}"
+        d.mkdir(parents=True)
+        meta = dict(prompt=logit_case.prompt, prompt_tokens=[2, 3], n_vocab=VOCAB, ref_spread={"x": 1})
+        (d / "case.json").write_text(json.dumps(meta))
+        cases.append(d / "case.json")
+        for v in parity.DG_VARIANTS:
+            ref = np.arange(1, ref_rows * VOCAB + 1, dtype=np.float32).reshape(ref_rows, VOCAB)
+            ref.tofile(d / f"{v}.ref.f32")
+            if mojo_rows is None:
+                (d / f"{v}.mojo.f32").write_bytes(b"")
+            else:
+                (ref[:mojo_rows] * 1.01 if mojo_rows <= ref_rows else np.ones((mojo_rows, VOCAB), np.float32)).astype(
+                    np.float32).tofile(d / f"{v}.mojo.f32")
+    monkeypatch.setattr(parity, "dg_case_files", lambda workdir: cases)
+    monkeypatch.setattr(parity, "dg_check_sidecar", lambda name, mojo, meta: "abc1234")
+    return work
+
+
+def test_dg_compare_on_real_files_of_one_shape_compares_them(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    entries, violations = parity.dg_compare(dg_folder(tmp_path, monkeypatch), BOUND)
+    assert len(entries) == 2 * len(parity.DG_VARIANTS) and all(e["rows"] == 3 for e in entries) and violations == []
+
+
+def test_dg_compare_refuses_an_empty_mojo_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    with pytest.raises(SystemExit, match="empty or differ in shape"):
+        parity.dg_compare(dg_folder(tmp_path, monkeypatch, mojo_rows=None), BOUND)
+
+
+@pytest.mark.parametrize("mojo_rows", [2, 4])
+def test_dg_compare_refuses_files_of_different_shape(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mojo_rows: int) -> None:
+    with pytest.raises(SystemExit, match="empty or differ in shape"):
+        parity.dg_compare(dg_folder(tmp_path, monkeypatch, mojo_rows=mojo_rows), BOUND)

@@ -159,3 +159,35 @@ def test_a_commit_that_is_not_40_lowercase_hex_is_refused_before_git_runs(tmp_pa
     done = run(tmp_path, {"DG_LLAMA_COMMIT": bad}, "--llama-only")
     assert done.returncode != 0 and "40 hex" in done.stderr
     assert not (tmp_path / "src").exists(), "nothing may be created before the commit is validated"
+
+
+def test_an_existing_tree_keeps_its_own_origin_when_the_pin_is_fetched(
+    tmp_path: Path, upstream: tuple[Path, str], stub_cmake: tuple[Path, Path]
+) -> None:
+    """A checkout the user already has (their clone, their fork as origin) must not have its remote rewritten (#165)."""
+    repo, sha = upstream
+    bindir, log = stub_cmake
+    src = tmp_path / "src"
+    src.mkdir()
+    git(src, "init", "-q", "-b", "main")
+    git(src, "remote", "add", "origin", "https://example.invalid/mine/llama.cpp.git")
+    git(src, "remote", "add", "fork", "https://example.invalid/other.git")
+    done = run(tmp_path, {"DG_LLAMA_REPO": str(repo), "DG_LLAMA_COMMIT": sha}, "--llama-only", bindir=bindir, log=log)
+    assert done.returncode == 0, done.stderr
+    assert git(src, "rev-parse", "HEAD") == sha
+    assert git(src, "remote", "get-url", "origin") == "https://example.invalid/mine/llama.cpp.git"
+    assert git(src, "remote", "get-url", "fork") == "https://example.invalid/other.git"
+    assert git(src, "remote").split() == ["fork", "origin"]
+
+
+def test_a_fresh_tree_gets_no_remote_either(tmp_path: Path, upstream: tuple[Path, str], stub_cmake: tuple[Path, Path]) -> None:
+    repo, sha = upstream
+    bindir, log = stub_cmake
+    assert run(tmp_path, {"DG_LLAMA_REPO": str(repo), "DG_LLAMA_COMMIT": sha}, "--llama-only", bindir=bindir, log=log).returncode == 0
+    assert git(tmp_path / "src", "remote") == ""
+
+
+def test_a_failed_fetch_by_url_still_names_the_remote_and_the_commit(tmp_path: Path, upstream: tuple[Path, str]) -> None:
+    repo, _ = upstream
+    done = run(tmp_path, {"DG_LLAMA_REPO": str(repo), "DG_LLAMA_COMMIT": "1" * 40}, "--llama-only")
+    assert done.returncode != 0 and "could not fetch commit " + "1" * 40 in done.stderr and str(repo) in done.stderr
