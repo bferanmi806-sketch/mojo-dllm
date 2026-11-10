@@ -18,7 +18,7 @@ Outputs (deterministic, seed 1234 unless noted):
                                    numpy reference logits for TINY_TOKENS, row-major [L, vocab]
   tests/fixtures/tiny-dream.gguf   2-layer Dream-shaped model (GQA, QKV bias) and its numpy logits
   tests/fixtures/tiny-dream.expected.f32
-  tests/fixtures/malformed/        one-byte-damaged GGUF headers and metadata
+  tests/fixtures/malformed/        one-byte-damaged GGUF headers and metadata, separate seed 330032
   tests/fixtures/metadata/         valid and invalid ModelConfig metadata
   tests/fixtures/entropy-rows.tsv  logits rows with numpy f64 argmax, entropy and inverse-CDF draws, seed 65065
   tests/fixtures/tiny-diffusion-gemma.gguf
@@ -26,7 +26,7 @@ Outputs (deterministic, seed 1234 unless noted):
   tests/fixtures/diffusion-gemma/  that model's metadata and tensor directory with one thing wrong per file
   tests/fixtures/tiny-diffusion-gemma.*.case
                                    tokens and the numpy logits of scripts/dg_numpy.py for the forward pass
-  tests/fixtures/gemma4-tiny/      a 279-token gemma4 vocabulary and variants with one thing wrong each (issue #62)
+  tests/fixtures/gemma4-tiny/      a 279-token gemma4 vocabulary, a well-formed variant with EOS, and files with one thing wrong each (issue #62)
   tests/fixtures/gpt2-tiny/        a six-token byte-level BPE vocabulary with the ids a real one leaves out (issue #62)
 """
 
@@ -1049,7 +1049,8 @@ def gemma4_tiny() -> None:
 
     It differs from the real one in ids only: `add_bos_token` is false, so a test can see the BOS forced on, and the
     merges are chosen so that a wrong rank order, a missing newline split and a missing whole-run rule each change
-    the ids. Four variants break one thing each.
+    the ids. `base.gguf` and `eos.gguf` are well formed (the second adds an EOS); every other file breaks one thing, named
+    by its file name.
     """
     block = "\u2581"
     controls = ["<pad>", "<eos>", "<bos>", "<unk>", "<mask>", "<|turn>", "<turn|>"]

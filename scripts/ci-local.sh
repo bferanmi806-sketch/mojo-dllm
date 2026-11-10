@@ -133,7 +133,7 @@ if [ "$mode" = full ]; then
     step "markdownlint" md_lint
     step "launcher tests" launcher_tests
     step "tests that need the fixtures and lint groups" extra_group_tests
-    step "README numbers match bench/results" claims
+    step "published numbers match their evidence (tables, GSM8K and checker self-tests)" claims
     step "docs build + links" docs_build
     step "action pins match their tags" action_pins
 fi

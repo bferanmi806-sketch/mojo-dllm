@@ -169,7 +169,7 @@ def test_missing_mojo_output_stops_the_comparison_and_names_the_file(tmp_path: P
     with pytest.raises(SystemExit) as e:
         parity.dg_compare(tmp_path, BOUND, load=lambda p: p.read_bytes(), compare_fn=compare)
     message = str(e.value)
-    assert str(case / "unified.mojo.f32") in message and "#64" in message
+    assert str(case / "unified.mojo.f32") in message and "mojo-dllm logits" in message
     assert calls == [], "nothing may be compared while a mojo-dllm output is missing"
 
 

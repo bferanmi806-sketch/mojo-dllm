@@ -66,7 +66,7 @@ from ._http import HttpClient, clean
 from ._openai import model_cards, parse_chat
 
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024    # a 256-token completion is a few KB; /server_info is the largest answer, well under this
-CLIENT_RAM_GB = 0.5         # my estimate for the Python loop of a client that holds no model; not a measurement
+CLIENT_RAM_GB = 0.5         # an estimate for the Python loop of a client that holds no model; not a measurement
 DEV_FALLBACK_VERSION = "0.0.0.dev0"     # sglang/version.py: "Fallback for development without build"
 DTYPES = ("half", "float16", "bfloat16", "float", "float32")     # `--dtype` choices except "auto" (arguments in server_args)
 _DTYPE_ALIASES = {"half": "float16", "float": "float32"}         # the help text: "float16" is the same as "half"

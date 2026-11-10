@@ -4,8 +4,9 @@
 usage:
   python3 bench/eval_gsm8k.py run --model M.gguf --arm NAME [--device gpu] [--gen-length 256]
                                   [--block-length 32] [--arch llada|dream] [--steps N] [--limit K] [--timeout-s 1800]
+                                  [--allow-battery] [--tune] [--allow-noisy] [--isolation-retries 2]
                                   [-- extra mojo-dllm flags]
-  python3 bench/eval_gsm8k.py compare ARM_A ARM_B [--across-weights] [--force]
+  python3 bench/eval_gsm8k.py compare ARM_A ARM_B [--limit K] [--across-weights] [--force]
   python3 bench/eval_gsm8k.py --self-test
 
 `run` answers the 200 problems in bench/eval/gsm8k-200.jsonl with `mojo-dllm
@@ -68,7 +69,9 @@ PROMPT = (
     "{question}\n\nSolve the problem step by step. End with a line of the form "
     '"The answer is N." where N is the final number.'
 )
-DEFAULT_TIMEOUT_S = spec.GENERATION_TIMEOUT_S     # per problem; a 256-step LLaDA problem takes 1 to 2 minutes on the GPU, CPU about 25
+# Per problem. The committed baseline arm (bench/eval/runs/baseline.jsonl, 200 problems) took 42.6 to 176.7 s of
+# generate_s each on the GPU, median 132.2 s; no CPU figure is committed. The default is a ceiling far above that.
+DEFAULT_TIMEOUT_S = spec.GENERATION_TIMEOUT_S
 NUMBER = r"-?\d[\d,]*(?:\.\d+)?"
 # Wrappers a model puts between "answer is" and the number: \( \[ \boxed{ ** $ (each may be followed by spaces).
 WRAPPERS = r"(?:(?:\\\(|\\\[|\\boxed\{|\*\*|\$)\s*)*"

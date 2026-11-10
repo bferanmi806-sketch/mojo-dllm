@@ -18,7 +18,8 @@ Measurement hygiene, all recorded in the output:
   * each run happens inside an isolation window (bench/isolation.py): other CPU, swap, thermal or GPU
     activity makes the run `noisy` and it is repeated up to `--isolation-retries` times (default 2); the
     window is recorded as `isolation`, and the preflight and a system snapshot go to
-    bench/results/env/NAME.env.json. `--allow-noisy` continues after a failed preflight;
+    bench/results/env/NAME.env.json (the run creates that directory; none is committed). `--allow-noisy` continues
+    after a failed preflight;
   * a watchdog kills any process named exactly `pytest` while the benchmark
     runs (other sessions on this machine launch test suites that would
     otherwise compete for the CPU) and logs every kill. A config can turn it

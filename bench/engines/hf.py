@@ -55,9 +55,9 @@ SHA_RE = re.compile(r"[0-9a-f]{40}")
 GIB = 1.073741824              # GB per GiB
 # Sum of the .safetensors of each repository on the Hugging Face API, 2026-11-09 (issue #178), in GiB.
 WEIGHTS_GIB = {"GSAI-ML/LLaDA-8B-Instruct": 14.93, "Dream-org/Dream-v0-Instruct-7B": 14.19}
-WORKING_GB = 3.0               # the Python loop's working memory (LLaDA's float64 Gumbel noise is about 0.5 GB a tensor)
-BF16_RESIDENT = 1.25           # resident set of a bf16 load over the weights' size
-NF4_RATIO = 3.5                # bf16 weights over their 4-bit size
+WORKING_GB = 3.0               # an estimate, not measured: the Python loop's working memory (LLaDA's float64 Gumbel noise is about 0.5 GB a tensor)
+BF16_RESIDENT = 1.25           # an estimate, not measured: resident set of a bf16 load over the weights' size
+NF4_RATIO = 3.5                # an estimate, not measured: bf16 weights over their 4-bit size
 
 
 @dataclass(frozen=True)

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Compare GGUF tensor shapes with their safetensors source (headers only).
 
-uv run --only-group fixtures python scripts/check_weights.py MODEL.gguf INDEX.json
+uv run --only-group fixtures python scripts/check_weights.py MODEL.gguf INDEX.json [--ignore REGEX]
+uv run --only-group fixtures python scripts/check_weights.py --self-test
 The second argument may also be a single .safetensors file. No tensor data is read.
 """
 

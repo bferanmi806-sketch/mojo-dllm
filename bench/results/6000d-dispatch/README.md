@@ -10,14 +10,14 @@ Three prompts, three measured rounds per length; a warmup pair per length is exc
 
 | Model | Generated tokens | Base ms/step | New ms/step | Paired speedup | Pair range |
 |---|---:|---:|---:|---:|---:|
-| llada | 128 | 25.405 | 21.569 | 1.183x | 1.149–1.195x |
-| llada | 256 | 30.477 | 30.475 | 1.000x | 0.993–1.006x |
-| llada | 512 | 54.265 | 51.143 | 1.061x | 1.051–1.062x |
-| llada | 1024 | 100.317 | 100.332 | 1.000x | 0.998–1.000x |
-| dream | 128 | 23.847 | 19.553 | 1.233x | 1.026–1.249x |
-| dream | 256 | 31.278 | 29.488 | 1.061x | 1.060–1.065x |
-| dream | 512 | 55.695 | 52.176 | 1.067x | 1.064–1.068x |
-| dream | 1024 | 103.608 | 102.779 | 1.008x | 1.004–1.009x |
+| llada | 128 | 25.405 | 21.569 | 1.183x | 1.149 to 1.195x |
+| llada | 256 | 30.477 | 30.475 | 1.000x | 0.993 to 1.006x |
+| llada | 512 | 54.265 | 51.143 | 1.061x | 1.051 to 1.062x |
+| llada | 1024 | 100.317 | 100.332 | 1.000x | 0.998 to 1.000x |
+| dream | 128 | 23.847 | 19.553 | 1.233x | 1.026 to 1.249x |
+| dream | 256 | 31.278 | 29.488 | 1.061x | 1.060 to 1.065x |
+| dream | 512 | 55.695 | 52.176 | 1.067x | 1.064 to 1.068x |
+| dream | 1024 | 103.608 | 102.779 | 1.008x | 1.004 to 1.009x |
 
 The longest LLaDA case and its 256-token case are effectively unchanged. The benefit depends on shape; the Dream 128-token pair range also reflects prompt-length differences.
 

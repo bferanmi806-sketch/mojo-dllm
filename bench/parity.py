@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """Logit and generation parity between mojo-dllm and llama.cpp on a real model.
 
-usage: python3 bench/parity.py --model MODEL.gguf [--ref build/llada_ref] [--threads 12] [--device cpu|gpu]
+usage: python3 bench/parity.py --model MODEL.gguf [--arch llada|dream|diffusion-gemma] [--ref build/llada_ref]
+                              [--threads 12] [--device cpu|gpu] [--force]
                               [--ref2 build/llada_ref_cuda --ref2-label "llama.cpp CUDA"]
+                              [--phase ref|compare --llama-src DIR]     (DiffusionGemma only)
 
 --ref2 adds a second reference for the logits only: the result then also
 records mojo-dllm against it and the two references against each other, which
 shows how far two builds of llama.cpp disagree on the same model.
 
-Writes bench/parity/<date>-<arch>-<model-stem>[-gpu].json. scripts/bench_table.py renders it into
+Writes bench/parity/<date>-<arch>-<model-stem>[-gpu].json (the LLaDA evidence the DiffusionGemma bound is taken from,
+2026-10-03-llada.json, predates the model stem in the name and keeps its name). scripts/bench_table.py renders it into
 docs/correctness.md. Requires build/mojo-dllm and build/llada_ref
 (see docs/correctness.md for how to build the latter).
 
@@ -20,9 +23,9 @@ is mapped by whichever process runs, and mojo-dllm keeps its own repacked copy b
   --phase compare  reads those files and mojo-dllm's, written by mojo-dllm itself as <variant>.mojo.f32
                    with a <variant>.mojo.f32.json sidecar (case_sha256, mojo_dllm_commit) beside them,
                    requires every case of the current prompt set, and writes bench/parity/ evidence only when every variant is inside the
-                   bound taken from the LLaDA evidence. A missing mojo-dllm file stops the run: there is
-                   nothing to compare until the forward pass (#64) exists, and the reference's own output
-                   is never used in its place.
+                   bound taken from the LLaDA evidence. A missing mojo-dllm file stops the run (write it with
+                   `mojo-dllm logits`, one file per variant and case), and the reference's own output is
+                   never used in its place.
 """
 
 from __future__ import annotations
@@ -140,11 +143,12 @@ DG_PREV_FILE = "unified.ref.f32"
 # divides the previous logits by it.
 DG_PREV_TEMP_INV = 1.0 / spec.DG_FIRST_STEP_TEMP
 LLADA_EVIDENCE = "bench/parity/2026-10-03-llada.json"
-# The reference's own sensitivity: with the previous-step logits changed by this relative L2 amount (about
-# ten times the spacing of float32 values) the output of the reference itself moved by a median relative RMS
-# of 0.18 to 0.26 on the two LLaDA prompts with a random canvas (measured, recorded per case as ref_spread).
-# The cause is untested; expert routing flips spread by bidirectional attention are a hypothesis. It is run on
-# every case so that a comparison is never read without that spread beside it.
+# The DiffusionGemma reference's own sensitivity (not LLaDA's): with the previous-step logits changed by this
+# relative L2 amount (about ten times the spacing of float32 values) the reference's output moved by a median
+# relative RMS of 0.18 to 0.26 on the two prompts of LOGIT_CASES with a random canvas. That was a one-off
+# measurement recorded per case as ref_spread under build/dg-parity/, which is not committed, so no file in
+# this repository holds it. The cause is untested; expert routing flips spread by bidirectional attention are a
+# hypothesis. The noisy run is made for every case so that a comparison is never read without its spread.
 DG_NOISE_REL = 1e-6
 DG_NOISE_SEED = spec.DG_NOISE_SEED
 DG_NOISY_FILE = "unified-sc-noisy.ref.f32"
@@ -347,8 +351,8 @@ def dg_compare(
                 raise SystemExit(f"refusing: the reference output {ref} is missing; run --phase ref again")
             if not mojo.is_file():
                 raise SystemExit(
-                    f"refusing: mojo-dllm's output {mojo} is missing. The DiffusionGemma forward pass is #64 "
-                    "and has to write this file; the reference's own output is never compared with itself."
+                    f"refusing: mojo-dllm's output {mojo} is missing. Write it with `mojo-dllm logits` (see "
+                    "docs/correctness.md); the reference's own output is never compared with itself."
                 )
             meta = json.loads(case_json.read_text())
             commits.add(dg_check_sidecar(d.name, mojo, meta))

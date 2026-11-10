@@ -5,8 +5,8 @@ Before an arm starts, `preflight` reads the power profile, the CPU governor, sys
 information (PSI), swap, free memory, thermal throttle counters and, for a GPU arm, the GPU's processes, memory,
 utilization and clock event reasons. Around every problem, a `Window` samples the same sources every 0.5 s,
 subtracts what the benchmark's own process tree used, and reports `clean` with the reasons when it was not.
-`run_isolated` waits for a quiet moment, runs the problem inside a window and repeats it up to `retries` times
-while the window is noisy. After that the row is kept with its reasons; accuracy never depends on a window.
+`run_isolated` waits up to `max_quiet_wait_s` for a quiet moment (it runs anyway after that, and logs it), runs the
+problem inside a window and repeats it up to `retries` times while the window is noisy. After that the row is kept with its reasons; accuracy never depends on a window.
 
 The checks fail closed, as `power.py` does. A source that cannot be read is a WARN in the preflight and an
 `unavailable` entry in the window, and a window with an unmeasured dimension is never clean. An empty reading
@@ -1245,7 +1245,11 @@ def run_isolated(fn: Callable[[], T], *, device: str, retries: int = 2, arm: Arm
 
 
 def need_ram_gb(model: str | os.PathLike) -> float | None:
-    """Free memory an arm wants: RAM_FACTOR times the model file (llama.cpp's resident set is 1.4 times the file).
+    """Free memory an arm wants: RAM_FACTOR times the model file.
+
+    The factor is a margin, not a measurement of every runtime: in the committed CPU results of LLaDA-8B Q4_K_M
+    (4.93 GB) the peak resident set of mojo-dllm was 5.92 GB, 1.2 times the file, and llama.cpp's 8.44 GB, 1.7 times,
+    so the check does not promise that a llama.cpp run fits.
 
     None when the size cannot be read (missing, unreadable, not a regular file): the preflight then FAILs
     `memory`, it never reads the need as zero."""

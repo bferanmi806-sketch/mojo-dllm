@@ -2,7 +2,7 @@
 
 The generator runs here against a stand-in `llama-tokenize`, so the tests prove what the generator checks
 and records. The committed ids themselves can only be verified against the real model file, which is what
-the generator's own invariants and the PR description do.
+the generator's own invariants and the provenance record (tests/fixtures/gemma4-tokenizer-golden.provenance.json) do.
 """
 
 from __future__ import annotations

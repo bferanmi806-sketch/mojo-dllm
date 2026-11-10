@@ -31,7 +31,7 @@ def main():
         for row in data['summary']:
             a, b = row['median_ms_per_step']['base'], row['median_ms_per_step']['new']
             ratios = row['paired_speedups']
-            lines.append(f"| {arch} | {row['gen_length']} | {a:.3f} | {b:.3f} | {row['median_paired_speedup']:.3f}x | {min(ratios):.3f}–{max(ratios):.3f}x |")
+            lines.append(f"| {arch} | {row['gen_length']} | {a:.3f} | {b:.3f} | {row['median_paired_speedup']:.3f}x | {min(ratios):.3f} to {max(ratios):.3f}x |")
     lines += ['', 'The longest LLaDA case and its 256-token case are effectively unchanged. '
               'The benefit depends on shape; the Dream 128-token pair range also reflects prompt-length differences.', '',
               '## Preservation checks', '']

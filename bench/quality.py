@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """How output quality and time move with the number of denoising steps.
 
-usage: python3 bench/quality.py --model MODEL.gguf [--steps 32,64,128] [--threads 12]
+usage: python3 bench/quality.py --model MODEL.gguf [--steps 32,64,128] [--gen 128] [--threads 12]
+                                [--allow-battery] [--force]
 
 A diffusion model commits gen_length / steps tokens per step. Few steps are
 fast and commit several tokens in parallel, which shows up as repeated or

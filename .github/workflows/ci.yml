@@ -68,7 +68,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: markdownlint-cli2 "*.md" "docs/**/*.md" "#docs/spec.md"
 
-      - name: README benchmark numbers come from bench/results
+      - name: Published benchmark tables match their evidence
         if: ${{ !cancelled() }}
         run: uv run --no-project python scripts/bench_table.py --check
 
