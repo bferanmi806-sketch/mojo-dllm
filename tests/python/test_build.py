@@ -182,3 +182,23 @@ def test_a_missing_bash_is_a_launcher_error(tree: Path, monkeypatch: pytest.Monk
     monkeypatch.setattr(build.subprocess, "Popen", popen)
     with pytest.raises(LauncherError, match="cannot start bash"):
         build.ensure_built()
+
+
+def test_the_stamp_names_what_the_build_was_asked_for_not_what_the_inputs_became(
+    tree: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Mojo pin is edited while the build runs. The stamp is taken before the build, so it still says 1.1.0
+    and the next start sees the mismatch and rebuilds; a stamp taken after would describe a binary built for 1.1.0
+    as if it were built for 1.2.0."""
+    build.stamp_path().unlink()
+    _fake_popen(monkeypatch, [], 0)
+    real_popen = build.subprocess.Popen
+
+    def popen_that_edits_the_pin(cmd: list[str], **kwargs: object) -> object:
+        (tree / "pyproject.toml").write_text(PYPROJECT.replace("1.1.0", "1.2.0"))
+        return real_popen(cmd, **kwargs)
+
+    monkeypatch.setattr(build.subprocess, "Popen", popen_that_edits_the_pin)
+    build.ensure_built()
+    assert build.stamp_path().read_text() == "mojo 1.1.0\narch sm_86\n"
+    assert "1.2.0" in str(build.stamp_problem()), "the next start must see that the pin changed during the build"
