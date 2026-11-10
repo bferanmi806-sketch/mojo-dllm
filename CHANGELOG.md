@@ -442,7 +442,8 @@ semantic versioning (0.y: minor bumps may break things).
   and sets `CUDA_VISIBLE_DEVICES=<uuid>` and `CUDA_DEVICE_ORDER=PCI_BUS_ID` before it starts the binary (and for the
   `setup` smoke test), so a machine with an older card first in the `nvidia-smi` list no longer prints one GPU and runs
   on another. An explicit `--device gpu` runs the same detection, pins the first qualifying card, and prints a warning on
-  stderr when `nvidia-smi` fails, finds no card or finds only cards below compute capability 8.0.
+  stderr when `nvidia-smi` fails, finds no card or finds only cards below compute capability 8.0. A
+  `CUDA_VISIBLE_DEVICES` the user already set is kept: the launcher does not pin the card and prints one warning line.
 - `mojo-dllm.lock` locks the dependency tree of the `./mojo-dllm` script, which `uv run --script` uses (#263). Before,
   the first run resolved `huggingface-hub`'s transitive packages (httpx2, httpcore2, hf-xet, certifi, filelock, tqdm) at
   their latest versions without hashes. CI and `scripts/ci-local.sh` run `uv lock --script mojo-dllm --check`, and

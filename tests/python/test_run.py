@@ -286,6 +286,26 @@ def test_run_hands_the_binary_the_resolved_model_the_chosen_device_and_the_other
     assert captured.out == "" and captured.err.startswith("device: gpu (NVIDIA RTX")
 
 
+def test_run_keeps_a_cuda_visible_devices_the_user_set_and_says_so(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    uuid = "GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    w = _Wiring(monkeypatch, tmp_path, gpus=([Gpu("NVIDIA RTX", 8.6, 5120, 0, uuid)], None))
+    runcmd.os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+    runcmd.cmd_run(["hi"])
+    assert runcmd.os.environ["CUDA_VISIBLE_DEVICES"] == "1" and "CUDA_DEVICE_ORDER" not in runcmd.os.environ
+    err = capsys.readouterr().err
+    assert err.count("did not pin the card") == 1 and "warning: " in err
+    assert w.execv
+
+
+def test_run_pins_the_card_when_the_variable_is_not_set(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    uuid = "GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    _Wiring(monkeypatch, tmp_path, gpus=([Gpu("NVIDIA RTX", 8.6, 5120, 0, uuid)], None))
+    runcmd.cmd_run(["hi"])
+    assert runcmd.os.environ["CUDA_VISIBLE_DEVICES"] == uuid
+
+
 def test_run_on_cpu_never_asks_nvidia_smi(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     w = _Wiring(monkeypatch, tmp_path, gpus=([Gpu("NVIDIA RTX", 8.6, 5120)], None))
     runcmd.cmd_run(["hi", "--device", "cpu"])

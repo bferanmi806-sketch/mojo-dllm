@@ -127,7 +127,7 @@ def cmd_run(argv: list[str]) -> int:
     # Progress and status go to stderr so stdout stays the model's text.
     model = ensure_model(args.model, hub, sys.stderr, announce_cached=False, store=default_store())
     gpus, smi_failure = _gpus_for(args.device)
-    device = choose_device(args.device, gpus, smi_failure)
+    device = choose_device(args.device, gpus, smi_failure, os.environ)
     print(device.line, file=sys.stderr, flush=True)
     if device.warning:
         print(f"warning: {device.warning}", file=sys.stderr, flush=True)

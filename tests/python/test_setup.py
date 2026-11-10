@@ -99,9 +99,24 @@ def test_smoke_test_uses_cpu_without_a_gpu(hub: FakeHub, store: VerifiedStore) -
     assert "device: cpu (no NVIDIA GPU found)" in e.out.getvalue()
 
 
-def test_the_smoke_test_runs_on_the_card_that_qualifies(hub: FakeHub, store: VerifiedStore) -> None:
+def test_the_smoke_test_leaves_a_cuda_visible_devices_the_user_set_and_says_so(
+    hub: FakeHub, store: VerifiedStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from test_gpu_select import TWO_GPUS
+
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "1")
+    e = Env(hub, store, gpu_text=TWO_GPUS)
+    assert e.run(["--yes"]) == 0 and e.calls[-1] == "smoke:gpu"
+    assert e.smoke_env == {}
+    assert e.out.getvalue().count("did not pin the card") == 1
+
+
+def test_the_smoke_test_runs_on_the_card_that_qualifies(
+    hub: FakeHub, store: VerifiedStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from test_gpu_select import NEW_UUID, TWO_GPUS
 
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
     e = Env(hub, store, gpu_text=TWO_GPUS)
     assert e.run(["--yes"]) == 0 and e.calls[-1] == "smoke:gpu"
     assert "RTX 3090" in e.out.getvalue()

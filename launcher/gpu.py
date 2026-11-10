@@ -85,7 +85,19 @@ def _gpu_detail(gpu: Gpu) -> str:
     return f"{gpu.name}, compute {gpu.compute_cap:.1f}, {gpu.free_mib} MiB free"
 
 
-def choose_device(requested: str, gpus: Sequence[Gpu], smi_failure: str | None = None) -> Device:
+def choose_device(
+    requested: str, gpus: Sequence[Gpu], smi_failure: str | None = None, environ: Mapping[str, str] | None = None
+) -> Device:
+    """The device to run on. `environ` is the caller's environment: a CUDA_VISIBLE_DEVICES in it (even an empty
+    one) is the user's choice of cards, so the card is not pinned and the device says so in its warning."""
+    device = _choose_device(requested, gpus, smi_failure)
+    if device.env and environ is not None and "CUDA_VISIBLE_DEVICES" in environ:
+        said = f"CUDA_VISIBLE_DEVICES is already set ({environ['CUDA_VISIBLE_DEVICES']!r}); the launcher did not pin the card"
+        return Device(device.kind, device.detail, {}, said)  # a device that pins has no other warning
+    return device
+
+
+def _choose_device(requested: str, gpus: Sequence[Gpu], smi_failure: str | None) -> Device:
     if requested == "cpu":
         return Device("cpu", "requested")
     if requested == "gpu":

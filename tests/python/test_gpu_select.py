@@ -122,3 +122,26 @@ def test_an_explicit_gpu_survives_an_nvidia_smi_listing_it_cannot_read(
     seen = _Exec(monkeypatch, tmp_path, "garbage\n")
     runcmd.cmd_run(["hi", "--device", "gpu"])
     assert seen.argv is not None and "warning:" in capsys.readouterr().err
+
+
+MINE = "GPU-11111111-2222-3333-4444-555555555555"
+
+
+def test_a_cuda_visible_devices_the_user_set_is_left_alone() -> None:
+    environ = {"CUDA_VISIBLE_DEVICES": MINE}
+    for requested in ("auto", "gpu"):
+        d = choose_device(requested, parse_nvidia_smi(TWO_GPUS), environ=environ)
+        assert d.kind == "gpu" and d.env == {}
+        assert d.warning is not None and "did not pin the card" in d.warning and "CUDA_VISIBLE_DEVICES" in d.warning
+        assert "\n" not in d.warning
+
+
+def test_an_empty_cuda_visible_devices_counts_as_set() -> None:
+    """An empty value hides every card from CUDA on purpose; the launcher does not override that either."""
+    d = choose_device("auto", parse_nvidia_smi(TWO_GPUS), environ={"CUDA_VISIBLE_DEVICES": ""})
+    assert d.env == {} and d.warning is not None
+
+
+def test_without_the_variable_the_card_is_pinned_and_nothing_is_said() -> None:
+    d = choose_device("auto", parse_nvidia_smi(TWO_GPUS), environ={"CUDA_DEVICE_ORDER": "FASTEST_FIRST"})
+    assert d.env["CUDA_VISIBLE_DEVICES"] == NEW_UUID and d.warning is None

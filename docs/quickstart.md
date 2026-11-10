@@ -77,7 +77,9 @@ capability 8.0 or newer that `nvidia-smi` lists, and the CPU when there is
 none. The binary opens CUDA's default device, which can be another card than
 the first one `nvidia-smi` lists, so the launcher sets `CUDA_VISIBLE_DEVICES` to
 the UUID of the card it named (with `CUDA_DEVICE_ORDER=PCI_BUS_ID`) before it
-starts the binary. `--device gpu` runs the same check: it pins the first
+starts the binary. A `CUDA_VISIBLE_DEVICES` you already set (even an empty one)
+is kept: the launcher does not pin the card and prints a warning saying so.
+`--device gpu` runs the same check: it pins the first
 qualifying card, and prints a warning when `nvidia-smi`
 finds no card or only one below compute capability 8.0. Status lines go to
 stderr, so stdout holds only the model's text:

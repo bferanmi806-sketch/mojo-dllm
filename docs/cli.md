@@ -11,7 +11,9 @@ mojo-dllm logits   --model PATH --tokens IDS --rows POSITIONS --out FILE [--thre
 This page describes the binary, `build/mojo-dllm`. The `./mojo-dllm run` launcher
 takes the prompt as its first word, accepts `-m` for `--model`, defaults
 `--device` to `auto` and passes the other flags on to the binary; see the
-[Quick start](quickstart.md).
+[Quick start](quickstart.md). A `CUDA_VISIBLE_DEVICES` you set before the launcher
+starts is kept: the launcher then does not pin the card and prints one warning
+saying so.
 
 `mojo-dllm COMMAND --help` (or `-h`) prints that command's usage and exits 0.
 Help wins over every other problem in the arguments, wherever it appears, except
