@@ -18,6 +18,7 @@ if [ ! -e "${files[0]}" ]; then
 fi
 
 total=0
+actual=""
 for f in "${files[@]}"; do
     # grep -c prints 0 and exits 1 for a file with no match; any other failure is a real one.
     n="$(grep -c '^def test_' "$f")"
@@ -31,6 +32,7 @@ for f in "${files[@]}"; do
         exit 1
     fi
     total=$((total + n))
+    actual+="$(basename "$f" .mojo) $n"$'\n'
 done
 
 pin_file="$test_dir/test-count.txt"
@@ -44,4 +46,23 @@ if [ "$pinned" != "$total" ]; then
     echo "      If you added or removed tests on purpose: UPDATE_TEST_COUNT=1 scripts/run-gpu-tests.sh" >&2
     exit 1
 fi
-echo "OK: $total tests defined in $test_dir (pinned $pinned)"
+# The per-file pin (one `name count` line per file) catches tests moved between files, which keep the total.
+files_pin="$test_dir/test-counts.txt"
+if [ ! -f "$files_pin" ]; then
+    echo "FAIL: $files_pin is missing, so the tests cannot be checked file by file (UPDATE_TEST_COUNT=1 scripts/run-gpu-tests.sh)" >&2
+    exit 1
+fi
+expected="$(LC_ALL=C sort "$files_pin")"
+got="$(printf '%s' "$actual" | LC_ALL=C sort)"
+if [ "$expected" != "$got" ]; then
+    echo "FAIL: the tests per file in $test_dir differ from $files_pin:" >&2
+    while IFS= read -r name; do
+        [ -n "$name" ] || continue
+        p="$(awk -v n="$name" '$1 == n {print $2}' <<<"$expected")"
+        d="$(awk -v n="$name" '$1 == n {print $2}' <<<"$got")"
+        [ "${p:-none}" = "${d:-none}" ] || echo "  $name: pinned ${p:-none}, defines ${d:-none}" >&2
+    done < <(printf '%s\n%s\n' "$expected" "$got" | awk '{print $1}' | LC_ALL=C sort -u)
+    echo "      If you moved, added or removed tests on purpose: UPDATE_TEST_COUNT=1 scripts/run-gpu-tests.sh" >&2
+    exit 1
+fi
+echo "OK: $total tests defined in $test_dir (pinned $pinned, and per file)"

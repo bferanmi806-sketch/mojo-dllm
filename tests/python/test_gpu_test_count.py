@@ -28,6 +28,7 @@ def suite(directory: Path, tests: dict[str, int], pin: str | None) -> Path:
         (directory / name).write_text(body + "def main() raises:\n    TestSuite.discover_tests[__functions_in_module()]().run()\n")
     if pin is not None:
         (directory / "test-count.txt").write_text(pin)
+        (directory / "test-counts.txt").write_text("".join(f"{n.removesuffix('.mojo')} {c}\n" for n, c in sorted(tests.items())))
     return directory
 
 
@@ -85,3 +86,33 @@ def test_a_file_grep_cannot_read_fails_instead_of_counting_zero(tmp_path: Path) 
     (directory / "test_unreadable.mojo").mkdir()  # grep exits 2 on a directory
     result = run_script(directory)
     assert result.returncode == 1 and "grep could not read" in result.stderr
+
+
+def test_tests_moved_between_files_fail_the_per_file_pin_though_the_total_matches(tmp_path: Path) -> None:
+    directory = suite(tmp_path, {"test_a.mojo": 3, "test_b.mojo": 2}, "5\n")
+    suite(directory, {"test_a.mojo": 1, "test_b.mojo": 4}, None)          # the total is still 5
+    result = run_script(directory)
+    assert result.returncode == 1
+    assert "test_a" in result.stderr and "pinned 3" in result.stderr and "defines 1" in result.stderr
+    assert "UPDATE_TEST_COUNT=1" in result.stderr
+
+
+def test_a_missing_per_file_pin_fails(tmp_path: Path) -> None:
+    directory = suite(tmp_path, {"test_a.mojo": 2}, "2\n")
+    (directory / "test-counts.txt").unlink()
+    result = run_script(directory)
+    assert result.returncode == 1 and "test-counts.txt is missing" in result.stderr
+
+
+def test_a_file_the_per_file_pin_does_not_list_fails(tmp_path: Path) -> None:
+    directory = suite(tmp_path, {"test_a.mojo": 2, "test_b.mojo": 1}, "3\n")
+    (directory / "test-counts.txt").write_text("test_a 2\n")
+    result = run_script(directory)
+    assert result.returncode == 1 and "test_b" in result.stderr
+
+
+def test_a_pinned_file_that_is_gone_fails(tmp_path: Path) -> None:
+    directory = suite(tmp_path, {"test_a.mojo": 2}, "2\n")
+    (directory / "test-counts.txt").write_text("test_a 2\ntest_gone 1\n")
+    result = run_script(directory)
+    assert result.returncode == 1 and "test_gone" in result.stderr
