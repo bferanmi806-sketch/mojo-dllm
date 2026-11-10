@@ -416,7 +416,8 @@ semantic versioning (0.y: minor bumps may break things).
   `pull --offline` and `setup` print `already downloaded (not verified)` and exit with status 3 (`setup` lists
   `./mojo-dllm pull` as the outstanding step), and `doctor` marks the `model` line `!` with the pull command.
 - The launcher checks a cached file against the hub's hash at the commit the file was cached at (the name of its
-  snapshot directory), not at the newest `main` (#257). A file that another tool cached at commit A, and that upstream
+  snapshot directory, found under the repo folder's own `snapshots`, so a cache root such as `HF_HOME=/data/snapshots`
+  does not confuse it), not at the newest `main` (#257). A file that another tool cached at commit A, and that upstream
   re-uploaded later, is kept. A file that fails its check loses its snapshot link and its blob, and a link whose target
   lies outside the Hugging Face cache loses only the link.
 - The launcher rebuilds the binary when `pyproject.toml`, `uv.lock` or `scripts/build.sh` is newer than it, and when

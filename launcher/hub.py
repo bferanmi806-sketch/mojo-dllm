@@ -29,10 +29,12 @@ def offline_requested(flag: bool, env: Mapping[str, str]) -> bool:
 
 
 def snapshot_revision(path: Path) -> str | None:
-    """The commit a cached file belongs to: the directory under snapshots/ that holds it."""
+    """The commit a cached file belongs to: the directory under the `snapshots` folder of its repo folder
+    (`models--owner--name`). A `snapshots` earlier in the path, such as a cache root of HF_HOME=/data/snapshots,
+    is not that folder."""
     parts = path.parts
-    for i in range(len(parts) - 2):
-        if parts[i] == "snapshots":
+    for i in range(1, len(parts) - 2):
+        if parts[i] == "snapshots" and parts[i - 1].startswith("models--"):
             return parts[i + 1]
     return None
 

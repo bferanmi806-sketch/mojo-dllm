@@ -118,3 +118,19 @@ def test_a_hub_that_lists_no_such_path_is_a_launcher_error(monkeypatch: pytest.M
     monkeypatch.setattr(huggingface_hub, "HfApi", Empty)
     with pytest.raises(LauncherError, match="no file m.Q4_K_M.gguf"):
         Hub(Path("/unused")).expected_sha256(REPO, NAME)
+
+
+def test_a_cache_root_that_contains_snapshots_does_not_hide_the_revision(tmp_path: Path) -> None:
+    """HF_HOME=/data/snapshots puts a `snapshots` component before the repo folder; the revision is the one after
+    the repo folder's own `snapshots`."""
+    cache = tmp_path / "snapshots" / "hub"
+    link, _ = layout(cache, "REV", OLD)
+    assert "snapshots" in link.parts[: link.parts.index("models--o--r")]
+    assert snapshot_revision(link) == "REV"
+    assert snapshot_revision(cache / "snapshots" / "hub" / "m.gguf") is None, "no repo folder, no revision"
+
+
+
+def test_a_file_in_the_blobs_folder_of_the_repo_has_no_revision(tmp_path: Path) -> None:
+    _, blob = layout(tmp_path, "A", OLD)
+    assert blob.parent.name == "blobs" and snapshot_revision(blob) is None
