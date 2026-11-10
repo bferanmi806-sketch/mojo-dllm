@@ -225,6 +225,52 @@ semantic versioning (0.y: minor bumps may break things).
   computes (issue #243).
 - `run_bench`, `eval_gsm8k run` and `parity` do not pass `--block-length` for Dream (config key `arch: dream`,
   `--arch dream`), ahead of the refusal planned in #206.
+- `bench/spec.py` holds the mask and vocabulary ids, the three benchmark prompts, the llama.cpp settings, the DiffusionGemma
+  seeds and the generation timeout that the benchmark tools used to repeat (issue #244). `run_bench` builds the
+  llama.cpp command with the function the GSM8K engine uses, `GenConfig` refuses a device or a schedule it does not know,
+  and `run_bench` refuses an unknown runtime name before the preflight. `spec.result_meta` gives `compare_gpu.py` and
+  `quality.py` one convention for `threads` (an integer) and `versions`; a new `quality` file records `threads` as a
+  number. No committed file changes.
+- `scripts/compare_logits.py` refuses a NaN or infinity in any logit row and a row of zeros, and its median is the mean of
+  the middle pair for an even number of rows (issue #245).
+- `compare_gpu.py`, `check_gpu_dispatch.py` and `compare_logits.py` refuse a base and a new that are the same checkout, the
+  same clean commit or byte-identical binaries, refuse an empty prompt list, and record the SHA-256 of each
+  `build/mojo-dllm` (issue #246). `compare_gpu.py` sets `CUDA_DEVICE_ORDER=PCI_BUS_ID`, accepts a GPU index or a `GPU-`
+  uuid, records `gpu_index` and the uuid and bus id read back from `nvidia-smi`, and runs the isolation preflight and a
+  window around each run. `run_bench` and `eval_gsm8k` record the binary hash. `check_gpu_dispatch.py` and
+  `scripts/gpu_profile.py` stop passing `--block-length` for Dream (issue #206, the last two tools).
+- `scripts/bench-quiet.sh` exports `timers:N,pm:N,clocks:N,refused:N` in `BENCH_QUIET_ACTIVE` and `bench/isolation.py`
+  records it as `bench_quiet_changes` (issue #247). The script writes each change to its state file before making it and
+  handles every GPU with `nvidia-smi -i N`, so the restore touches only what the run changed on each card.
+- `scripts/build.sh` prints the GPU architecture it chose and why, with a warning when `nvidia-smi` is installed but
+  fails. `scripts/check_format.sh` (used by `ci-local.sh` and CI) compares file contents before and after `mojo format`,
+  so an untracked file counts. `scripts/run-tests.sh` also checks the count of each file against
+  `tests/test-counts.txt` (`tests/gpu/test-counts.txt` for the GPU suite), written with the total by
+  `UPDATE_TEST_COUNT=1` (issue #248).
+- `tools/ref/llada_ref.cpp` parses every integer strictly, bounds-checks the row indices, token ids and mask id, checks every
+  write and every logit for finiteness, writes the logits through a `.part` file and exits non-zero with a message
+  (issue #249); `tests/python/test_llada_ref.py` builds it with the host compiler against a stand-in for llama.cpp.
+- `parity.compare` refuses non-finite logits, a row of zeros, matrices of different shape and a `first_mask` that leaves no
+  masked row, and `dg_top1_error` refuses a zero reference maximum (issue #250). New tests run the real `compare`, the
+  `run_bench` parsers and every isolation limit at the limit and one unit past it.
+- The gate scripts `verify-action-pins.sh`, `action-pin-comments.py`, `check_hygiene.sh`, `check_links.py`, `run-tests.sh`
+  and `bench/check_dg_bound.py` have tests that prove each can fail (issue #251). `check_links.py` now reads titled links
+  and reference definitions and skips fenced code blocks. Tests that need numpy, gguf or PyYAML skip with a visible
+  reason, and one CI step and one `ci-local.sh` step run them with those groups and fail on any skip.
+- `scripts/bench_table.py` exits 2 on an unknown or missing mode (issue #142) and treats a missing marker, a missing
+  document and an empty evidence directory as errors that name the file (issue #141).
+  `scripts/check_hygiene.sh` reads file names NUL separated, so a name git quotes is scanned (issue #140).
+  `scripts/build_dg_ref.sh` fetches the pinned commit by URL and leaves the remotes of an existing tree alone
+  (issue #165).
+- `scripts/bench_table.py` re-derives `tokens_per_s_median`, `startup_s_median` and `peak_rss_gb_max` from the runs
+  (issue #253). `bench/report_gpu_dispatch.py` computes its prose from the timing files and reads the SM count, the Mojo
+  and max-core versions and the host notes from `environment.json` beside them, and refuses an empty list or a
+  difference in the exactness files with an explicit error. Each fixture of `scripts/gen_fixtures.py` that drew from the
+  shared stream now starts its own generator at the position it had, so the committed bytes do not change and the order
+  of the functions does not matter, and a regeneration removes a file that an earlier run made and this one does not,
+  listed in `tests/fixtures/gen_fixtures.manifest`.
+- Comments, usage lines and one generated report in `bench/`, `scripts/` and `tools/` match the code and the data
+  (issue #252); the en dashes of `bench/results/6000d-dispatch/README.md` and `6000d-q6-standalone/README.md` are gone.
 
 - The transposed embedding table of DiffusionGemma's self-conditioning is no longer zeroed before it is written, and the
   `soft_embed` partial sums and the CPU attention scores are not zeroed where every element is written first
