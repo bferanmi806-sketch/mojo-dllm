@@ -50,8 +50,9 @@ class Env:
         self.calls.append("build")
         return True
 
-    def _smoke(self, model: Path, device: str) -> float:
+    def _smoke(self, model: Path, device: str, extra_env: object = None) -> float:
         self.calls.append(f"smoke:{device}")
+        self.smoke_env = extra_env
         return 3.25
 
     def run(self, argv: list[str]) -> int:
@@ -96,6 +97,15 @@ def test_smoke_test_uses_cpu_without_a_gpu(hub: FakeHub, store: VerifiedStore) -
     e = Env(hub, store, gpu_text="")
     assert e.run(["--yes"]) == 0 and e.calls[-1] == "smoke:cpu"
     assert "device: cpu (no NVIDIA GPU found)" in e.out.getvalue()
+
+
+def test_the_smoke_test_runs_on_the_card_that_qualifies(hub: FakeHub, store: VerifiedStore) -> None:
+    from test_gpu_select import NEW_UUID, TWO_GPUS
+
+    e = Env(hub, store, gpu_text=TWO_GPUS)
+    assert e.run(["--yes"]) == 0 and e.calls[-1] == "smoke:gpu"
+    assert "RTX 3090" in e.out.getvalue()
+    assert e.smoke_env == {"CUDA_VISIBLE_DEVICES": NEW_UUID, "CUDA_DEVICE_ORDER": "PCI_BUS_ID"}
 
 
 def test_an_unreadable_nvidia_smi_is_not_reported_as_no_gpu(hub: FakeHub, store: VerifiedStore) -> None:
@@ -313,6 +323,14 @@ def _smoke_run(monkeypatch: pytest.MonkeyPatch, *, code: int = 0, stdout: str = 
 
     monkeypatch.setattr(wizard.subprocess, "run", run)
     return seen
+
+
+def test_the_smoke_test_binary_gets_the_card_pinning_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    seen = _smoke_run(monkeypatch)
+    monkeypatch.setenv("KEEP", "1")
+    wizard.real_smoke(tmp_path / "m.gguf", "gpu", {"CUDA_VISIBLE_DEVICES": "GPU-x"})
+    env = seen[0]["env"]
+    assert env["CUDA_VISIBLE_DEVICES"] == "GPU-x" and env["KEEP"] == "1"  # type: ignore[index]
 
 
 def test_a_failed_smoke_test_raises(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

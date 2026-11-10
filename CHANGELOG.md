@@ -438,6 +438,11 @@ semantic versioning (0.y: minor bumps may break things).
   `get_paths_info` answer says the hub has no such file, and Ctrl-C prints `interrupted` and exits 130. A failed write of
   `verified.json` says that the download matched its sha256 and will be checked again. The size and mtime recorded for a
   verified file are the ones taken before it was hashed, so a file replaced during the hash is not recorded as verified.
+- `--device auto` now names the GPU the binary will open (#262). The launcher queries the index and UUID of each card
+  and sets `CUDA_VISIBLE_DEVICES=<uuid>` and `CUDA_DEVICE_ORDER=PCI_BUS_ID` before it starts the binary (and for the
+  `setup` smoke test), so a machine with an older card first in the `nvidia-smi` list no longer prints one GPU and runs
+  on another. An explicit `--device gpu` runs the same detection, pins the first qualifying card, and prints a warning on
+  stderr when `nvidia-smi` fails, finds no card or finds only cards below compute capability 8.0.
 
 ## [0.1.0] - 2026-10-04
 

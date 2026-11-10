@@ -7,7 +7,7 @@ import os
 import subprocess
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TextIO
@@ -59,7 +59,7 @@ class SetupEnv:
     sync: Callable[[], None]
     build: Callable[[], bool]  # True when it compiled, False when the binary was current
     binary_ready: Callable[[], bool]  # whether build/mojo-dllm exists after the build step
-    smoke: Callable[[Path, str], float]
+    smoke: Callable[[Path, str, Mapping[str, str]], float]  # model, device kind, extra environment
     style: Style
     out: TextIO
     err: TextIO
@@ -70,14 +70,16 @@ def real_sync() -> None:
         raise LauncherError("uv sync --frozen failed. Check the network, then run ./mojo-dllm setup again.")
 
 
-def real_smoke(model: Path, device: str) -> float:
+def real_smoke(model: Path, device: str, extra_env: Mapping[str, str] | None = None) -> float:
     cmd = [
         str(build.BINARY), "run", "--model", str(model.resolve()), "--prompt", SMOKE_PROMPT,
         "--max-tokens", "16", "--steps", "8", "--device", device,
     ]
     start = time.monotonic()
     try:
-        done = subprocess.run(cmd, stdout=subprocess.PIPE, text=True, timeout=SMOKE_TIMEOUT_S)
+        done = subprocess.run(
+            cmd, stdout=subprocess.PIPE, text=True, timeout=SMOKE_TIMEOUT_S, env={**os.environ, **(extra_env or {})}
+        )
     except subprocess.TimeoutExpired as e:
         raise LauncherError(
             f"the smoke test did not finish within {SMOKE_TIMEOUT_S} s. "
@@ -165,7 +167,7 @@ def _setup(args: SetupArgs, env: SetupEnv) -> int:
         else:
             device = choose_device("auto", parse_nvidia_smi(env.probes.gpu_text))
         print(device.line, file=out, flush=True)
-        seconds = env.smoke(model, device.kind)
+        seconds = env.smoke(model, device.kind, device.env)
         print(f"smoke test ok in {seconds:.1f} s", file=out)
 
     if outstanding:

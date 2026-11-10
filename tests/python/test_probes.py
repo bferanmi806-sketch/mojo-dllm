@@ -110,7 +110,7 @@ def test_the_default_model_lookup_names_a_launcher_error_and_an_os_error() -> No
 
 
 def _fake_machine(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, libc: str = "glibc",
-                  smi_out: str = "NVIDIA RTX 3050, 8.6, 5120, 580.65.06\n") -> list[list[str]]:
+                  smi_out: str = "NVIDIA RTX 3050, 8.6, 5120, 0, GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee, 580.65.06\n") -> list[list[str]]:
     calls: list[list[str]] = []
 
     def run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -134,8 +134,9 @@ def test_real_probes_never_syncs_and_reads_the_driver_in_the_same_nvidia_smi_cal
     uv = next(c for c in calls if c[0] == "uv")
     assert "--no-sync" in uv and "--frozen" in uv
     smi = [c for c in calls if c[0] == "nvidia-smi"]
-    assert len(smi) == 1 and "driver_version" in smi[0][1]
-    assert got.gpu_text == "NVIDIA RTX 3050, 8.6, 5120\n" and got.driver_text == "580.65.06\n"
+    assert len(smi) == 1 and smi[0][1].endswith(",index,uuid,driver_version") and "--query-gpu=name," in smi[0][1]
+    assert got.gpu_text == "NVIDIA RTX 3050, 8.6, 5120, 0, GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n"
+    assert got.driver_text == "580.65.06\n"
     assert got.mojo_version_output == "Mojo 1.1.0 (abc)\n" and got.mojo_failure is None and got.gpu_failure is None
 
 
