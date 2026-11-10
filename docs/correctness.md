@@ -315,7 +315,12 @@ uv run --only-group fixtures python bench/parity.py --arch diffusion-gemma --pha
     --model models/diffusiongemma-26B-A4B-it-Q4_K_M.gguf
 ```
 
-The comparison stops with a message while any mojo-dllm file is missing, and
+Each `<variant>.mojo.f32` has a `<variant>.mojo.f32.json` beside it with the
+`case_sha256` of its case (`bench/parity.py` `dg_case_hash`: prompt, prompt tokens and canvas) and the
+`mojo_dllm_commit` of the build that wrote it. The comparison needs the cases
+`case0` to `case{N-1}` of the current prompt set and stops with a message while
+any mojo-dllm file or sidecar is missing, was written for another case, or comes
+from a different build than the others, and
 refuses a file that is byte-identical to the reference's. It writes evidence to
 `bench/parity/` only when every variant is no worse than the worst case of the
 LLaDA comparison in `bench/parity/2026-10-03-llada.json`, on each of minimum

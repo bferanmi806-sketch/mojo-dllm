@@ -174,6 +174,58 @@ semantic versioning (0.y: minor bumps may break things).
 
 ### Changed
 
+- `bench/parity.py --phase compare` for DiffusionGemma refuses a partial or stale case set (issue #231). It requires
+  `case0` to `case{N-1}` for the N entries of `LOGIT_CASES` with each prompt equal to the file's, and
+  `bench/check_dg_bound.py` uses the same check. Each `<variant>.mojo.f32` needs a `.mojo.f32.json` sidecar with the
+  case hash and the commit of the build that wrote it; a missing sidecar, another case's hash, an empty commit or two
+  commits across the dumps is refused by name, and the evidence records that commit as `versions["mojo-dllm"]`
+  instead of `git HEAD` at compare time. `--phase ref` deletes the old dumps.
+- `scripts/bench_table.py` derives the sentence about the machine from the compare documents (issue #232). A GSM8K
+  timing round that has no `noisy_rows` and `unchecked_rows` is described as carrying no isolation record, which
+  changes one sentence in `docs/benchmarks.md` (the four committed compare files are unchanged). A null
+  `forward_passes_mean` prints `n/a`, a `weights_differ` document is marked and names both models, and a null interval
+  prints `not estimable`.
+- `run_bench` records `clean_runs`, `noisy_runs` and `unchecked_runs` per runtime, and `bench_table.py` names noisy runs
+  next to the busy ones, gives the median of the runs that were neither, counts runs without a window when the same file
+  has runs with one, and refuses a run with no `cpu_busy_before` (issue #233). A timed GSM8K round with fewer clean
+  rows than problems is refused unless `bench_table.py --allow-noisy` is given.
+- `run_bench` refuses `--reps` below 1, a runtime name the config does not list and an empty selection, marks a
+  diffuse-cpp run that printed no `step i/N` line as failed, checks that mojo-dllm did the configured number of forward
+  passes over the prompt `tokenize` counted, and requires `tokenize` to print token ids (issue #234).
+- `run_bench` and the isolation arm restore the machine on every way out (issue #235). The power profile goes through
+  `isolation.tuned` with a read-back, an unreadable profile stops the run before it measures, the battery pause and
+  resume hooks are read back, the closing snapshot of `ARM.env.json` is logged and skipped when the file is missing or
+  corrupt, and none of the cleanup steps replaces the error being raised. The watchdog kills only this user's `pytest`
+  and reports a kill the kernel refuses.
+- `eval_gsm8k` reads an answer wrapped in `\( \)`, `\[ \]`, `\boxed{}`, `**` or `$`, and `canon` is exact for numbers
+  of any length and returns `None` for anything that is not a number, where a 400-digit answer used to abort the arm
+  (issue #236). All 602 committed rows score as before.
+- `eval_gsm8k compare` reports Newcombe's hybrid score interval, with `ci95_method`, and a null `ci95` when the arms
+  never disagree (issue #237). It refuses arms that answered different problems and an existing output file.
+  For the committed threshold09 comparison the interval goes from -2.2 to +1.2 points to -2.8 to +1.7; the committed
+  compare files keep their Wald intervals and the table labels them as such.
+- `eval_gsm8k run` takes `--timeout-s` (default 1800 s, the engine runner's value) and `answered()` exits with the arm
+  and line number for a truncated line, a row without `flags` and a duplicate index (issue #238).
+- Result files from `run_bench`, `quality`, `parity` and `eval_gsm8k compare` are written through
+  `bench/atomic_write.py`: a temporary file renamed over the target, and an existing dated file is refused before the
+  long work starts unless `--force` is given (issue #239).
+- The preflight and the quiet gate of `bench/isolation.py` leave out the GPU processes of this process tree and the
+  memory they hold, so `eval_engine.py --engine hf --device gpu` no longer fails its own preflight (issue #240).
+- Engines return a frozen `GenResult` that refuses blank text, a `generate_s` that is not finite and above 0 and bad
+  counts (issue #241). `forward_passes` is the engine's own count or null; llama.cpp and the Transformers arm put the
+  configured count in `steps`. `compare` gives no mean for an arm whose flags say `forward_passes_measured: false`.
+  Engine rows carry `schema`, `steps`, `completion_tokens` and `finish_reason`, mojo rows carry `schema`, and
+  `docs/benchmarks.md` says what `stopped_early` means.
+- `bench/parity_schema.py` validates every `bench/parity/*.json` (issue #242): required and unknown keys, the metric
+  ranges, `matching_tokens <= gen_length`, `first_divergence` being null only when every token matches, and agreement
+  with the token lists when they are present. `parity.py` validates before it writes and records `threads`, the machine
+  and both generated token lists; `bench_table.py` refuses an invalid file.
+- `isolation.Check` refuses a status outside PASS, WARN and FAIL, `Thresholds` refuses a negative, NaN or out-of-unit
+  limit, the window record has a `TypedDict`, and `power._info` derives `on_battery` from the one `power_source` it
+  computes (issue #243).
+- `run_bench`, `eval_gsm8k run` and `parity` do not pass `--block-length` for Dream (config key `arch: dream`,
+  `--arch dream`), ahead of the refusal planned in #206.
+
 - The transposed embedding table of DiffusionGemma's self-conditioning is no longer zeroed before it is written, and the
   `soft_embed` partial sums and the CPU attention scores are not zeroed where every element is written first
   (issue #226). `Floats` takes `zero=False` for that. At the real size (vocabulary 262144, hidden 2816, 256 canvas

@@ -18,7 +18,8 @@ is mapped by whichever process runs, and mojo-dllm keeps its own repacked copy b
   --phase ref      the llama.cpp #24423 branch (scripts/build_dg_ref.sh) writes the canvas logits of a
                    fixed prompt and canvas, four ways, into build/dg-parity/<model>/caseN/.
   --phase compare  reads those files and mojo-dllm's, written by mojo-dllm itself as <variant>.mojo.f32
-                   beside them, and writes bench/parity/ evidence only when every variant is inside the
+                   with a <variant>.mojo.f32.json sidecar (case_sha256, mojo_dllm_commit) beside them,
+                   requires every case of the current prompt set, and writes bench/parity/ evidence only when every variant is inside the
                    bound taken from the LLaDA evidence. A missing mojo-dllm file stops the run: there is
                    nothing to compare until the forward pass (#64) exists, and the reference's own output
                    is never used in its place.
