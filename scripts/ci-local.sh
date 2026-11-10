@@ -96,7 +96,7 @@ yaml_lint() {
     need uv && uv run --frozen --only-group lint yamllint --strict .github
 }
 md_lint() {
-    need markdownlint-cli2 && markdownlint-cli2 "*.md" "docs/**/*.md" "assets/*.md" ".github/*.md" "#docs/spec.md" "#node_modules"
+    need markdownlint-cli2 && markdownlint-cli2 "*.md" "docs/**/*.md" "assets/*.md" ".github/*.md" "#node_modules"
 }
 launcher_tests() {
     need uv && uv run --locked --only-group test pytest tests/python -q

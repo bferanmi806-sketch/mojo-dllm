@@ -237,7 +237,7 @@ of a long problem; the numbers are in the next paragraph.
 the reference laptop with the shared machine in its normal state: 60 windows of 10 s around a child that burns one
 core, other-process share of total capacity: mean of the window means 9.0%, median 8.0%, 95th percentile 20.6%,
 maximum 25.3%; peak share mean 19.5%, 95th percentile 39.7%, maximum 47.5%. Only 14 of the 60 windows came out clean at
-these limits, because other sessions were using the machine; the windows named them (`claude`, `python3`, `qemu`).
+these limits, because other sessions were using the machine; the windows named them (a terminal session, `python3`, `qemu`).
 Since the baseline is far above 1%, the limits are not tightened. The consequence is a blind spot: one stolen
 core for 30 s of a 90 s problem is 2.8% mean and 8.3% peak of 12 CPUs, and the CPU rules do not flag it. On a quiet
 machine (`scripts/bench-quiet.sh`, no other session) rerun the baseline and lower the limits by passing a `Thresholds`.

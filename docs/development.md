@@ -21,13 +21,13 @@ machine with a GPU, the GPU tests that CI only builds:
 
 | Step | Command | Fails when |
 |---|---|---|
-| hygiene | `scripts/check_hygiene.sh --tracked` | a credential pattern or the author's employer name appears in tracked text (files whose names git quotes are skipped, [#140](https://github.com/vladimirrott/mojo-dllm/issues/140)) |
+| hygiene | `scripts/check_hygiene.sh --tracked` | a credential pattern (a provider token, a private key block, a database URL with a password) or the author's employer name appears in tracked text, or a tracked Markdown file outside `bench/results/` holds an em or en dash (files whose names git quotes are skipped, [#140](https://github.com/vladimirrott/mojo-dllm/issues/140)) |
 | format | `uv run --frozen mojo format -q src tests bench`, then `git diff` | `mojo format` changes any file (Mojo has no check mode) |
 | build | `scripts/build.sh` | any compiler warning (`-Werror`) |
 | tests | `scripts/run-tests.sh` | a test fails, a file runs zero tests, or the total differs from `tests/test-count.txt` |
 | launcher tests | `uv run --locked --only-group test pytest tests/python -q` | a test of the `./mojo-dllm` launcher fails |
 | script lock | `uv lock --script mojo-dllm --check` | `mojo-dllm.lock` is missing, or the `# dependencies` header of `./mojo-dllm` no longer matches it. After you change the pin, run `uv lock --script mojo-dllm` and commit the lock |
-| shellcheck, yamllint, markdownlint | `shellcheck --severity=warning scripts/*.sh .githooks/*`; `uv run --frozen --only-group lint yamllint --strict .github`; `markdownlint-cli2 "*.md" "docs/**/*.md" "assets/*.md" ".github/*.md" "#docs/spec.md" "#node_modules"` | any of the three reports a finding |
+| shellcheck, yamllint, markdownlint | `shellcheck --severity=warning scripts/*.sh .githooks/*`; `uv run --frozen --only-group lint yamllint --strict .github`; `markdownlint-cli2 "*.md" "docs/**/*.md" "assets/*.md" ".github/*.md" "#node_modules"` | any of the three reports a finding |
 | claims | `uv run --no-project python scripts/bench_table.py --check` | a table in the README, `docs/benchmarks.md` or `docs/correctness.md` differs from what `bench/results`, `bench/parity`, `bench/quality` and `bench/eval` render (a missing table marker, target file or quality or eval evidence passes, [#141](https://github.com/vladimirrott/mojo-dllm/issues/141); an unknown mode exits 0, [#142](https://github.com/vladimirrott/mojo-dllm/issues/142)) |
 | docs | `mdbook build` + `scripts/check_links.py` | a relative link is broken |
 | action pins | `scripts/verify-action-pins.sh` (needs an authenticated `gh`) | a pinned SHA is not the tag its comment names |
@@ -75,7 +75,7 @@ live in `tests/fixtures/` and come from scripts, never from hand:
 | `gemma4-tokenizer.gguf` | `scripts/gen_tokenizer_fixture.py ... gemma4` | the 262,144 tokens of the DiffusionGemma file and the 472 of its 514,906 merges that apply to the 54 golden strings, tokenizer keys only and without the scores (5.5 MB) |
 | `gemma4-tiny/` | `scripts/gen_fixtures.py` | a 279-token gemma4 vocabulary whose ids can be worked out by hand, and variants with one thing wrong or unusual each (a missing byte token, a merge with no space, mismatched counts, nested special tokens, an unknown-type token, an end-of-turn token the vocabulary lacks) |
 | `gpt2-tiny/` | `scripts/gen_fixtures.py` | a six-token byte-level BPE vocabulary with padding, unknown and EOS ids and no end-of-turn token: the ids that LLaDA's and Dream's files leave out |
-| `gemma4-tokenizer-golden.tsv`, `gemma4-tokenizer-golden.provenance.json` | `scripts/gen_tokenizer_fixture.py ... gemma4` (`--golden-only` rewrites just these) | DiffusionGemma tokenizer ids against `llama-tokenize` from the ggml-org/llama.cpp#24423 branch at the commit `scripts/build_dg_ref.sh` pins; the provenance file records that commit, the model file's sha256 and the command |
+| `gemma4-tokenizer-golden.tsv`, `gemma4-tokenizer-golden.provenance.json` | `scripts/gen_tokenizer_fixture.py ... gemma4` (`--golden-only` rewrites only these) | DiffusionGemma tokenizer ids against `llama-tokenize` from the ggml-org/llama.cpp#24423 branch at the commit `scripts/build_dg_ref.sh` pins; the provenance file records that commit, the model file's sha256 and the command |
 | `golden-generation.tsv` | `UPDATE_GOLDEN=1 build/tests/test_golden` | tiny LLaDA/Dream token sequences, forward-pass counts, early stopping and per-step commits |
 | `src/mojo_dllm/tokenizer/unicode_tables.mojo` | `scripts/gen_unicode_tables.py` | code point classes from llama.cpp's own tables |
 | `moe-q5.bin`, `moe-q8.bin`, `moe-q4-q5.bin`, `moe-q4-q8.bin` | `scripts/gen_moe_fixture.py` | deterministic raw expert tensors for scalar MoE comparisons, including mixed activation block sizes |
@@ -128,7 +128,7 @@ at runtime. All cases disable threshold and dual-cache acceleration.
 
 A job that holds more memory than the machine can spare makes the kernel's global OOM killer pick a victim.
 With systemd's default `OOMPolicy=stop`, systemd then stops every process in the victim's scope, and a job
-started from a terminal lives in that terminal's scope: the shell, the editor session and every agent in the
+started from a terminal lives in that terminal's scope: the shell, the editor session and every other session in the
 window end with it. A measured run of DiffusionGemma-26B on the CPU peaked at about 25.6 GiB resident, and on a
 30 GiB machine with a 2 GiB swapfile that run ended in exactly this way.
 
@@ -149,7 +149,7 @@ controller and of systemd's resource control:
 | `CPUQuota=N00%` | only with `--cpus N`, so a job leaves cores for the desktop |
 
 It never sets `MemoryHigh`. Below the cap, `MemoryHigh` throttles a process that has nothing to reclaim until it
-stands still (state `D`, no progress); a job that really needs its memory should be killed, not frozen.
+stands still (state `D`, no progress); a job that needs its memory should be killed, not frozen.
 
 The script also refuses to start a job in two cases:
 

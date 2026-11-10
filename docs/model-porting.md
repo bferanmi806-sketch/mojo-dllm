@@ -147,7 +147,7 @@ unmapped source names; dtypes are shown for reference, not compared. Use
 `--ignore 'rotary.*inv_freq'` for source buffers intentionally omitted during
 conversion; `ignored N` counts these source entries, and their mapped GGUF
 counterparts are also omitted. Index shard names must be bare `.safetensors`
-filenames resolving inside the index directory. The checker accepts 1–1024
+filenames resolving inside the index directory. The checker accepts 1 to 1024
 blocks to bound name-map construction. Malformed inputs return 2, including
 JSON nesting errors. An output tensor absent from a tied source is still reported as
 missing, with an explanation. Exit 0 means at least one tensor was compared and

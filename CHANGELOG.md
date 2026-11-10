@@ -484,6 +484,11 @@ semantic versioning (0.y: minor bumps may break things).
   table names `bdd268b` (cpu-llada) and `dd0a647` (cpu-diffuse, diffuse-cpp rows only), which
   `scripts/bench_table.py` now renders from each result file instead of the last one read. `tests/python/test_docs_facts.py`
   checks each of these against `src/` and `bench/results`.
+- Prose rules enforced (#272). `scripts/check_hygiene.sh` fails on an em or en dash in a tracked Markdown file (the
+  result directories under `bench/results/` are exempt: the benchmark tools write their tables), naming the file and
+  line. `docs/spec.md` had 18 and no longer does, so it joins the markdownlint run. Filler adverbs went from
+  `docs/development.md` and `ci.yml`, an en dash from `docs/model-porting.md`, and a coding tool's name from the
+  list of noisy processes in `docs/benchmarks.md`.
 
 ## [0.1.0] - 2026-10-04
 

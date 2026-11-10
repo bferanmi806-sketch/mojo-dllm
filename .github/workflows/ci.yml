@@ -49,7 +49,7 @@ jobs:
         run: npm install --global markdownlint-cli2@0.23.2
 
       - name: Secrets and employer name in tracked files
-        # Report every gate, not just the first failure.
+        # Report every gate, not only the first failure.
         if: ${{ !cancelled() }}
         run: bash scripts/check_hygiene.sh --tracked
 
@@ -63,7 +63,7 @@ jobs:
 
       - name: markdownlint
         if: ${{ !cancelled() }}
-        run: markdownlint-cli2 "*.md" "docs/**/*.md" "assets/*.md" ".github/*.md" "#docs/spec.md" "#node_modules"
+        run: markdownlint-cli2 "*.md" "docs/**/*.md" "assets/*.md" ".github/*.md" "#node_modules"
 
       - name: README benchmark numbers come from bench/results
         if: ${{ !cancelled() }}

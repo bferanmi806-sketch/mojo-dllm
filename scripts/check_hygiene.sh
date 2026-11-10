@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# check_hygiene.sh: refuse to commit a credential or an employer reference.
+# check_hygiene.sh: refuse to commit a credential, an employer reference, or an em or en dash in Markdown.
 #
 # Adapted from lacs-project/sysknife scripts/check_no_secrets.sh (MIT,
 # Copyright (c) 2026 Vladimir Rotariu), which explains the length-bounded
@@ -34,6 +34,11 @@ PATTERNS=(
 )
 EMPLOYER="$(printf '%s%s' 'entr' 'opia')"
 
+# Public text keeps em and en dashes out (they read as machine-written). Markdown only, and not the result
+# directories under bench/results: their tables are written by the benchmark tools, with the en dash of a range.
+DASH_EXEMPT=("bench/results/")
+DASHES=$'\xe2\x80\x93|\xe2\x80\x94'
+
 found=0
 
 scan() {
@@ -59,6 +64,26 @@ scan() {
         printf 'EMPLOYER: %s mentions the employer name; this is a personal project\n' "$label" >&2
         found=1
     fi
+}
+
+dash_scan() {
+    # $1 = path; stdin = the file. Reports each line with an em or en dash, by number.
+    local path="$1" prefix hit rc
+    [[ "$path" == *.md ]] || return 0
+    for prefix in "${DASH_EXEMPT[@]}"; do
+        [[ "$path" == "$prefix"* ]] && return 0
+    done
+    rc=0
+    hit="$(LC_ALL=C grep -nE -e "$DASHES")" || rc=$?
+    if [ "$rc" -gt 1 ]; then
+        echo "check_hygiene: grep failed (exit $rc) on the dash pattern; nothing was checked" >&2
+        exit 1
+    fi
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        printf 'DASH: %s:%s has an em or en dash; use a comma, a colon, parentheses or "to"\n' "$path" "${line%%:*}" >&2
+        found=1
+    done <<<"$hit"
 }
 
 case "${1:-}" in
@@ -105,6 +130,7 @@ while IFS= read -r path; do
         continue
     fi
     scan "$path" <"$src"
+    dash_scan "$path" <"$src"
 done <<<"$list"
 
 if [ "$found" != 0 ]; then

@@ -112,17 +112,18 @@ def test_the_secret_scan_header_names_every_trigger() -> None:
 
 
 def run_hygiene(
-    tmp_path: Path, content: str, env: dict[str, str] | None = None
+    tmp_path: Path, content: str, env: dict[str, str] | None = None, name: str = "f.txt", mode: str = "--tracked"
 ) -> subprocess.CompletedProcess[str]:
     """check_hygiene.sh --tracked in a repository whose one tracked file holds `content`."""
     tmp_path = tmp_path / "repo"  # tmp_path itself holds the fake machine tree some fixtures put there
     (tmp_path / "scripts").mkdir(parents=True)
     (tmp_path / "scripts" / "check_hygiene.sh").write_bytes((ROOT / "scripts" / "check_hygiene.sh").read_bytes())
-    (tmp_path / "f.txt").write_text(content)
+    (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / name).write_text(content)
     for cmd in (["init", "-q"], ["add", "-A"]):
         subprocess.run(["git", *cmd], cwd=tmp_path, check=True)
     return subprocess.run(
-        ["bash", "scripts/check_hygiene.sh", "--tracked"], cwd=tmp_path, capture_output=True, text=True, check=False, env=env
+        ["bash", "scripts/check_hygiene.sh", mode], cwd=tmp_path, capture_output=True, text=True, check=False, env=env
     )
 
 
@@ -344,3 +345,48 @@ def test_the_launcher_tests_check_that_the_lock_matches_pyproject_in_both_gates(
     command = "uv run --locked --only-group test pytest tests/python -q"
     assert command in ci_commands()
     assert command in " ".join(CI_LOCAL.read_text().split())
+
+
+EM, EN = "\u2014", "\u2013"
+
+
+def test_hygiene_refuses_an_em_dash_in_markdown_and_names_the_line(tmp_path: Path) -> None:
+    result = run_hygiene(tmp_path, f"first line\nsecond {EM} line\n", name="docs/a.md")
+    assert result.returncode == 1
+    assert "DASH: docs/a.md:2" in result.stderr
+
+
+def test_hygiene_refuses_an_en_dash_in_markdown(tmp_path: Path) -> None:
+    result = run_hygiene(tmp_path, f"a range 1{EN}9\n", name="README.md")
+    assert result.returncode == 1 and "DASH: README.md:1" in result.stderr
+
+
+def test_hygiene_checks_staged_markdown_too(tmp_path: Path) -> None:
+    result = run_hygiene(tmp_path, f"x {EM} y\n", name="b.md", mode="--staged")
+    assert result.returncode == 1 and "DASH: b.md:1" in result.stderr
+
+
+def test_hygiene_leaves_dashes_in_other_files_and_in_committed_evidence_alone(tmp_path: Path) -> None:
+    assert run_hygiene(tmp_path / "a", f"x {EM} y\n", name="notes.txt").returncode == 0
+    assert run_hygiene(tmp_path / "b", f"1.1{EN}1.2x\n", name="bench/results/run-1/README.md").returncode == 0
+
+
+def test_hygiene_accepts_a_hyphen_and_a_minus_in_markdown(tmp_path: Path) -> None:
+    result = run_hygiene(tmp_path, "a-b, c\u2212d, 1 to 9\n", name="ok.md")
+    assert result.returncode == 0, result.stderr
+
+
+def test_no_tracked_markdown_file_outside_the_evidence_has_a_dash() -> None:
+    """Independent of the script: read every tracked Markdown file here. The gate runs the script over the tree."""
+    names = subprocess.run(["git", "ls-files", "-z", "--", "*.md"], cwd=ROOT, capture_output=True, text=True, check=True)
+    offenders = []
+    for name in names.stdout.split("\0"):
+        if name and not name.startswith("bench/results/"):
+            for number, line in enumerate((ROOT / name).read_text().splitlines(), start=1):
+                if EM in line or EN in line:
+                    offenders.append(f"{name}:{number}")
+    assert offenders == []
+
+
+def test_the_spec_is_linted_like_every_other_document() -> None:
+    assert "#docs/spec.md" not in " ".join(md_lint_arguments(CI_LOCAL.read_text()))
