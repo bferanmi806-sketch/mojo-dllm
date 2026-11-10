@@ -11,10 +11,12 @@ from launcher.models import (
     DEFAULT_QUANTS,
     ModelRef,
     ensure_model,
+    ensure_model_status,
     fetch_model,
     parse_model_ref,
     pick_gguf,
     plan_model,
+    use_cached,
 )
 
 REPO = "mradermacher/LLaDA-8B-Instruct-GGUF"
@@ -272,3 +274,35 @@ def test_offline_an_unrecorded_cached_file_is_used_with_one_warning_line(hub, st
     lines = out.getvalue().splitlines()
     assert len(lines) == 1 and lines[0].startswith("warning:") and "not verified" in lines[0]
     assert hub.sha_requests == 0 and cached.exists() and not store.is_verified(cached)
+
+
+def test_use_cached_says_whether_the_file_was_verified(hub, store, tmp_path: Path) -> None:
+    cached = _cache_file(hub, tmp_path, hub.content)
+    plan = plan_model(ModelRef(repo=REPO, quant="Q4_K_M"), hub)
+    hub.offline = True
+    assert use_cached(plan, hub, io.StringIO(), store) == (cached, False)
+    store.record(cached, hub.sha256)
+    assert use_cached(plan, hub, io.StringIO(), store) == (cached, True)
+
+
+def test_an_online_check_makes_the_cached_file_verified(hub, store, tmp_path: Path) -> None:
+    cached = _cache_file(hub, tmp_path, hub.content)
+    result = ensure_model_status("llada-8b", hub, io.StringIO(), announce_cached=False, store=store)
+    assert (result.path, result.verified) == (cached, True)
+
+
+def test_offline_an_unverified_cached_file_is_announced_as_such(hub, store, tmp_path: Path) -> None:
+    hub.offline = True
+    hub.files = {"LLaDA-8B-Instruct.Q4_K_M.gguf": 9}
+    cached = _cache_file(hub, tmp_path, b"truncated")
+    out = io.StringIO()
+    result = ensure_model_status("llada-8b", hub, out, announce_cached=True, store=store)
+    assert (result.path, result.verified) == (cached, False)
+    assert f"already downloaded (not verified)\n{cached}" in out.getvalue()
+
+
+def test_a_local_file_is_not_a_cache_entry(hub, store, tmp_path: Path) -> None:
+    f = tmp_path / "m.gguf"
+    f.write_bytes(b"x")
+    result = ensure_model_status(str(f), None, io.StringIO(), announce_cached=True, store=store)
+    assert (result.path, result.verified) == (f, True)

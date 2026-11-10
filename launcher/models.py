@@ -146,27 +146,28 @@ def fetch_model(plan: ModelPlan, hub: Hub, out: TextIO, store: VerifiedStore) ->
     return path
 
 
-def use_cached(plan: ModelPlan, hub: Hub, out: TextIO, store: VerifiedStore) -> Path:
-    """The cached file, after its sha256 has been checked once.
+def use_cached(plan: ModelPlan, hub: Hub, out: TextIO, store: VerifiedStore) -> tuple[Path, bool]:
+    """The cached file and whether its sha256 has been checked.
 
     An interrupted download, or another tool, can leave an unchecked file in
-    the cache. Offline there is nothing to check against, so it is used with a warning.
+    the cache. Online it is checked once. Offline there is nothing to check
+    against, so it is used with a warning and reported as not verified.
     """
     path = plan.cached
     assert path is not None
     if store.is_verified(path):
-        return path
+        return path, True
     if hub.offline:
         print(
             f"warning: {plan.label} in the cache was not verified against its sha256, "
             "and offline mode cannot check it now",
             file=out,
         )
-        return path
+        return path, False
     print(f"Verifying {plan.label} against the hub's sha256 (once)", file=out, flush=True)
     _check_sha256(path, plan, hub, store)
     print("sha256 verified", file=out, flush=True)
-    return path
+    return path, True
 
 
 def _delete(path: Path) -> None:
@@ -174,19 +175,35 @@ def _delete(path: Path) -> None:
     path.unlink(missing_ok=True)
 
 
-def ensure_model(text: str, hub: Hub | None, out: TextIO, *, announce_cached: bool, store: VerifiedStore) -> Path:
+@dataclass(frozen=True)
+class ModelResult:
+    path: Path
+    verified: bool  # False only for a cached file that could not be checked offline
+
+
+def already_downloaded_line(verified: bool) -> str:
+    return "already downloaded" if verified else "already downloaded (not verified)"
+
+
+def ensure_model_status(
+    text: str, hub: Hub | None, out: TextIO, *, announce_cached: bool, store: VerifiedStore
+) -> ModelResult:
     """Resolve a model reference to a local file, downloading it when needed."""
     ref = parse_model_ref(text)
     if ref.path is not None:
-        return ref.path
+        return ModelResult(ref.path, True)
     assert hub is not None
     plan = plan_model(ref, hub)
     if plan.cached is not None:
-        path = use_cached(plan, hub, out, store)
+        path, verified = use_cached(plan, hub, out, store)
         if announce_cached:
-            print(f"already downloaded\n{path}", file=out)
-        return path
+            print(f"{already_downloaded_line(verified)}\n{path}", file=out)
+        return ModelResult(path, verified)
     path = fetch_model(plan, hub, out, store)
     if announce_cached:
         print(f"{path} ({human_size(path.stat().st_size)})", file=out)
-    return path
+    return ModelResult(path, True)
+
+
+def ensure_model(text: str, hub: Hub | None, out: TextIO, *, announce_cached: bool, store: VerifiedStore) -> Path:
+    return ensure_model_status(text, hub, out, announce_cached=announce_cached, store=store).path

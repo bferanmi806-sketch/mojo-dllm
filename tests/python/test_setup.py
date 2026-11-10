@@ -147,6 +147,30 @@ def test_setup_checks_an_unverified_cached_model_once(hub: FakeHub, store: Verif
     assert hub.sha_requests == 1 and store.is_verified(cached)
 
 
+def test_setup_offline_with_an_unverified_cached_model_leaves_a_step_outstanding(
+    hub: FakeHub, store: VerifiedStore, tmp_path: Path
+) -> None:
+    hub.offline = True
+    hub.files = {FILE: 10}
+    cached = tmp_path / "c.gguf"
+    cached.write_bytes(hub.content)
+    hub.cached[(REPO, FILE)] = cached
+    e = Env(hub, store)
+    assert e.run([]) == 3
+    text = e.out.getvalue()
+    assert f"already downloaded (not verified)\n{cached}" in text
+    assert "Setup complete." not in text and text.rstrip().splitlines()[-1] == "  ./mojo-dllm pull"
+
+
+def test_setup_with_a_verified_cached_model_completes(hub: FakeHub, store: VerifiedStore, tmp_path: Path) -> None:
+    cached = tmp_path / "c.gguf"
+    cached.write_bytes(hub.content)
+    hub.cached[(REPO, FILE)] = cached
+    store.record(cached, hub.sha256)
+    e = Env(hub, store)
+    assert e.run([]) == 0 and f"already downloaded\n{cached}" in e.out.getvalue()
+
+
 def test_setup_refuses_a_cached_model_that_fails_its_check(hub: FakeHub, store: VerifiedStore, tmp_path: Path) -> None:
     cached = tmp_path / "c.gguf"
     cached.write_bytes(b"truncated")

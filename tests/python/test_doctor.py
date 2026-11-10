@@ -110,6 +110,19 @@ def test_missing_model_warns_with_the_pull_command() -> None:
     assert "  → ./mojo-dllm pull" in lines
 
 
+def test_an_unverified_cached_model_warns_and_names_the_pull_command() -> None:
+    code, lines = doctor(verified=False)
+    line = next(line for line in lines if " model " in line)
+    assert code == 0 and line.startswith("!") and "/cache/llada.gguf" in line and "not verified" in line
+    assert lines[lines.index(line) + 1] == "  → ./mojo-dllm pull"
+
+
+def test_a_verified_cached_model_stays_green() -> None:
+    _, lines = doctor(verified=True)
+    line = next(line for line in lines if " model " in line)
+    assert line.startswith("✓") and "not verified" not in line
+
+
 def test_every_failure_is_listed_before_exit() -> None:
     code, lines = doctor(glibc="2.31", cpuinfo="", uv_path=None, mojo_version_output=None)
     failed = [line.split()[1] for line in lines if line.startswith("✗")]

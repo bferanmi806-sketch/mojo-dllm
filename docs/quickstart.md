@@ -113,7 +113,9 @@ against the hub's sha256 the first time it is used, and the launcher
 remembers the result in `~/.cache/mojo-dllm/verified.json` (under
 `$XDG_CACHE_HOME` when that is set). A file that fails the check is deleted,
 and the next run downloads it again. With `--offline` the check cannot run,
-so an unchecked file is used after a warning.
+so an unchecked file is used after a warning. `pull --offline` and `setup`
+then print `already downloaded (not verified)` and exit with status 3, and
+`doctor` marks the model with `!`. Run `./mojo-dllm pull` once online to check it.
 
 ## 4. Offline
 

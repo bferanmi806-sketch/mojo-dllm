@@ -15,7 +15,7 @@ from launcher import build
 from launcher.doctor import preflight, render
 from launcher.errors import LauncherError, UsageError
 from launcher.gpu import Device, choose_device, parse_nvidia_smi
-from launcher.models import DEFAULT_MODEL, Hub, fetch_model, parse_model_ref, plan_model, use_cached
+from launcher.models import DEFAULT_MODEL, Hub, already_downloaded_line, fetch_model, parse_model_ref, plan_model, use_cached
 from launcher.probes import Probes
 from launcher.ui import Style, human_size
 from launcher.verified import VerifiedStore, default_store
@@ -117,8 +117,10 @@ def _setup(args: SetupArgs, env: SetupEnv) -> int:
         else:
             plan = plan_model(ref, env.hub)
             if plan.cached is not None:
-                model = use_cached(plan, env.hub, out, env.store)
-                print(f"already downloaded\n{model}", file=out)
+                model, verified = use_cached(plan, env.hub, out, env.store)
+                print(f"{already_downloaded_line(verified)}\n{model}", file=out)
+                if not verified:
+                    outstanding.append(pull_cmd)
             else:
                 size = f" ({human_size(plan.size)})" if plan.size is not None else ""
                 question = f"Download {plan.label}{size} to {env.hub.cache_dir}? [Y/n]"

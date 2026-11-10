@@ -51,6 +51,7 @@ def make_probes(**overrides: object) -> Probes:
         gpu_text=GPU_TEXT,
         driver_text="580.65.06\n",
         cached_model=Path("/cache/llada.gguf"),
+        verified=True,
     )
     return dataclasses.replace(base, **overrides)
 

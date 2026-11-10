@@ -13,7 +13,7 @@ from launcher.build import BINARY, ensure_built, exec_binary
 from launcher.errors import UsageError
 from launcher.gpu import QUERY, Gpu, choose_device, parse_nvidia_smi
 from launcher.hub import Hub, offline_requested
-from launcher.models import DEFAULT_MODEL, ensure_model
+from launcher.models import DEFAULT_MODEL, ensure_model, ensure_model_status
 from launcher.verified import default_store
 
 # Flags of the binary that take no value. A test compares this list with
@@ -130,7 +130,13 @@ def cmd_pull(argv: list[str]) -> int:
     if len(refs) > 1:
         raise UsageError("pull takes one model. Usage: ./mojo-dllm pull [MODEL] [--offline]")
     hub = Hub(offline=offline_requested(offline, os.environ))
-    ensure_model(
+    result = ensure_model_status(
         refs[0] if refs else DEFAULT_MODEL, hub, sys.stdout, announce_cached=True, store=default_store()
     )
+    if not result.verified:
+        print(
+            "The file was not checked against its sha256. Run ./mojo-dllm pull again without --offline.",
+            file=sys.stdout,
+        )
+        return 3
     return 0

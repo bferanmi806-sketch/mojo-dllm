@@ -412,6 +412,9 @@ semantic versioning (0.y: minor bumps may break things).
 - Without `:QUANT`, the launcher picks Q4_K_M, then Q4_K_S, then Q6_K, the quants the binary loads (#255). It used to
   fall back to Q8_0 and then to the first `.gguf` in the repo, which downloaded gigabytes the binary then refused. A
   repo with none of the three fails with the file listing and the `owner/repo:QUANT` syntax.
+- A cached model file that has not been checked against its sha256 is no longer reported as healthy (#256).
+  `pull --offline` and `setup` print `already downloaded (not verified)` and exit with status 3 (`setup` lists
+  `./mojo-dllm pull` as the outstanding step), and `doctor` marks the `model` line `!` with the pull command.
 
 ## [0.1.0] - 2026-10-04
 

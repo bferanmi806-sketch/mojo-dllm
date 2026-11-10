@@ -116,6 +116,9 @@ def check_gpu(p: Probes) -> Check:
 
 
 def check_model(p: Probes) -> Check:
+    if p.cached_model is not None and not p.verified:
+        return Check("warn", "model", f"{p.cached_model} (not verified against its sha256)",
+                     "./mojo-dllm pull")
     if p.cached_model is not None:
         return _ok("model", str(p.cached_model))
     return Check("warn", "model", "llada-8b (Q4_K_M) is not in the Hugging Face cache", "./mojo-dllm pull")

@@ -19,6 +19,7 @@ from launcher.errors import LauncherError
 from launcher.gpu import QUERY
 from launcher.hub import Hub
 from launcher.models import DEFAULT_MODEL, parse_model_ref, plan_model
+from launcher.verified import default_store
 
 
 @dataclass(frozen=True)
@@ -36,6 +37,7 @@ class Probes:
     gpu_text: str | None  # None when nvidia-smi is missing or failed
     driver_text: str | None
     cached_model: Path | None
+    verified: bool = True  # whether cached_model has passed its sha256 check
 
 
 def read_mojo_pin(pyproject: str) -> str:
@@ -82,6 +84,7 @@ def real_probes() -> Probes:
     libc, version = platform.libc_ver()
     uv = shutil.which("uv")
     smi = shutil.which("nvidia-smi") is not None
+    cached = cached_default_model(Hub(offline=True))
     return Probes(
         system=platform.system(),
         machine=platform.machine(),
@@ -102,5 +105,6 @@ def real_probes() -> Probes:
         driver_text=_capture(["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"])
         if smi
         else None,
-        cached_model=cached_default_model(Hub(offline=True)),
+        cached_model=cached,
+        verified=cached is not None and default_store().is_verified(cached),
     )

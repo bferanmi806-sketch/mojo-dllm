@@ -160,3 +160,38 @@ def test_a_missing_binary_in_run_names_doctor(monkeypatch: pytest.MonkeyPatch, t
     monkeypatch.setattr(runcmd, "BINARY", tmp_path / "absent")
     with pytest.raises(LauncherError, match="./mojo-dllm doctor"):
         runcmd.cmd_run(["hi"])
+
+
+def _cache_file(hub, tmp_path: Path, content: bytes) -> Path:
+    cached = tmp_path / "c.gguf"
+    cached.write_bytes(content)
+    hub.cached[("mradermacher/LLaDA-8B-Instruct-GGUF", "LLaDA-8B-Instruct.Q4_K_M.gguf")] = cached
+    return cached
+
+
+def _pull_with(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, hub, store, *, argv: list[str]) -> tuple[int, str]:
+    import io
+
+    out = io.StringIO()
+    monkeypatch.setattr(runcmd, "default_store", lambda: store)
+    monkeypatch.setattr(runcmd, "Hub", lambda offline=False: hub)
+    monkeypatch.setattr(runcmd.sys, "stdout", out)
+    hub.offline = True
+    return runcmd.cmd_pull(argv), out.getvalue()
+
+
+def test_pull_offline_of_an_unverified_cached_file_says_so_and_exits_3(monkeypatch, tmp_path: Path, hub, store) -> None:
+    hub.files = {"LLaDA-8B-Instruct.Q4_K_M.gguf": 9}
+    cached = _cache_file(hub, tmp_path, b"truncated")
+    code, text = _pull_with(monkeypatch, tmp_path, hub, store, argv=["--offline"])
+    assert code == 3
+    assert f"already downloaded (not verified)\n{cached}" in text
+    assert "pull" in text.lower() and "without --offline" in text
+
+
+def test_pull_of_a_verified_cached_file_keeps_its_output_and_exits_0(monkeypatch, tmp_path: Path, hub, store) -> None:
+    hub.files = {"LLaDA-8B-Instruct.Q4_K_M.gguf": 9}
+    cached = _cache_file(hub, tmp_path, hub.content)
+    store.record(cached, hub.sha256)
+    code, text = _pull_with(monkeypatch, tmp_path, hub, store, argv=["--offline"])
+    assert code == 0 and text == f"already downloaded\n{cached}\n"
