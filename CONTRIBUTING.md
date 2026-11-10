@@ -54,9 +54,10 @@ I can merge your branch once it is up to date with `main`. If it trails `main`
 and merges cleanly, I press Update branch and wait for CI to pass again. If it
 conflicts, I'll ask you to merge `main` into your branch and resolve the
 conflict yourself, since you know the change better than I do. The usual
-conflict is `tests/test-count.txt`: take either side, then run
+conflict is `tests/test-count.txt` (or `tests/test-counts.txt`, the same
+pin for each file): take either side, then run
 `UPDATE_TEST_COUNT=1 scripts/run-tests.sh` on the merged tree to pin the new
-total.
+total and the count of each file.
 
 ## Commit messages
 

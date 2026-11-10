@@ -22,9 +22,9 @@ machine with a GPU, the GPU tests that CI only builds:
 | Step | Command | Fails when |
 |---|---|---|
 | hygiene | `scripts/check_hygiene.sh --tracked` | a credential pattern or the author's employer name appears in tracked text (files whose names git quotes are skipped, [#140](https://github.com/vladimirrott/mojo-dllm/issues/140)) |
-| format | `uv run --frozen mojo format -q src tests bench`, then `git diff` | `mojo format` changes any file (Mojo has no check mode) |
+| format | `scripts/check_format.sh` (`mojo format -q src tests bench`, comparing every file before and after) | `mojo format` changes any file, an untracked one included (Mojo has no check mode) |
 | build | `scripts/build.sh` | any compiler warning (`-Werror`) |
-| tests | `scripts/run-tests.sh` | a test fails, a file runs zero tests, or the total differs from `tests/test-count.txt` |
+| tests | `scripts/run-tests.sh` | a test fails, a file runs zero tests, the total differs from `tests/test-count.txt`, or a file's count differs from `tests/test-counts.txt` |
 | launcher tests | `uv run --frozen --only-group test pytest tests/python -q` | a test of the `./mojo-dllm` launcher fails |
 | shellcheck, yamllint, markdownlint | `shellcheck --severity=warning scripts/*.sh .githooks/*`; `uv run --frozen --only-group lint yamllint --strict .github`; `markdownlint-cli2 "*.md" "docs/**/*.md" "#docs/spec.md"` | any of the three reports a finding |
 | claims | `uv run --no-project python scripts/bench_table.py --check` | a table in the README, `docs/benchmarks.md` or `docs/correctness.md` differs from what `bench/results`, `bench/parity`, `bench/quality` and `bench/eval` render (a missing table marker, target file or quality or eval evidence passes, [#141](https://github.com/vladimirrott/mojo-dllm/issues/141); an unknown mode exits 0, [#142](https://github.com/vladimirrott/mojo-dllm/issues/142)) |
@@ -34,7 +34,7 @@ machine with a GPU, the GPU tests that CI only builds:
 | checker self-test | `uv run --frozen --only-group fixtures python scripts/check_weights.py --self-test` | a safetensors or index guard in `check_weights.py` stops rejecting its case, or stops naming it |
 | no GPU | `scripts/check_no_gpu.sh` | `--device gpu` without a GPU does anything but exit 1 with a message |
 | visual options | `scripts/check_visual.sh` | an invalid `--visual-interval` does not exit 1, or `--json` with `--visual` does not exit 2, with a message naming the flag before model loading |
-| GPU tests | `scripts/run-gpu-tests.sh` (local only) | a GPU kernel or the GPU forward pass disagrees with the CPU or the f32 reference, or the count differs from `tests/gpu/test-count.txt` |
+| GPU tests | `scripts/run-gpu-tests.sh` (local only) | a GPU kernel or the GPU forward pass disagrees with the CPU or the f32 reference, or the count differs from `tests/gpu/test-count.txt` or `tests/gpu/test-counts.txt` |
 
 GitHub's runners have no GPU, so CI builds the GPU suite without running it.
 `ci-local.sh` runs it when `nvidia-smi` lists a GPU and otherwise prints a

@@ -92,8 +92,8 @@ jobs:
       - name: Install the pinned Mojo toolchain
         run: uv sync --frozen
 
-      - name: mojo format (no check mode, so format and diff)
-        run: uv run --frozen mojo format -q src tests bench && git diff --exit-code -- src tests bench
+      - name: mojo format (no check mode, so format and compare file contents)
+        run: bash scripts/check_format.sh
 
       - name: Build with -Werror
         run: bash scripts/build.sh
