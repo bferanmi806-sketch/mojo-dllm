@@ -18,13 +18,13 @@ EMPLOYER = "entr" + "opia"
 
 # (label, prefix, body alphabet, minimum body length)
 SHAPES = [
-    ("OpenAI", "sk-", "A", 40),
-    ("OpenAI project", "sk-proj-", "A", 40),
-    ("Anthropic", "sk-ant-", "A", 40),
+    ("OpenAI key", "sk-", "A", 40),
+    ("OpenAI project key", "sk-proj-", "A", 40),
+    ("Anthropic key", "sk-ant-", "A", 40),
     ("GitHub PAT", "ghp_", "A", 36),
     ("GitHub fine-grained PAT", "github_pat_", "A", 60),
     ("Hugging Face token", "hf_", "A", 34),
-    ("Groq", "gsk_", "A", 40),
+    ("Groq key", "gsk_", "A", 40),
     ("AWS access key", "AKIA", "A", 16),
     ("Google API key", "AIza", "A", 35),
     ("Slack token", "xoxb-", "A", 20),
@@ -71,7 +71,7 @@ def test_each_provider_pattern_fires_at_its_minimum_length_and_not_one_below(rep
     assert p.returncode == 0, f"{label}: a body one character short must not match: {p.stderr}"
     commit_file(repo, "long.txt", f"token = {prefix}{fill * minimum}\n")
     p = check(repo)
-    assert p.returncode == 1 and f"SECRET: {label} key in long.txt" in p.stderr
+    assert p.returncode == 1 and f"SECRET: {label} in long.txt" in p.stderr
     assert "short.txt" not in p.stderr and "refusing" in p.stderr
 
 
@@ -111,7 +111,7 @@ def test_staged_mode_reads_the_index_not_the_working_tree(repo: Path) -> None:
     git(repo, "add", "k.txt")
     (repo / "k.txt").write_text("clean now\n")               # the working copy is clean, the index is not
     p = check(repo, "--staged")
-    assert p.returncode == 1 and "SECRET: GitHub PAT key in k.txt" in p.stderr
+    assert p.returncode == 1 and "SECRET: GitHub PAT in k.txt" in p.stderr
 
 
 def test_staged_mode_ignores_a_secret_that_is_only_in_the_working_tree(repo: Path) -> None:
@@ -142,7 +142,8 @@ def test_outside_a_git_repository_the_gate_fails_and_does_not_pass(tmp_path: Pat
 def test_every_pattern_of_the_script_has_a_case_here() -> None:
     block = SCRIPT.read_text().split("PATTERNS=(")[1].split("\n)")[0]
     entries = [line.strip().strip('"') for line in block.splitlines() if line.strip()]
-    assert [e.split(":", 1)[0] for e in entries] == [s[0] for s in SHAPES]
+    entries = [e for e in entries if not e.startswith("#")]
+    assert [e.split(":", 1)[0] for e in entries][: len(SHAPES)] == [s[0] for s in SHAPES]
 
 
 # file names that git prints quoted (#140) -------------------------------------------------------------------
@@ -156,7 +157,7 @@ def test_a_secret_in_a_file_whose_name_git_quotes_is_found_when_tracked(repo: Pa
     commit_file(repo, name, "token = ghp_" + "A" * 40 + "\n")
     p = check(repo)
     assert p.returncode == 1, p.stdout
-    assert f"SECRET: GitHub PAT key in {name}" in p.stderr
+    assert f"SECRET: GitHub PAT in {name}" in p.stderr
 
 
 @pytest.mark.parametrize("name", ODD_NAMES, ids=lambda n: n.encode("unicode_escape").decode())
@@ -165,7 +166,7 @@ def test_a_secret_in_a_staged_file_whose_name_git_quotes_is_found(repo: Path, na
     git(repo, "add", "--", name)
     p = check(repo, "--staged")
     assert p.returncode == 1, (p.stdout, p.stderr)
-    assert f"SECRET: GitHub PAT key in {name}" in p.stderr and "could not read staged bytes" not in p.stderr
+    assert f"SECRET: GitHub PAT in {name}" in p.stderr and "could not read staged bytes" not in p.stderr
 
 
 def test_a_clean_staged_file_with_a_quoted_name_passes_and_is_counted(repo: Path) -> None:

@@ -69,7 +69,7 @@ live in `tests/fixtures/` and come from scripts, never from hand:
 
 | Fixture | Made by | Checks |
 |---|---|---|
-| `kquants.gguf`, `bad-magic.gguf`, `tiny-llada.gguf`, `tiny-llada.expected.f32`, `tiny-dream.gguf`, `tiny-dream.expected.f32`, `malformed/`, `metadata/` | `scripts/gen_fixtures.py` | GGUF parsing and rejection, decoders, `ModelConfig` validation, the forward pass against a numpy reference |
+| `kquants.gguf`, `bad-magic.gguf`, `tiny-llada.gguf`, `tiny-llada.expected.f32`, `tiny-dream.gguf`, `tiny-dream.expected.f32`, `malformed/`, `metadata/`, `gen_fixtures.manifest` | `scripts/gen_fixtures.py` | GGUF parsing and rejection, decoders, `ModelConfig` validation, the forward pass against a numpy reference |
 | `tiny-diffusion-gemma.gguf`, `diffusion-gemma/` | `scripts/gen_fixtures.py` | the `diffusion-gemma` config (seed 610061): a 2-layer model with one sliding and one global layer, 4 experts, the tensor names and types of the real file, and one file per refusal (metadata only, or zero-filled tensors) |
 | `tiny-diffusion-gemma.p0sc.case`, `.p9.case`, `.p9sc.case`, `.p150.case`, `.p150sc.case` (`tiny-diffusion-gemma.*.case`) | `scripts/gen_fixtures.py` (the forward pass is `scripts/dg_numpy.py`) | the tokens and numpy logits that `logits` on the tiny DiffusionGemma file must reproduce, for a prompt of 0, 9 and 150 tokens, with and without self-conditioning (`sc`) |
 | `entropy-rows.tsv` | `scripts/gen_fixtures.py` (seed 65065, so no other fixture changes) | logits rows with the numpy f64 argmax, entropy and inverse-CDF draw that `tests/test_entropy_bound.mojo` pins |
