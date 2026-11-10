@@ -409,6 +409,9 @@ semantic versioning (0.y: minor bumps may break things).
   messages. Any other HTTP status error reports the status code and says to check the repo name and `HF_TOKEN`. A
   failure to write into the cache (a full disk, a read-only `HF_HOME`) names the cache directory. Only a transport
   failure (refused, timed out) says "could not reach Hugging Face" and suggests `--offline`.
+- Without `:QUANT`, the launcher picks Q4_K_M, then Q4_K_S, then Q6_K, the quants the binary loads (#255). It used to
+  fall back to Q8_0 and then to the first `.gguf` in the repo, which downloaded gigabytes the binary then refused. A
+  repo with none of the three fails with the file listing and the `owner/repo:QUANT` syntax.
 
 ## [0.1.0] - 2026-10-04
 

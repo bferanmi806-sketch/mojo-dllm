@@ -85,10 +85,12 @@ anyway.
 | the alias | `-m llada-8b` | `mradermacher/LLaDA-8B-Instruct-GGUF`, Q4_K_M (the default) |
 | a repo | `-m owner/Some-Model-GGUF:Q4_K_M` | the file matching that quant, downloaded once |
 
-Without `:QUANT`, a repo resolves to its Q4_K_M file, then Q8_0, then the
-first `.gguf` it lists, the order llama.cpp uses. A quant that matches nothing
-lists the files the repo has. Split (sharded) GGUF files are not supported. A Q8_0
-file downloads but does not load: the matrix kernels need Q4_K or Q6_K.
+Without `:QUANT`, a repo resolves to its Q4_K_M file, then Q4_K_S, then Q6_K,
+the quants the matrix kernels load. A repo with none of them, and a quant that
+matches nothing, fail with the list of files the repo has, and `owner/repo:QUANT`
+selects one. Split (sharded) GGUF files are not supported. A Q8_0 file downloads
+when you ask for it with `:Q8_0` but does not load: the matrix kernels need Q4_K
+or Q6_K.
 
 Tested Q4_K_M checkpoints are LLaDA-8B-Instruct, LLaDA-1.5,
 Dream-v0-Instruct-7B, Dream-Coder-v0-Instruct-7B and DiffuCoder-7B-cpGRPO.

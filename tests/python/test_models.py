@@ -8,6 +8,7 @@ import pytest
 from launcher.errors import LauncherError
 from launcher.models import (
     DEFAULT_MODEL,
+    DEFAULT_QUANTS,
     ModelRef,
     ensure_model,
     fetch_model,
@@ -53,10 +54,24 @@ def test_missing_gguf_path_is_not_mistaken_for_a_repo(tmp_path: Path) -> None:
 FILES = ["README.md", "m.Q8_0.gguf", "m.Q2_K.gguf", "m.Q4_K_M.gguf"]
 
 
-def test_default_order_is_q4_k_m_then_q8_0_then_first() -> None:
+def test_default_order_is_q4_k_m_then_q4_k_s_then_q6_k() -> None:
     assert pick_gguf(FILES, None) == "m.Q4_K_M.gguf"
-    assert pick_gguf(["m.Q2_K.gguf", "m.Q8_0.gguf"], None) == "m.Q8_0.gguf"
-    assert pick_gguf(["z.Q2_K.gguf", "a.Q3_K_S.gguf"], None) == "z.Q2_K.gguf"
+    assert pick_gguf(["m.Q8_0.gguf", "m.Q6_K.gguf", "m.Q4_K_S.gguf"], None) == "m.Q4_K_S.gguf"
+    assert pick_gguf(["m.Q8_0.gguf", "m.Q6_K.gguf"], None) == "m.Q6_K.gguf"
+    assert DEFAULT_QUANTS == ("Q4_K_M", "Q4_K_S", "Q6_K")
+
+
+def test_a_repo_with_q4_k_s_and_q8_0_picks_q4_k_s() -> None:
+    assert pick_gguf(["m.Q8_0.gguf", "m.Q4_K_S.gguf"], None) == "m.Q4_K_S.gguf"
+
+
+def test_no_default_quant_fails_with_the_listing_and_the_quant_syntax() -> None:
+    with pytest.raises(LauncherError) as e:
+        pick_gguf(["m.Q8_0.gguf", "m.F16.gguf", "README.md"], None)
+    msg = str(e.value)
+    assert "Q4_K_M, Q4_K_S or Q6_K" in msg
+    assert "  m.Q8_0.gguf\n  m.F16.gguf" in msg and "README.md" not in msg
+    assert "owner/repo:QUANT" in msg
 
 
 def test_quant_matches_case_insensitively_as_a_whole_token() -> None:
@@ -69,8 +84,8 @@ def test_quant_matches_case_insensitively_as_a_whole_token() -> None:
 
 
 def test_split_shards_are_ignored() -> None:
-    files = ["big.Q4_K_M-00001-of-00003.gguf", "small.Q8_0.gguf"]
-    assert pick_gguf(files, None) == "small.Q8_0.gguf"
+    files = ["big.Q4_K_M-00001-of-00003.gguf", "small.Q6_K.gguf"]
+    assert pick_gguf(files, None) == "small.Q6_K.gguf"
     with pytest.raises(LauncherError):
         pick_gguf(files, "Q4_K_M")
 
@@ -159,10 +174,10 @@ def test_offline_miss_says_only_the_cache_was_searched(hub) -> None:
 
 def test_offline_selection_uses_the_cached_listing_only(hub, store, tmp_path: Path) -> None:
     hub.offline = True
-    hub.files = {"x.Q8_0.gguf": 5}  # all the cache holds for this repo
+    hub.files = {"x.Q4_K_S.gguf": 5}  # all the cache holds for this repo
     cached = tmp_path / "x.gguf"
     cached.write_bytes(b"12345")
-    hub.cached[("a/b", "x.Q8_0.gguf")] = cached
+    hub.cached[("a/b", "x.Q4_K_S.gguf")] = cached
     assert ensure_model("a/b", hub, io.StringIO(), announce_cached=False, store=store) == cached
     with pytest.raises(LauncherError, match="Q4_K_M"):
         ensure_model("a/b:Q4_K_M", hub, io.StringIO(), announce_cached=False, store=store)
@@ -188,8 +203,8 @@ def test_a_quant_still_matches_between_separators(name: str) -> None:
 
 
 def test_a_multimodal_projector_is_never_the_model() -> None:
-    assert pick_gguf(["mmproj-F16.gguf", "m-Q3_K_M.gguf"], None) == "m-Q3_K_M.gguf"
-    assert pick_gguf(["MMPROJ-model-f16.gguf", "m-Q3_K_M.gguf"], None) == "m-Q3_K_M.gguf"
+    assert pick_gguf(["mmproj-F16.gguf", "m-Q4_K_M.gguf"], None) == "m-Q4_K_M.gguf"
+    assert pick_gguf(["MMPROJ-model-f16.gguf", "m-Q4_K_M.gguf"], None) == "m-Q4_K_M.gguf"
     with pytest.raises(LauncherError, match="no .gguf"):
         pick_gguf(["mmproj-F16.gguf"], None)
 

@@ -15,8 +15,9 @@ from launcher.verified import VerifiedStore
 
 DEFAULT_MODEL = "llada-8b"
 ALIASES = {"llada-8b": ("mradermacher/LLaDA-8B-Instruct-GGUF", "Q4_K_M")}
-# llama.cpp's order when no quant is requested; the first file is the last resort.
-DEFAULT_QUANTS = ("Q4_K_M", "Q8_0")
+# The quants the binary's matrix kernels load (Q4_K and Q6_K tensors), in the order tried
+# when no quant is requested. A Q8_0 or F16 file downloads fine and then fails to load.
+DEFAULT_QUANTS = ("Q4_K_M", "Q4_K_S", "Q6_K")
 
 # Owner and name never start with "." or "-", so "..", "./x" and "-x/y" are not repos.
 _REPO = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]*/[A-Za-z0-9_][A-Za-z0-9._-]*(:[A-Za-z0-9._-]+)?$")
@@ -87,10 +88,14 @@ def pick_gguf(files: Sequence[str], quant: str | None) -> str:
         for name in ggufs:
             if _has_quant(name, q):
                 return name
+    listing = "\n".join(f"  {f}" for f in ggufs)
     if quant:
-        listing = "\n".join(f"  {f}" for f in ggufs)
         raise LauncherError(f"no GGUF file matches quant {quant}\nAvailable GGUF files:\n{listing}")
-    return ggufs[0]
+    raise LauncherError(
+        "the repo has no Q4_K_M, Q4_K_S or Q6_K file, the quants mojo-dllm can load\n"
+        f"Available GGUF files:\n{listing}\n"
+        "Pick one with owner/repo:QUANT, for example owner/repo:Q4_K_M."
+    )
 
 
 def plan_model(ref: ModelRef, hub: Hub) -> ModelPlan:
