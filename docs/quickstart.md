@@ -56,6 +56,11 @@ recorded in `build/mojo-dllm.stamp`, finds the model, picks the device and hands
 the rest of the flags to `build/mojo-dllm run`. [Command line](cli.md) lists
 them all.
 
+A flag and its value are two arguments: `--steps 8`, not `--steps=8`. The launcher
+refuses the `=` form and prints the two-argument form to use. A prompt that starts
+with `-` goes after `--` (`./mojo-dllm run -- "-h"`); `-h` and `--help` after `--`
+belong to the prompt and do not print the help.
+
 `--max-tokens` sets the canvas size, `--steps` the number of denoising passes.
 Fewer steps run faster and commit more tokens per step, which costs quality.
 Each step runs the full model over prompt and canvas, so expect seconds per

@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from conftest import make_probes
 from launcher import cli
 from launcher.ui import Style
 
@@ -206,3 +207,39 @@ def test_ctrl_c_is_one_line_and_exit_130(
     assert cli.main(["pull"]) == 130
     err = capsys.readouterr().err
     assert err == "interrupted\n"
+
+
+@pytest.mark.parametrize("command", ["run", "pull", "doctor"])
+@pytest.mark.parametrize("flag", ["-h", "--help"])
+def test_help_after_double_dash_is_not_a_help_request(
+    command: str, flag: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    seen: list[list[str]] = []
+    for name in ("cmd_run", "cmd_pull"):
+        monkeypatch.setattr(cli, name, lambda argv: seen.append(argv) or 0)
+    monkeypatch.setattr(cli, "real_probes", lambda: seen.append(["probes"]) or make_probes())
+    cli.main([command, "--", flag])
+    assert "Quick start" not in capsys.readouterr().out
+    assert seen, "the command did not run: help was printed instead"
+
+
+@pytest.mark.parametrize("flag", ["-h", "--help"])
+def test_setup_takes_no_words_after_double_dash_and_says_so_instead_of_printing_help(
+    flag: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert cli.main(["setup", "--", flag]) == 2
+    captured = capsys.readouterr()
+    assert "Quick start" not in captured.out and captured.err.startswith("error:")
+
+
+def test_run_double_dash_dash_h_forwards_the_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[list[str]] = []
+    monkeypatch.setattr(cli, "cmd_run", lambda argv: seen.append(argv) or 0)
+    assert cli.main(["run", "--", "-h"]) == 0
+    assert seen == [["--", "-h"]]
+
+
+@pytest.mark.parametrize("argv", [["run", "-h"], ["run", "hi", "--help"], ["pull", "--help"], ["run", "--model", "x", "-h", "--", "p"]])
+def test_help_before_double_dash_still_prints_help(argv: list[str], capsys: pytest.CaptureFixture[str]) -> None:
+    assert cli.main(argv) == 0
+    assert "Quick start" in capsys.readouterr().out

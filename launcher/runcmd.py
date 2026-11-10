@@ -53,6 +53,11 @@ def parse_run_args(argv: list[str]) -> RunArgs:
         elif arg == "--prompt":
             raise UsageError(f"pass the prompt as the first word, without --prompt. Example: {EXAMPLE}")
         elif arg.startswith("-"):
+            if "=" in arg:
+                # The binary's parser has no --flag=value form either: say what to write instead.
+                flag, _, value = arg.partition("=")
+                fix = f"{flag} {value}" if flag not in BOOLEAN_FLAGS else flag
+                raise UsageError(f"{arg} is not supported: write {fix} (the flag and its value are separate arguments)")
             if arg in BOOLEAN_FLAGS:
                 passthrough.append(arg)
             else:

@@ -448,6 +448,9 @@ semantic versioning (0.y: minor bumps may break things).
   their latest versions without hashes. CI and `scripts/ci-local.sh` run `uv lock --script mojo-dllm --check`, and
   `tests/python/test_launcher_script.py` checks that the header pin equals the `huggingface-hub` version in `pyproject.toml`,
   `uv.lock` and the script lock, that every locked package has sha256 hashes, and that the script starts.
+- The launcher refuses `--flag=value` (for example `--device=cpu` or `--steps=8`) with a message that shows the
+  two-argument form, instead of swallowing the next word as the flag's value, and `-h` and `--help` after a bare `--`
+  are part of the prompt instead of a help request, so `./mojo-dllm run -- "-h"` runs with the prompt `-h` (#264).
 
 ## [0.1.0] - 2026-10-04
 

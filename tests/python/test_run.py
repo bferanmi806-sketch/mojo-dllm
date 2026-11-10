@@ -195,3 +195,40 @@ def test_pull_of_a_verified_cached_file_keeps_its_output_and_exits_0(monkeypatch
     store.record(cached, hub.sha256)
     code, text = _pull_with(monkeypatch, tmp_path, hub, store, argv=["--offline"])
     assert code == 0 and text == f"already downloaded\n{cached}\n"
+
+
+@pytest.mark.parametrize(
+    ("argv", "two_arg_form"),
+    [
+        (["--device=cpu", "hi"], "--device cpu"),
+        (["hi", "--max-tokens=64"], "--max-tokens 64"),
+        (["--model=foo.gguf", "hi"], "--model foo.gguf"),
+        (["-m=a/b", "hi"], "-m a/b"),
+        (["hi", "--steps=8"], "--steps 8"),
+        (["hi", "--verbose=1"], "--verbose"),
+    ],
+)
+def test_a_flag_with_an_equals_sign_is_refused_with_the_two_argument_form(argv: list[str], two_arg_form: str) -> None:
+    with pytest.raises(UsageError) as e:
+        parse_run_args(argv)
+    msg = str(e.value)
+    assert f"write {two_arg_form} (the flag" in msg and "needs a value" not in msg and "needs a prompt" not in msg
+
+
+def test_a_prompt_that_contains_an_equals_sign_is_not_a_flag() -> None:
+    assert parse_run_args(["a=b"]).prompt == "a=b"
+    assert parse_run_args(["--", "--x=1"]).prompt == "--x=1"
+    assert parse_run_args(["--seed", "7", "hi"]).passthrough == ["--seed", "7"]
+
+
+def test_a_negative_value_is_the_flags_value_not_a_flag() -> None:
+    a = parse_run_args(["hi", "--temperature", "-1"])
+    assert a.prompt == "hi" and a.passthrough == ["--temperature", "-1"]
+
+
+def test_a_repeated_device_flag_keeps_the_last_one() -> None:
+    assert parse_run_args(["hi", "--device", "cpu", "--device", "gpu"]).device == "gpu"
+
+
+def test_an_empty_prompt_is_a_prompt() -> None:
+    assert parse_run_args([""]).prompt == ""

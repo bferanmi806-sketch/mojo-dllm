@@ -76,8 +76,10 @@ def _unknown_command(command: str) -> str:
 
 def main(argv: list[str]) -> int:
     command, rest = (argv[0], argv[1:]) if argv else ("help", [])
+    # After a bare "--" every word is data (a prompt may be "-h"), so help is looked for only before it.
+    options = rest[: rest.index("--")] if "--" in rest else rest
     if command in ("help", "-h", "--help") or (
-        command in LAUNCHER_COMMANDS and any(a in ("-h", "--help") for a in rest)
+        command in LAUNCHER_COMMANDS and any(a in ("-h", "--help") for a in options)
     ):
         print(help_text(Style.for_stream(sys.stdout)))
         return 0
