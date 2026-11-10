@@ -92,11 +92,11 @@ def test_mojo_that_counted_another_prompt_length_is_not_a_result(monkeypatch: py
     assert r["ok"] is False and "6 prompt tokens" in r["error"]
 
 
-def test_llama_rows_say_their_pass_count_is_the_configured_one(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_llama_rows_carry_the_configured_steps_and_no_pass_count(monkeypatch: pytest.MonkeyPatch) -> None:
     out = "total time: 1000.0ms, time per step: 31.0ms\nhello\n"
     monkeypatch.setattr(rb, "timed", lambda cmd: (0, out, "", 2.0, 1000))
     r = rb.run_llama({**CFG, "llama_cpp": "/x"}, "p", 4, 37)
-    assert r["ok"] and r["forward_passes"] == 32 and r["forward_passes_measured"] is False
+    assert r["ok"] and r["forward_passes"] is None and r["steps"] == 32 and r["forward_passes_measured"] is False
 
 
 REAL_POPEN = subprocess.Popen
@@ -134,3 +134,11 @@ def test_diffuse_without_step_lines_is_failed_not_divided_by_the_configured_step
     r = run_diffuse_with(monkeypatch, "Generating 32\nGenerated token IDs: 1\n")
     assert r["ok"] is False and "step" in r["error"]
     assert "ms_per_step" not in r
+
+
+def test_the_summary_median_of_passes_covers_only_the_measured_rows() -> None:
+    runs = [dict(runtime="mojo", ok=True, forward_passes=32, generate_s=1.0, ms_per_step=1.0, peak_rss_bytes=1),
+            *[dict(runtime="llama", ok=True, forward_passes=None, steps=32, generate_s=1.0, ms_per_step=1.0,
+                   peak_rss_bytes=1)] * 2]
+    sm = rb.summarize_runs(runs, ["mojo", "llama"], 32)
+    assert sm["mojo"]["forward_passes_median"] == 32 and sm["llama"]["forward_passes_median"] is None

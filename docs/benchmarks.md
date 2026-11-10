@@ -324,6 +324,15 @@ Discordant counts problems only the baseline solved / only the arm solved. The 9
 Evidence: `bench/eval/2026-10-29-baseline-vs-dualcache.json`, `bench/eval/2026-10-29-baseline-vs-threshold09.json`, `bench/eval/2026-10-29-baseline-vs-dualcache-first50.json`, `bench/eval/2026-10-29-baseline-vs-threshold09-first50.json`.
 <!-- eval:end -->
 
+Each row of an arm file (`bench/eval/runs/ARM.jsonl`) has a `schema`: `mojo-cli` for `eval_gsm8k.py run`, `engine` for
+`eval_engine.py run`. `forward_passes` is a count the engine measured and is null when it does not count them; an engine
+row then carries the configured count in `steps`, and `eval_gsm8k.py compare` reads the arm's
+`flags.forward_passes_measured` and prints no mean for an arm that did not measure. `stopped_early` is true when the
+answer-fixed stop rule fired on the step the run ended, and that step can be the last one scheduled: 140 of the 200
+baseline rows are `stopped_early` with all 256 passes, so compare `forward_passes` with the configured steps to see how
+much work a row did. Engine rows also record `completion_tokens` and `finish_reason`; `length` means the token limit cut
+the answer off.
+
 ### The authors' own code (Transformers arm)
 
 `bench/eval_engine.py run --engine hf` answers the same 200 problems through the sampling code the model authors

@@ -27,7 +27,8 @@ from engines import _http  # noqa: E402
 from fake_vllm_server import ANSWER, FakeServer  # noqa: E402
 
 RECORD_KEYS = {"index", "gold", "pred", "correct", "forward_passes", "generate_s", "stopped_early", "text",
-               "flags", "version", "model", "power_retries", "on_battery", "power_source", "isolation"}
+               "flags", "version", "model", "power_retries", "on_battery", "power_source", "isolation", "schema", "steps",
+               "completion_tokens", "finish_reason"}
 CHECKPOINT = "google/diffusiongemma-26B-A4B-it"
 MODEL = CHECKPOINT
 

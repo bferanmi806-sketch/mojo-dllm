@@ -41,7 +41,7 @@ import threading
 import time
 from dataclasses import dataclass
 
-from . import EngineError, GenConfig, register
+from . import EngineError, GenConfig, GenResult, register
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 import isolation  # noqa: E402  (bench/isolation.py: its /proc/meminfo reader)
@@ -391,4 +391,5 @@ class HF:
         # result to the host, so the GPU work has finished when the clock stops.
         start = time.perf_counter()
         text = _call_with_timeout(lambda: self.backend.answer(prompt, cfg), cfg.timeout_s, f"{self.family} generation")
-        return dict(text=text, generate_s=time.perf_counter() - start, forward_passes=cfg.steps, steps=cfg.steps)
+        # The authors' loop is not instrumented: the configured steps go in `steps`, `forward_passes` stays None.
+        return GenResult(text=text, generate_s=time.perf_counter() - start, forward_passes=None, steps=cfg.steps)

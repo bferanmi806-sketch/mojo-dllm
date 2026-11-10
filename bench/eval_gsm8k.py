@@ -225,7 +225,7 @@ def cmd_run(args: argparse.Namespace, extra: list[str]) -> int:
                        forward_passes=j["forward_passes"], generate_s=j["generate_s"],
                        stopped_early=j.get("stopped_early"), text=j["text"], flags=flags, version=version,
                        model=model, power_retries=pinfo["power_retries"], on_battery=pinfo["on_battery"],
-                       power_source=pinfo["power_source"], isolation=pinfo["isolation"])
+                       power_source=pinfo["power_source"], isolation=pinfo["isolation"], schema="mojo-cli")
             with out.open("a") as f:
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
             noisy = "" if pinfo["isolation"]["clean"] else " NOISY: " + "; ".join(pinfo["isolation"]["reasons"])
@@ -253,7 +253,7 @@ def load_arm(name: str) -> dict[int, dict]:
 
 def arm_config(name: str, rows: dict[int, dict]) -> dict:
     """The arm's one configuration; refuse an arm that mixes several."""
-    configs = {(json.dumps(r.get("flags")), r.get("version"), r.get("model")) for r in rows.values()}
+    configs = {(json.dumps(r.get("flags"), sort_keys=True), r.get("version"), r.get("model")) for r in rows.values()}
     if len(configs) != 1:
         raise SystemExit(f"arm {name!r} mixes configurations: {sorted(configs)}")
     flags, version, model = configs.pop()
@@ -268,14 +268,24 @@ def first_rows(rows: dict[int, dict], limit: int) -> dict[int, dict]:
     return dict(list(rows.items())[:limit]) if limit else rows
 
 
-def passes_of(rows: dict[int, dict], common: list[int]) -> list[int]:
-    """The forward-pass counts the arm recorded; an engine that cannot count them writes null."""
+def measures_passes(config: dict) -> bool:
+    """False for an arm whose flags say `forward_passes_measured: false`: the engine did not count passes, so a
+    number in its rows (an older file stored the configured steps there) is not a measurement. A mojo-dllm arm,
+    whose flags are a list of command-line flags, always counts them."""
+    flags = config.get("flags")
+    return not (isinstance(flags, dict) and flags.get("forward_passes_measured") is False)
+
+
+def passes_of(rows: dict[int, dict], common: list[int], measured: bool = True) -> list[int]:
+    """The forward-pass counts the arm measured; none for an arm that did not, and null rows are skipped."""
+    if not measured:
+        return []
     return [rows[i]["forward_passes"] for i in common if rows[i]["forward_passes"] is not None]
 
 
-def passes_mean(rows: dict[int, dict], common: list[int]) -> float | None:
-    """Mean passes over the problems that have a count, or None when none has."""
-    got = passes_of(rows, common)
+def passes_mean(rows: dict[int, dict], common: list[int], measured: bool = True) -> float | None:
+    """Mean measured passes over the problems that have a count, or None when none has."""
+    got = passes_of(rows, common, measured)
     return sum(got) / len(got) if got else None
 
 
@@ -335,8 +345,11 @@ def cmd_compare(a_name: str, b_name: str, limit: int = 0, across_weights: bool =
         difference=d, ci95=None if lo is None else [lo, hi], ci95_method=CI_METHOD,
         **({"ci95_note": f"not estimable: fewer than {MIN_DISCORDANT} discordant pair"} if lo is None else {}),
         discordant={"a_only": b, "b_only": c}, mcnemar_p=mcnemar_exact(b, c),
-        forward_passes_mean={a_name: passes_mean(A, common), b_name: passes_mean(B, common)},
-        forward_passes_rows={a_name: len(passes_of(A, common)), b_name: len(passes_of(B, common))},
+        forward_passes_measured={a_name: measures_passes(ca), b_name: measures_passes(cb)},
+        forward_passes_mean={a_name: passes_mean(A, common, measures_passes(ca)),
+                             b_name: passes_mean(B, common, measures_passes(cb))},
+        forward_passes_rows={a_name: len(passes_of(A, common, measures_passes(ca))),
+                             b_name: len(passes_of(B, common, measures_passes(cb)))},
         generate_s_mean={a_name: sum(A[i]["generate_s"] for i in common) / n,
                          b_name: sum(B[i]["generate_s"] for i in common) / n},
         **clean_summary(A, B, common, (a_name, b_name)),
@@ -345,7 +358,7 @@ def cmd_compare(a_name: str, b_name: str, limit: int = 0, across_weights: bool =
     out = ROOT / "bench" / "eval" / f"{dt.date.today().isoformat()}-{a_name}-vs-{b_name}{suffix}.json"
     atomic_write.write_new(out, json.dumps(doc, indent=2) + "\n", force)
     print(json.dumps({k: doc[k] for k in ("problems", "models", "weights_differ", "accuracy", "difference", "ci95", "ci95_method", "discordant",
-                                           "mcnemar_p", "forward_passes_mean", "forward_passes_rows",
+                                           "mcnemar_p", "forward_passes_mean", "forward_passes_measured", "forward_passes_rows",
                                            "generate_s_mean", "generate_s_mean_clean", "clean_rows",
                                            "noisy_rows", "unchecked_rows")}, indent=1))
     print(f"wrote {out.relative_to(ROOT)}")

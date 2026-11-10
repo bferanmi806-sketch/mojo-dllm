@@ -61,7 +61,7 @@ import json
 import pathlib
 import time
 
-from . import EngineError, GenConfig, register
+from . import EngineError, GenConfig, GenResult, register
 from ._http import HttpClient, clean
 from ._openai import model_cards, parse_chat
 
@@ -275,5 +275,6 @@ class SGLang:
         text, prompt_tokens, completion_tokens, finish = parse_chat(out, self.served_model)    # type: ignore[arg-type]
         # SGLang echoes the request's `model`, so the echo check in parse_chat only catches a gateway that rewrites it;
         # the identity of the weights comes from /model_info, read in `check`.
-        return dict(text=text, generate_s=generate_s, forward_passes=None, steps=None,
-                    prompt_tokens=prompt_tokens, completion_tokens=completion_tokens, finish_reason=finish)
+        return GenResult(text=text, generate_s=generate_s, forward_passes=None, steps=None,
+                         prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
+                         finish_reason=finish)

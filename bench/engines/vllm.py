@@ -36,7 +36,7 @@ import pathlib
 import re
 import time
 
-from . import EngineError, GenConfig, register
+from . import EngineError, GenConfig, GenResult, register
 from ._http import HttpClient, HttpError, clean
 from ._openai import model_cards, parse_chat
 
@@ -211,5 +211,6 @@ class VLLM:
                                   "reports no denoising steps for it (another client, or the counter is not "
                                   "this model's), so the step count would be wrong")
             steps = after - before
-        return dict(text=text, generate_s=generate_s, forward_passes=steps, steps=steps,
-                    prompt_tokens=prompt_tokens, completion_tokens=completion_tokens, finish_reason=finish)
+        return GenResult(text=text, generate_s=generate_s, forward_passes=steps, steps=steps,
+                         prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
+                         finish_reason=finish)

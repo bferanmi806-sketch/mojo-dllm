@@ -3,8 +3,9 @@
 The command line is the one `bench/run_bench.py` times (`run_llama`), and a CUDA run is held to the same check:
 every layer on the GPU. Flag names come from `llama-diffusion-cli --help` at the commit recorded as `version`.
 
-llama.cpp has no early stop and prints no pass count, so `forward_passes` is the configured step count and the
-arm's `flags` say `"forward_passes_measured": false`. Seconds per problem are the comparable column.
+llama.cpp has no early stop and prints no pass count, so a row's `forward_passes` is null, its `steps` is the
+configured step count, and the arm's `flags` say `"forward_passes_measured": false`. Seconds per problem are the
+comparable column.
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ import pathlib
 import subprocess
 import sys
 
-from . import EngineError, GenConfig, register
+from . import EngineError, GenConfig, GenResult, register
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "bench"))
@@ -117,4 +118,5 @@ class LlamaCpp:
         parsed = run_bench.parse_llama_output(output)
         if parsed is None:
             raise EngineError(f"no `time per step` line in the output: {output[-400:]}")
-        return dict(text=parsed["text"], generate_s=parsed["total_s"], forward_passes=cfg.steps, steps=cfg.steps)
+        # llama.cpp does not report its pass count: the configured steps go in `steps`, `forward_passes` stays None.
+        return GenResult(text=parsed["text"], generate_s=parsed["total_s"], forward_passes=None, steps=cfg.steps)

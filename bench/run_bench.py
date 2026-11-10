@@ -240,7 +240,7 @@ def run_llama(c: dict, prompt: str, threads: int, seq_len: int, cuda: bool = Fal
     total = parsed["total_s"]
     return dict(
         ok=True, wall_s=wall, peak_rss_bytes=rss, generate_s=total,
-        ms_per_step=parsed["ms_per_step"], forward_passes=c["steps"], forward_passes_measured=False,
+        ms_per_step=parsed["ms_per_step"], forward_passes=None, steps=c["steps"], forward_passes_measured=False,
         startup_s=wall - total, seq_len=seq_len, text=parsed["text"][-600:],
     )
 
@@ -397,7 +397,8 @@ def summarize_runs(results: list[dict], runtimes: list[str], gen_length: int) ->
                 [gen_length / r["generate_s"] for r in ok if "generate_s" in r]),
             startup_s_median=median_or_none([r["startup_s"] for r in ok if "startup_s" in r]),
             peak_rss_gb_max=max((r["peak_rss_bytes"] for r in ok), default=0) / 1e9 or None,
-            forward_passes_median=median_or_none([r["forward_passes"] for r in ok if "forward_passes" in r]),
+            forward_passes_median=median_or_none(
+                [r["forward_passes"] for r in ok if r.get("forward_passes") is not None]),
             forward_ms_median=median_or_none([r["forward_ms"] for r in ok if r.get("forward_ms") is not None]),
         )
     return summary
