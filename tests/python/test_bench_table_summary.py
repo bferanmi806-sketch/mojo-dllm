@@ -74,6 +74,18 @@ def test_a_figure_that_should_be_null_is_refused_when_it_holds_a_number(doc: dic
         bt.check_summary("f.json", doc)
 
 
+def test_a_summary_run_count_that_disagrees_with_the_runs_is_refused(doc: dict) -> None:
+    doc["summary"]["mojo-dllm"]["runs_ok"] += 1
+    with pytest.raises(SystemExit, match=r"says runs_ok 4, its runs hold 3"):
+        bt.check_summary("f.json", doc)
+
+
+def test_a_hand_edited_step_time_is_refused(doc: dict) -> None:
+    doc["summary"]["mojo-dllm"]["ms_per_step_median"] *= 1.01
+    with pytest.raises(SystemExit, match="ms_per_step_median"):
+        bt.check_summary("f.json", doc)
+
+
 def test_a_figure_within_rounding_of_the_runs_passes(doc: dict) -> None:
     doc["summary"]["mojo-dllm"]["tokens_per_s_median"] *= 1 + 1e-12
     bt.check_summary("f.json", doc)

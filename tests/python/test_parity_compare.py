@@ -143,3 +143,13 @@ def test_dg_compare_refuses_an_empty_mojo_file(tmp_path: Path, monkeypatch: pyte
 def test_dg_compare_refuses_files_of_different_shape(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mojo_rows: int) -> None:
     with pytest.raises(SystemExit, match="empty or differ in shape"):
         parity.dg_compare(dg_folder(tmp_path, monkeypatch, mojo_rows=mojo_rows), BOUND)
+
+
+def test_the_median_cosine_is_a_median_and_not_a_mean() -> None:
+    """Cosines 1, 0.99 and 0.5: the median is 0.99, the mean 0.83."""
+    a = np.array([[1.0, 0.0], [1.0, 0.0], [1.0, 0.0]])
+    b = np.array([[1.0, 0.0], [math.cos(math.acos(0.99)), math.sin(math.acos(0.99))],
+                  [math.cos(math.acos(0.5)), math.sin(math.acos(0.5))]])
+    m = parity.compare(a, b, 0)
+    assert m["median_cosine"] == pytest.approx(0.99) and m["min_cosine"] == pytest.approx(0.5)
+    assert m["masked_median_cosine"] == pytest.approx(0.99)

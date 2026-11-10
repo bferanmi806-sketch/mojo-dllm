@@ -211,7 +211,7 @@ def test_a_gpu_that_is_neither_an_index_nor_a_uuid_is_refused(tmp_path, monkeypa
     assert calls == []
 
 
-@pytest.mark.parametrize('answer', ['1', '', 'Fixture GPU, 1, 00000000:02:00.0, 6144 MiB'])
+@pytest.mark.parametrize('answer', ['1', '', 'Fixture GPU, GPU-abc', 'Fixture GPU, 1, 00000000:02:00.0, 6144 MiB'])
 def test_the_card_nvidia_smi_names_must_have_a_uuid(tmp_path, monkeypatch, answer):
     mod, output, calls = harness(tmp_path, monkeypatch, 'ok')
     command = mod.command
