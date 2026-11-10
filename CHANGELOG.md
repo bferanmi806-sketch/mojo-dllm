@@ -428,6 +428,11 @@ semantic versioning (0.y: minor bumps may break things).
   checks that `build/mojo-dllm` exists. `setup --no-model` ends with `Setup complete (no smoke test).`. `setup --offline`
   and `HF_HUB_OFFLINE=1` use the cache only, as `run` and `pull` do. Ctrl-D at the download question declines it instead
   of printing a traceback.
+- `./mojo-dllm doctor` keeps the reason a probe failed (#260). The `toolchain` line says whether `uv run` timed out,
+  could not start or exited non-zero (with the first line of its stderr), the `gpu` line carries the `nvidia-smi` failure
+  (a driver and library mismatch is visible), an unreadable `/proc/cpuinfo` or `/proc/meminfo` is reported with the system's
+  reason instead of "no AVX2", and a cache lookup that failed names its error instead of "not in the cache". The driver
+  version comes from the same `nvidia-smi` call as the GPU list.
 
 ## [0.1.0] - 2026-10-04
 

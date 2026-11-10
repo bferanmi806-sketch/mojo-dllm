@@ -3,6 +3,8 @@ from __future__ import annotations
 import io
 from pathlib import Path
 
+import pytest
+
 from launcher.doctor import preflight, run_doctor
 from launcher.ui import Style
 
@@ -43,6 +45,61 @@ def test_toolchain_not_installed_points_at_setup() -> None:
     code, lines = doctor(mojo_version_output=None)
     assert code == 1
     assert any(line == "  → ./mojo-dllm setup" for line in lines)
+
+
+@pytest.mark.parametrize(
+    "reason",
+    ["timed out after 60 s", "exit 2: Failed to spawn: mojo", "uv: No such file or directory"],
+)
+def test_the_toolchain_line_carries_the_reason_the_probe_failed(reason: str) -> None:
+    _, lines = doctor(mojo_version_output=None, mojo_failure=reason)
+    line = next(line for line in lines if " toolchain " in line)
+    assert line.startswith("✗") and reason in line and "1.1.0" in line
+
+
+def test_a_failed_toolchain_probe_without_a_reason_keeps_the_old_text() -> None:
+    _, lines = doctor(mojo_version_output=None)
+    assert "mojo 1.1.0 is not installed in .venv" in next(line for line in lines if " toolchain " in line)
+
+
+@pytest.mark.parametrize(
+    "reason",
+    ["nvidia-smi not found on PATH", "timed out after 60 s",
+     "exit 9: Failed to initialize NVML: Driver/library version mismatch"],
+)
+def test_the_gpu_line_carries_the_reason_nvidia_smi_failed(reason: str) -> None:
+    code, lines = doctor(gpu_text=None, driver_text=None, gpu_failure=reason)
+    line = next(line for line in lines if " gpu " in line)
+    assert code == 0 and line.startswith("!") and reason in line
+    assert "no NVIDIA GPU found" not in line
+
+
+def test_no_reason_and_no_nvidia_smi_output_keeps_the_old_text() -> None:
+    _, lines = doctor(gpu_text=None, driver_text=None)
+    assert "no NVIDIA GPU found" in next(line for line in lines if " gpu " in line)
+
+
+def test_an_unreadable_cpuinfo_is_reported_as_unreadable_not_as_no_avx2() -> None:
+    code, lines = doctor(cpuinfo=None, cpuinfo_error="Permission denied")
+    line = next(line for line in lines if " cpu " in line)
+    assert line.startswith("!") and "cannot read /proc/cpuinfo: Permission denied" in line
+    assert "no AVX2" not in line and code == 0
+
+
+def test_an_unreadable_cpuinfo_does_not_stop_setup() -> None:
+    assert [c.status for c in preflight(make_probes(cpuinfo=None, cpuinfo_error="x"))] == ["ok", "ok", "warn"]
+
+
+def test_an_unreadable_meminfo_is_reported_with_its_reason() -> None:
+    _, lines = doctor(meminfo=None, meminfo_error="Permission denied")
+    line = next(line for line in lines if " memory " in line)
+    assert line.startswith("!") and "cannot read /proc/meminfo: Permission denied" in line
+
+
+def test_a_model_lookup_that_failed_names_the_reason_not_an_empty_cache() -> None:
+    _, lines = doctor(cached_model=None, verified=False, model_error="no .gguf file in the repo")
+    line = next(line for line in lines if " model " in line)
+    assert line.startswith("!") and "no .gguf file in the repo" in line and "is not in the Hugging Face cache" not in line
 
 
 def test_toolchain_version_mismatch_names_both_versions() -> None:
