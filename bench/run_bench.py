@@ -33,6 +33,7 @@ recorded as failed and excluded, and the summary says how many were.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as dt
 import json
 import os
@@ -47,6 +48,7 @@ import sys
 import tempfile
 import threading
 import time
+from typing import Callable
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "bench"))
@@ -55,32 +57,73 @@ import power  # noqa: E402  (bench/power.py)
 
 
 class Watchdog(threading.Thread):
-    def __init__(self, name: str, log: list[dict]) -> None:
+    """Kills this user's processes named `name` (pytest) while the benchmark runs, and logs every kill.
+
+    Only processes whose owner is `uid` are touched: another user's pytest is not ours to kill. A kill the
+    kernel refuses is reported in `errors` and the loop goes on; it is not counted as a kill.
+    """
+
+    def __init__(self, name: str, log: list[dict], proc: pathlib.Path = pathlib.Path("/proc"),
+                 kill: Callable[[int, int], None] = os.kill, uid: int | None = None) -> None:
         super().__init__(daemon=True)
         self.target = name
         self.log = log
+        self.errors: list[str] = []
+        self.proc, self.kill, self.uid = proc, kill, os.getuid() if uid is None else uid
         self.stop = threading.Event()
 
-    def run(self) -> None:
+    def sweep(self) -> None:
         me = os.getpid()
+        for d in self.proc.iterdir():
+            if not d.name.isdigit() or int(d.name) == me:
+                continue
+            try:
+                comm = (d / "comm").read_text().strip()
+                owner = d.stat().st_uid
+            except OSError:
+                continue
+            if comm != self.target or owner != self.uid:
+                continue
+            pid = int(d.name)
+            try:
+                self.kill(pid, signal.SIGKILL)
+                # Time and pid only: where the process ran is someone else's business.
+                self.log.append(dict(time=dt.datetime.now().isoformat(timespec="seconds"), pid=pid))
+            except ProcessLookupError:
+                pass
+            except PermissionError as e:
+                self.errors.append(f"could not kill {self.target} pid {pid}: {e}")
+                print(f"!! {self.errors[-1]}", flush=True)
+
+    def run(self) -> None:
         while not self.stop.is_set():
-            for d in pathlib.Path("/proc").iterdir():
-                if not d.name.isdigit() or int(d.name) == me:
-                    continue
-                try:
-                    comm = (d / "comm").read_text().strip()
-                except OSError:
-                    continue
-                if comm != self.target:
-                    continue
-                pid = int(d.name)
-                try:
-                    os.kill(pid, signal.SIGKILL)
-                    # Time and pid only: where the process ran is someone else's business.
-                    self.log.append(dict(time=dt.datetime.now().isoformat(timespec="seconds"), pid=pid))
-                except ProcessLookupError:
-                    pass
+            self.sweep()
             self.stop.wait(1.0)
+
+
+def set_profile(machine: isolation.Machine, name: str) -> bool:
+    """`powerprofilesctl set NAME`, then read it back: True only when the profile now reads NAME."""
+    rc, _ = machine.run(["powerprofilesctl", "set", name])
+    rc2, now = machine.run(["powerprofilesctl", "get"])
+    return rc == 0 and rc2 == 0 and now.strip() == name
+
+
+def profile_hooks(machine: isolation.Machine, previous: str,
+                  log: Callable[[str], None]) -> tuple[Callable[[], None], Callable[[], None]]:
+    """(on_pause, on_resume) for a run on battery: give the profile back while it waits, take performance after.
+
+    Each is read back. A profile that could not be put back is logged; one that could not be set again stops the
+    run, which would otherwise measure on the wrong profile.
+    """
+    def on_pause() -> None:
+        if not set_profile(machine, previous):
+            log(f"!! could not put the power profile back to {previous}: run `powerprofilesctl set {previous}`")
+
+    def on_resume() -> None:
+        if not set_profile(machine, "performance"):
+            raise isolation.IsolationError("could not set the power profile to performance after the charger came back")
+
+    return on_pause, on_resume
 
 
 def sh(cmd: str) -> str:
@@ -387,7 +430,9 @@ def main() -> int:
     kills: list[dict] = []
     wd = Watchdog("pytest", kills)
     kill_pytest = c.get("kill_pytest", True)
-    profile_before = sh("powerprofilesctl get")
+    machine = isolation.get_machine()
+    say = lambda m: print(m, flush=True)  # noqa: E731
+    stack = contextlib.ExitStack()
     arm = None
     results: list[dict] = []
     out_path = pathlib.Path(args.out or ROOT / f"bench/results/{dt.date.today().isoformat()}-cpu.json")
@@ -453,7 +498,10 @@ def main() -> int:
         return r, t_start
 
     try:
-        subprocess.run(["powerprofilesctl", "set", "performance"], check=True)
+        # Verified by reading it back, and put back on every way out (the finally below, a signal, exit).
+        tuned_info = stack.enter_context(isolation.tuned(machine, say))
+        profile_before = tuned_info["previous"]
+        on_pause, on_resume = profile_hooks(machine, profile_before, say)
         if kill_pytest:
             wd.start()
         device = "gpu" if any("gpu" in r or "cuda" in r for r in runtimes) else "cpu"
@@ -461,7 +509,7 @@ def main() -> int:
             out_path.stem, device=device, need_ram_gb=isolation.need_ram_gb(c["models"]["gguf"]),
             runs_dir=out_path.parent / "env", retries=args.isolation_retries, allow_noisy=args.allow_noisy,
             allow_battery=args.allow_battery, thresholds=isolation.Thresholds(cpu_busy_max=c["busy_threshold"]),
-            tuned={"previous": profile_before, "set": "performance"}, log=lambda m: print(m, flush=True),
+            tuned=tuned_info, log=say,
             versions=versions)
         threads = c["threads"]
         tok_cache: dict[str, tuple[str, int]] = {}
@@ -481,8 +529,7 @@ def main() -> int:
                     (r, t_start), pinfo = arm.run(
                         lambda: one_run(rt, p, ids, n_prompt, seq_len, threads),
                         max_quiet_wait_s=c["max_quiet_wait_s"], quiet_sample_s=2.0,
-                        on_pause=lambda: subprocess.run(["powerprofilesctl", "set", profile_before or "power-saver"]),
-                        on_resume=lambda: subprocess.run(["powerprofilesctl", "set", "performance"], check=True),
+                        on_pause=on_pause, on_resume=on_resume,
                     )
                     load, waited = pinfo["isolation"]["cpu_busy_before"], pinfo["isolation"]["waited_s"]
                     r.update(runtime=rt, prompt_index=pi, rep=rep, started=t_start,
@@ -505,14 +552,19 @@ def main() -> int:
     except isolation.IsolationError as e:
         raise SystemExit(str(e)) from e
     finally:
-        if arm is not None:
-            arm.finish()
+        # Each step on its own: a failure in one never skips the next, and none replaces the error being raised.
         wd.stop.set()
-        subprocess.run(["powerprofilesctl", "set", profile_before or "power-saver"])
+        if arm is not None:
+            try:
+                arm.finish()
+            except Exception as e:  # noqa: BLE001
+                print(f"!! the closing snapshot failed: {e}", flush=True)
+        stack.close()
 
     summary = write_doc(partial=False)
     print(json.dumps(summary, indent=2))
-    print(f"watchdog killed {len(kills)} pytest process(es)" if kill_pytest else "watchdog off (kill_pytest: false)")
+    print(f"watchdog killed {len(kills)} pytest process(es)" + (f", {len(wd.errors)} refused" if wd.errors else "")
+          if kill_pytest else "watchdog off (kill_pytest: false)")
     print(f"wrote {out_path}")
     failed = sum(s["runs_failed"] for s in summary.values())
     return 1 if failed else 0

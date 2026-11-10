@@ -1044,12 +1044,17 @@ class Arm:
                             allow_battery=self.allow_battery, log=self.log, **kw)
 
     def finish(self) -> None:
+        """Write the closing snapshot. A missing or corrupt env file is logged and left alone: this runs while
+        another error may be propagating, and raising here would replace it and skip the cleanup after it."""
         if self.env_path is None:
             return
-        doc = json.loads(self.env_path.read_text())
-        doc["sessions"][-1]["snapshot_end"] = snapshot(self.machine, sample_s=0)
-        doc["sessions"][-1]["ended"] = dt.datetime.fromtimestamp(self.machine.wall()).isoformat(timespec="seconds")
-        self.env_path.write_text(json.dumps(doc, indent=2) + "\n")
+        try:
+            doc = json.loads(self.env_path.read_text())
+            doc["sessions"][-1]["snapshot_end"] = snapshot(self.machine, sample_s=0)
+            doc["sessions"][-1]["ended"] = dt.datetime.fromtimestamp(self.machine.wall()).isoformat(timespec="seconds")
+            self.env_path.write_text(json.dumps(doc, indent=2) + "\n")
+        except (OSError, ValueError, KeyError, IndexError, TypeError) as e:
+            self.log(f"!! could not write the closing snapshot to {self.env_path} ({type(e).__name__}: {e})")
 
 
 def begin_arm(arm: str, *, device: str, need_ram_gb: float | None, runs_dir: pathlib.Path | None,

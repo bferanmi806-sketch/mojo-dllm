@@ -138,9 +138,7 @@ def test_run_bench_keeps_its_quiet_wait_names_and_meaning(live: FakeMachine) -> 
 def test_run_bench_main_records_the_window_and_writes_the_env_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
                                                                     live: FakeMachine) -> None:
     bin_dir = tmp_path / "bin"
-    state = tmp_path / "profile"
-    state.write_text("balanced\n")
-    _script(bin_dir / "powerprofilesctl", FAKE_PPD)
+    live.profile = live.platform_profile = "balanced"
     _script(bin_dir / "nvidia-smi", FAKE_SMI)
     _script(tmp_path / "build/mojo-dllm", FAKE_MOJO_RUN)
     model = tmp_path / "m.gguf"
@@ -150,7 +148,6 @@ def test_run_bench_main_records_the_window_and_writes_the_env_file(tmp_path: Pat
            "threads": 2, "busy_threshold": 0.1, "max_quiet_wait_s": 5, "kill_pytest": False}
     (tmp_path / "config.json").write_text(json.dumps(cfg))
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
-    monkeypatch.setenv("FAKE_PPD_STATE", str(state))
     monkeypatch.setattr(run_bench, "ROOT", tmp_path)
     monkeypatch.setattr(run_bench, "mojo_version", lambda: "Mojo 1.1.0 (fake)")
     out = tmp_path / "results" / "x.json"
@@ -161,7 +158,7 @@ def test_run_bench_main_records_the_window_and_writes_the_env_file(tmp_path: Pat
     run = doc["runs"][0]
     assert run["ok"] is True and run["isolation"]["clean"] is True and run["cpu_busy_before"] == 0.0
     assert {"cpu_busy_before", "waited_s"} <= set(run)
-    assert state.read_text().strip() == "balanced"                       # restored, as before
+    assert live.profile == "balanced"                                    # restored, as before
     env = json.loads((tmp_path / "results/env/x.env.json").read_text())["sessions"][0]
     assert env["preflight"]["ok"] is True and env["thresholds"]["cpu_busy_max"] == 0.1
     assert list((tmp_path / "results").glob("*.json")) == [out]          # bench_table reads results/*.json
