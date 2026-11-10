@@ -87,7 +87,7 @@ semantic versioning (0.y: minor bumps may break things).
   small. Six flags (`--eb-steps`, `--eb-t-min`, `--eb-t-max`, `--eb-bound`,
   `--eb-stability`, `--eb-confidence`) default to the llama.cpp branch's
   values. `--json` gains `steps_taken` and `stop_reason` for every model. The
-  forward pass is #64; tests use a scripted model.
+  forward pass is #64, and #277 tracks wiring it to this loop; tests use a scripted model.
 - `scripts/check_weights.py` compares GGUF tensor shapes with safetensors
   headers, with LLaDA/Dream name mapping and a standalone self-test.
 - Q8_0 and Q5_K reference decoders, with GGUF type sizing and reference tests
@@ -233,7 +233,7 @@ semantic versioning (0.y: minor bumps may break things).
   in `bench/` and `scripts/` pass it for every architecture.
 - `run` refuses a DiffusionGemma file as soon as its header is read, before the tokenizer is built and the prompt
   encoded, and says that the architecture runs through `logits` only until the generation loop is wired (issue #205,
-  wiring stays in #64). `run --help` and `docs/cli.md` mark the `--eb-*` flags as having no effect yet. The
+  wiring is tracked by #277). `run --help` and `docs/cli.md` mark the `--eb-*` flags as having no effect yet. The
   entropy-bounded sampler also refuses a generation length that differs from the model's canvas length, which
   overflowed the logits buffer when smaller and moved the prompt boundary otherwise. The `check_runnable` docstring no
   longer says that no forward pass exists.
@@ -472,6 +472,11 @@ semantic versioning (0.y: minor bumps may break things).
 - `scripts/check_gpu_test_count.sh` compares the number of `def test_` functions in `tests/gpu/test_*.mojo` with
   `tests/gpu/test-count.txt` in CI and in `scripts/ci-local.sh`, on every machine (#145). Before, a GPU test added
   without re-pinning, or a file that stopped defining tests, passed both gates wherever there was no GPU.
+- The refusal of `run` on a `diffusion-gemma` file now points at #277, which tracks wiring the model into the generation
+  loop, instead of #64, which is the forward pass (written, and so is the denoiser, #65) (#270). `run` and
+  `ModelConfig.check_runnable` raise one text from one function, `gemma_run_refusal`, and `docs/cli.md`,
+  `docs/introduction.md`, `docs/model-porting.md` and `docs/benchmarks.md` use the same three numbers. `docs/cli.md` no
+  longer says that DiffusionGemma's `--json` reports `stopped_early` today.
 
 ## [0.1.0] - 2026-10-04
 

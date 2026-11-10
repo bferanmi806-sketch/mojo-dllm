@@ -824,7 +824,7 @@ Weights differ between rows, so every comparison includes the precision as well 
 | llama.cpp reference (the branch of ggml-org/llama.cpp#24423) | `diffusiongemma-26B-A4B-it-Q4_K_M.gguf`, the file `docs/correctness.md` names | that branch's own loop; I did not read it for this table | the build is `scripts/build_dg_ref.sh`; the GSM8K runner for llama.cpp's diffusion CLI is issue #177 (open), and I have not checked that `bench/engines/llamacpp.py` drives this build | no committed run yet |
 | vLLM | `diffusiongemma-26B-A4B-it\|fp8-dynamic`, or the bf16 checkpoint (the choice is the maintainer's, see the vLLM runbook) | vLLM's entropy-bound sampler, as the recipe page describes it | `--engine vllm` (issue #179), runbook above | no committed run yet |
 | SGLang | `diffusiongemma-26B-A4B-it\|bfloat16` | `Gemma4Renoise` | `--engine sglang` (issue #180), runbook above | no committed run yet |
-| mojo-dllm | the Q4_K_M GGUF of the llama.cpp row | its own entropy-bound loop, `docs/diffusion.md` ("DiffusionGemma's loop") | `mojo-dllm run` does not run DiffusionGemma yet: the generation loop is issue #64 (open), see `docs/introduction.md` | no committed run yet |
+| mojo-dllm | the Q4_K_M GGUF of the llama.cpp row | its own entropy-bound loop, `docs/diffusion.md` ("DiffusionGemma's loop") | `mojo-dllm run` does not run DiffusionGemma yet: wiring the model into the generation loop is issue #277 (open), see `docs/introduction.md` | no committed run yet |
 
 The six defaults in `docs/cli.md` (`--eb-steps` 48, `--eb-t-min` 0.4, `--eb-t-max` 0.8, `--eb-bound` 0.1,
 `--eb-stability` 1, `--eb-confidence` 0.005) are the values the SGLang cookbook lists for `Gemma4Renoise`

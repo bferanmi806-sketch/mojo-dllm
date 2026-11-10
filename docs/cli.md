@@ -37,12 +37,12 @@ stops the run (see [Errors](#errors)).
 | `--threshold P` | 0 (off) | A number from 0 to 1. LLaDA: each step also commits every masked token whose confidence is at least P, so easy blocks finish in fewer steps (Fast-dLLM's parallel decoding). A step still commits at least what the schedule says. Not exact: see [Benchmarks](benchmarks.md#steps-and-quality) for its measured effect on accuracy |
 | `--dual-cache` | off | LLaDA: cache every position's keys and values and, inside a block, recompute only that block's rows (Fast-dLLM's DualCache). The cache is refreshed at the first step of each block. Not exact: the prompt and later blocks see keys from the block's first step; see [Benchmarks](benchmarks.md#steps-and-quality) for its measured effect on accuracy. Cannot combine with `--full-logits` |
 | `--seed N` | 42 | seeds this program's PRNG (it does not reproduce a PyTorch run). It fixes DiffusionGemma's random canvas and draws as well |
-| `--eb-steps N` | 48 | DiffusionGemma: most denoising steps (use it instead of `--steps`, which that model refuses) (no effect until `run` accepts DiffusionGemma, #64) |
-| `--eb-t-min T` | 0.4 | DiffusionGemma: the temperature the schedule approaches, 0 or more; the last of `--eb-steps` steps runs at `T + (t-max - T) / steps` (no effect until `run` accepts DiffusionGemma, #64) |
-| `--eb-t-max T` | 0.8 | DiffusionGemma: the temperature of the first step; it falls linearly from there (no effect until `run` accepts DiffusionGemma, #64) |
-| `--eb-bound B` | 0.1 | DiffusionGemma: a position is accepted while the entropies of the lower-entropy positions before it sum to at most B (no effect until `run` accepts DiffusionGemma, #64) |
-| `--eb-stability N` | 1 | DiffusionGemma: steps the argmax canvas must hold before the run may stop; 0 or more, and 0 lets the first step stop it (no effect until `run` accepts DiffusionGemma, #64) |
-| `--eb-confidence C` | 0.005 | DiffusionGemma: the run may stop once the mean entropy over the canvas is below C (no effect until `run` accepts DiffusionGemma, #64) |
+| `--eb-steps N` | 48 | DiffusionGemma: most denoising steps (use it instead of `--steps`, which that model refuses) (no effect yet, see the paragraph after the table) |
+| `--eb-t-min T` | 0.4 | DiffusionGemma: the temperature the schedule approaches, 0 or more; the last of `--eb-steps` steps runs at `T + (t-max - T) / steps` (no effect yet, see the paragraph after the table) |
+| `--eb-t-max T` | 0.8 | DiffusionGemma: the temperature of the first step; it falls linearly from there (no effect yet, see the paragraph after the table) |
+| `--eb-bound B` | 0.1 | DiffusionGemma: a position is accepted while the entropies of the lower-entropy positions before it sum to at most B (no effect yet, see the paragraph after the table) |
+| `--eb-stability N` | 1 | DiffusionGemma: steps the argmax canvas must hold before the run may stop; 0 or more, and 0 lets the first step stop it (no effect yet, see the paragraph after the table) |
+| `--eb-confidence C` | 0.005 | DiffusionGemma: the run may stop once the mean entropy over the canvas is below C (no effect yet, see the paragraph after the table) |
 | `--threads N` | all logical CPUs | worker threads of every parallel CPU loop, including the activation quantization and the weight repack at load (with `--device gpu`, only the sampler uses them) |
 | `--device D` | `cpu` | `cpu`, or `gpu` for an NVIDIA GPU with compute capability 8.0 or newer |
 | `--no-chat` | off | skip the chat template |
@@ -52,7 +52,7 @@ stops the run (see [Errors](#errors)).
 | `--visual-interval N` | 1 | redraw every N steps and at the final step; requires `--visual` and N at least 1 |
 | `--verbose` | off | model, device and load time before the text; step timings and peak memory after it |
 | `--dump-step-stats` | off | one line per denoising step |
-| `--json` | off | one JSON object with timings, tokens and text. `peak_rss_bytes` is `null` when the operating system could not report it, never 0. `remasking` names the strategy the run used (for Dream, `entropy` when the flag says `low_confidence`); `block_length` and `full_logits` appear for LLaDA only, because Dream reads neither. `steps_taken` counts the denoising steps run and `stop_reason` says why the loop ended: `complete`, `answer_fixed` (early stop), or for DiffusionGemma `converged` or `max_steps` |
+| `--json` | off | one JSON object with timings, tokens and text. `peak_rss_bytes` is `null` when the operating system could not report it, never 0. `remasking` names the strategy the run used (for Dream, `entropy` when the flag says `low_confidence`); `block_length` and `full_logits` appear for LLaDA only, because Dream reads neither. `steps_taken` counts the denoising steps run and `stop_reason` says why the loop ended: `complete`, `answer_fixed` (early stop), or for DiffusionGemma, once `run` accepts it (#277), `converged` or `max_steps` |
 
 The flags `--threshold`, `--dual-cache` and `--full-logits` are LLaDA's; a Dream run refuses them by name before the model loads (`--threshold applies to llada only, not dream`). Dream also reads no `--block-length`, but still accepts it, because the benchmark and parity scripts pass it for every architecture.
 
@@ -63,7 +63,7 @@ such a token, no later step can change the printed text, because steps only
 fill masked positions. The result is the same text with fewer steps, and
 `--json` reports `"stopped_early": true`. `--no-early-stop` runs every step.
 
-The `--eb-*` flags belong to DiffusionGemma and every other model refuses them by name. `run` itself refuses a DiffusionGemma file once its header is read, before the tokenizer is built, with `diffusion-gemma does not run on this model: ... use logits (CPU) until then` (the generation loop is wired to the model in #64), so the `--eb-*` flags have no effect yet; `run --help` says so. `logits` runs that architecture. DiffusionGemma's `--json` reports `"stopped_early": true` when the stop rule ended the run before `--eb-steps` steps.
+The `--eb-*` flags belong to DiffusionGemma and every other model refuses them by name. The parser accepts them, but `run` stops on a `diffusion-gemma` file until the model is wired into the generation loop (see [Introduction](introduction.md)). It refuses the file once its header is read, before the tokenizer is built, with ``diffusion-gemma does not run on this model: `run` waits for the model to be wired into the generation loop (#277), so use `logits` (CPU) until then``, so the `--eb-*` flags have no effect yet; `run --help` says so. Only `logits` runs that architecture. The forward pass (#64) and the entropy-bounded loop (#65) are written; #277 tracks joining them. Once it lands, DiffusionGemma's `--json` reports `"stopped_early": true` when the stop rule ends the run before `--eb-steps` steps.
 
 ### Visual output
 
