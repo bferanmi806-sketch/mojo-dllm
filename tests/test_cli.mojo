@@ -1448,8 +1448,8 @@ def test_the_block_and_step_split_is_checked_for_llada_only() raises:
         ),
         "llada",
     )
-    # Dream reads neither flag, and the benchmark scripts pass --block-length
-    # for every architecture: a run that was accepted stays accepted.
+    # Dream has no blocks: the flag check lets --block-length through (it is
+    # the architecture's job) and `check_arch_flags` refuses it for Dream.
     var dream = _arch_run_args(
         ["--max-tokens", "100", "--steps", "100", "--block-length", "32"]
     )
@@ -1471,7 +1471,10 @@ def test_the_block_and_step_split_is_checked_for_llada_only() raises:
         ),
         "",
     )
-    check_arch_flags(dream, "dream")
+    with assert_raises(
+        contains="--block-length applies to llada only, not dream"
+    ):
+        check_arch_flags(dream, "dream")
     # No --block-length: the default 32 depends on the architecture.
     with assert_raises(
         contains=(
@@ -1706,6 +1709,7 @@ def test_dream_refuses_the_flags_that_only_llada_reads() raises:
     cases.append(["--full-logits"])
     cases.append(["--threshold", "0.5"])
     cases.append(["--dual-cache"])
+    cases.append(["--block-length", "32"])
     for given in cases:
         var argv = List[String](["x", "run", "--prompt", "p"])
         for g in given:
