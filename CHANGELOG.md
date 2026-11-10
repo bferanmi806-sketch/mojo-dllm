@@ -6,6 +6,8 @@ semantic versioning (0.y: minor bumps may break things).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-10
+
 ### Added
 
 - `bench/engines/sglang.py`, an engine for `bench/eval_engine.py` that answers GSM8K through the OpenAI-compatible
