@@ -33,7 +33,7 @@ stops the run (see [Errors](#errors)).
 | `--prompt TEXT` | required | the user message |
 | `--max-tokens N` | 128 | tokens to generate (the masked canvas). The prompt tokens plus N must not exceed the file's `<arch>.context_length` (4096 when the key is absent); the check runs after the header is read and before any weight is mapped |
 | `--steps N` | `--max-tokens` | denoising steps; a multiple of the block count |
-| `--block-length N` | 32, or `--max-tokens` when that is smaller | LLaDA's semi-autoregressive block size; must divide `--max-tokens`. Dream ignores it |
+| `--block-length N` | 32, or `--max-tokens` when that is smaller | LLaDA's semi-autoregressive block size; must divide `--max-tokens`. A Dream run refuses it |
 | `--temperature T` | 0 | LLaDA: 0 is greedy; above 0 adds Gumbel noise as LLaDA does. Dream supports only 0 and stops with an error above it |
 | `--remasking S` | `low_confidence` | LLaDA: `low_confidence` or `random`. Dream: `entropy` (the default), `maskgit_plus`, `topk_margin` |
 | `--threshold P` | 0 (off) | A number from 0 to 1. LLaDA: each step also commits every masked token whose confidence is at least P, so easy blocks finish in fewer steps (Fast-dLLM's parallel decoding). A step still commits at least what the schedule says. Not exact: see [Benchmarks](benchmarks.md#steps-and-quality) for its measured effect on accuracy |
@@ -56,7 +56,7 @@ stops the run (see [Errors](#errors)).
 | `--dump-step-stats` | off | one line per denoising step |
 | `--json` | off | one JSON object with timings, tokens and text. `peak_rss_bytes` is `null` when the operating system could not report it, never 0. `remasking` names the strategy the run used (for Dream, `entropy` when the flag says `low_confidence`); `block_length` and `full_logits` appear for LLaDA only, because Dream reads neither. `steps_taken` counts the denoising steps run and `stop_reason` says why the loop ended: `complete`, `answer_fixed` (early stop), or for DiffusionGemma, once `run` accepts it (#277), `converged` or `max_steps` |
 
-The flags `--threshold`, `--dual-cache` and `--full-logits` are LLaDA's; a Dream run refuses them by name before the model loads (`--threshold applies to llada only, not dream`). Dream also reads no `--block-length`, but still accepts it, because the benchmark and parity scripts pass it for every architecture.
+The flags `--threshold`, `--dual-cache`, `--full-logits` and `--block-length` are LLaDA's; a Dream run refuses them by name before the model loads (`--threshold applies to llada only, not dream`).
 
 The printed answer ends at the first end-of-text or end-of-turn token in the
 canvas. Generation stops as soon as that answer is final: once the first

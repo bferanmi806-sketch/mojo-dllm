@@ -604,7 +604,7 @@ def eb_flags() -> List[String]:
 
 def llada_only_flags() -> List[String]:
     """The flags Dream accepts on the command line and never reads."""
-    return ["full-logits", "threshold", "dual-cache"]
+    return ["full-logits", "threshold", "dual-cache", "block-length"]
 
 
 def sampler_json(arch: String, cfg: GenConfig) -> String:
@@ -661,8 +661,6 @@ def check_arch_flags(a: Args, arch: String) raises:
                 "--remasking random does not apply to dream (entropy,"
                 " maskgit_plus or topk_margin; low_confidence means entropy)"
             )
-        # `--block-length` is read by LLaDA only too, but the benchmark and
-        # parity scripts pass it for every architecture, so it is not refused.
         for flag in llada_only_flags():
             if a.has(flag):
                 raise Error("--" + flag + " applies to llada only, not " + arch)

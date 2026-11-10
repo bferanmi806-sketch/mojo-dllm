@@ -174,6 +174,9 @@ semantic versioning (0.y: minor bumps may break things).
 
 ### Changed
 
+- A Dream run refuses `--block-length` by name (`--block-length applies to llada only, not dream`) before the model loads (#206).
+  Dream has no blocks and never read it; the benchmark, parity, dispatch and profile scripts stopped passing it for Dream in the part 2
+  fixes, so the refusal no longer breaks them.
 - `bench/parity.py --phase compare` for DiffusionGemma refuses a partial or stale case set (issue #231). It requires
   `case0` to `case{N-1}` for the N entries of `LOGIT_CASES` with each prompt equal to the file's, and
   `bench/check_dg_bound.py` uses the same check. Each `<variant>.mojo.f32` needs a `.mojo.f32.json` sidecar with the
