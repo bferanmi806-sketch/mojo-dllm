@@ -44,14 +44,23 @@ def test_the_record_holds_size_mtime_and_sha256_under_the_resolved_path(tmp_path
     assert VerifiedStore(state).is_verified(blob)
 
 
-def test_a_changed_size_or_mtime_unverifies_the_file(tmp_path: Path) -> None:
+def test_a_changed_mtime_alone_unverifies_the_file(tmp_path: Path) -> None:
     state, blob = tmp_path / "verified.json", _blob(tmp_path)
     store = VerifiedStore(state)
     store.record(blob, SHA)
-    os.utime(blob, ns=(1, blob.stat().st_mtime_ns + 1_000_000))
-    assert not store.is_verified(blob)
+    stat = blob.stat()
+    os.utime(blob, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000))
+    assert blob.stat().st_size == stat.st_size and not store.is_verified(blob)
+
+
+def test_a_changed_size_alone_unverifies_the_file(tmp_path: Path) -> None:
+    state, blob = tmp_path / "verified.json", _blob(tmp_path)
+    store = VerifiedStore(state)
     store.record(blob, SHA)
+    stat = blob.stat()
     blob.write_bytes(b"1234567")
+    os.utime(blob, ns=(stat.st_atime_ns, stat.st_mtime_ns))  # the write moved the mtime: put it back
+    assert blob.stat().st_mtime_ns == stat.st_mtime_ns and blob.stat().st_size != stat.st_size
     assert not store.is_verified(blob)
 
 
