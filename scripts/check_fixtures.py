@@ -37,8 +37,8 @@ NOT_GENERATED = (
 # compare by value within RTOL and ATOL; a changed generator or a hand edit moves values far beyond that.
 FLOAT_SUFFIXES = (".f32",)
 FLOAT_TSV = ("entropy-rows.tsv",)
-RTOL = 1e-4
-ATOL = 1e-6
+RTOL = 1e-3
+ATOL = 1e-5
 
 
 class GeneratorFailed(Exception):

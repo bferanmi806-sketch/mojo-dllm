@@ -495,7 +495,7 @@ semantic versioning (0.y: minor bumps may break things).
   `scripts/gen_fixtures.py` and `scripts/gen_moe_fixture.py` into a scratch directory (they read `FIXTURES_OUT`) and
   fails on a file that differs by one byte, a generated file that is not tracked, or a tracked fixture that no
   generator writes and that is not a tokenizer fixture, a tokenizer golden or `golden-generation.tsv`. The float32 files (`*.f32`, `entropy-rows.tsv`) compare
-  by value within 1e-4 relative, because a BLAS on another CPU sums in another order and the CI runner regenerated
+  by value (1e-3 relative or 1e-5 absolute; another OpenBLAS core type moved tiny-llada by 4.5e-6), because a BLAS on another CPU sums in another order and the CI runner regenerated
   different last bits than the laptop; every other file regenerates byte for byte (all 239 files pass today). The LLaDA and Dream tokenizer goldens now have the provenance file the gemma4 golden
   had (llama.cpp commit, model file and sha256, command, golden sha256), written by `scripts/gen_tokenizer_fixture.py
   --golden-only`; regenerating them from the local models gave the committed bytes. `scripts/run-tests.sh` drops an
