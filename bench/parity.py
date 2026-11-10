@@ -563,7 +563,8 @@ def main() -> int:
     for case in GEN_CASES:
         toks = tokenize(args.model, case.prompt)
         out = run([str(ROOT / "build/mojo-dllm"), "run", "--model", args.model, "--prompt", case.prompt,
-                   "--max-tokens", str(case.gen), "--block-length", str(case.block),
+                   "--max-tokens", str(case.gen),
+                   *([] if args.arch == "dream" else ["--block-length", str(case.block)]),   # Dream has no blocks
                    "--steps", str(case.steps), "--threads", args.threads, "--device", args.device, "--json",
                    "--no-early-stop"])
         j = json.loads(next(l for l in out.splitlines() if l.startswith("{")))

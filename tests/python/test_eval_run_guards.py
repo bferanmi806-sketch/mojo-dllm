@@ -82,3 +82,11 @@ def test_the_default_timeout_is_the_engine_runners() -> None:
     import eval_engine
 
     assert eval_gsm8k.DEFAULT_TIMEOUT_S == eval_engine.DEFAULT_TIMEOUT_S == 1800.0
+
+
+def test_a_dream_arm_does_not_pass_block_length_and_a_llada_arm_does(gsm8k: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    assert run_gsm8k(monkeypatch, gsm8k, "--arch", "dream", arm="d1") == 0
+    assert run_gsm8k(monkeypatch, gsm8k, arm="l1") == 0
+    dream = json.loads((gsm8k / "runs/d1.jsonl").read_text().splitlines()[0])["flags"]
+    llada = json.loads((gsm8k / "runs/l1.jsonl").read_text().splitlines()[0])["flags"]
+    assert "--block-length" not in dream and "--block-length" in llada

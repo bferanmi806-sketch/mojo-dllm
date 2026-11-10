@@ -314,3 +314,30 @@ def test_a_finished_run_writes_the_fields_the_committed_files_carry(
     assert g["matching_tokens"] == 3 and g["first_divergence"] == 3
     g.pop("mojo_text")
     assert ps.generation_problems(dict(g, mojo_text="t"), "g") == [], "the stubbed run's own record is consistent"
+
+
+@pytest.mark.parametrize("arch,passes", [("dream", False), ("llada", True)])
+def test_block_length_is_passed_to_mojo_only_for_blocked_models(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, arch: str, passes: bool
+) -> None:
+    from types import ModuleType
+
+    monkeypatch.setattr(parity, "ROOT", tmp_path)
+    monkeypatch.setattr(parity, "LOGIT_CASES", [])
+    monkeypatch.setattr(parity, "GEN_CASES", [parity.GenCase("p", 2, 2, 2)])
+    monkeypatch.setattr(parity, "tokenize", lambda model, prompt: [1])
+    cmds: list[list[str]] = []
+
+    def fake_run(cmd: list[str]) -> str:
+        cmds.append(cmd)
+        if "run" in cmd:
+            return json.dumps({"text": "t", "tokens": [1, 5, 6]}) + "\n"
+        return "1,5,6\n"
+
+    monkeypatch.setattr(parity, "run", fake_run)
+    monkeypatch.setattr(parity, "validate_parity", lambda d: None)
+    monkeypatch.setitem(sys.modules, "numpy", ModuleType("numpy"))
+    monkeypatch.setattr(sys, "argv", ["parity.py", "--model", "m.gguf", "--arch", arch])
+    assert parity.main() == 0
+    (mojo,) = [c for c in cmds if "run" in c]
+    assert ("--block-length" in mojo) is passes

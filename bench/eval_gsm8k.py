@@ -3,7 +3,7 @@
 
 usage:
   python3 bench/eval_gsm8k.py run --model M.gguf --arm NAME [--device gpu] [--gen-length 256]
-                                  [--block-length 32] [--steps N] [--limit K] [--timeout-s 1800]
+                                  [--block-length 32] [--arch llada|dream] [--steps N] [--limit K] [--timeout-s 1800]
                                   [-- extra mojo-dllm flags]
   python3 bench/eval_gsm8k.py compare ARM_A ARM_B [--across-weights] [--force]
   python3 bench/eval_gsm8k.py --self-test
@@ -192,7 +192,8 @@ def cmd_run(args: argparse.Namespace, extra: list[str]) -> int:
     RUNS.mkdir(parents=True, exist_ok=True)
     out = RUNS / f"{args.arm}.jsonl"
     steps = args.steps or args.gen_length
-    flags = ["--max-tokens", str(args.gen_length), "--block-length", str(args.block_length),
+    flags = ["--max-tokens", str(args.gen_length),
+             *([] if args.arch == "dream" else ["--block-length", str(args.block_length)]),   # Dream has no blocks
              "--steps", str(steps), "--device", args.device, "--json"] + extra
     version = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--short", "HEAD"],
                              capture_output=True, text=True).stdout.strip()
@@ -413,6 +414,8 @@ def main() -> int:
     r.add_argument("--device", default="gpu")
     r.add_argument("--gen-length", type=int, default=256)
     r.add_argument("--block-length", type=int, default=32)
+    r.add_argument("--arch", choices=["llada", "dream"], default="llada",
+                   help="dream: do not pass --block-length (Dream has no blocks and ignores it)")
     r.add_argument("--steps", type=int, default=0)
     r.add_argument("--limit", type=int, default=0)
     r.add_argument("--allow-battery", action="store_true", help="answer on battery instead of pausing")

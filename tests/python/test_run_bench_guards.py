@@ -142,3 +142,30 @@ def test_the_summary_median_of_passes_covers_only_the_measured_rows() -> None:
                    peak_rss_bytes=1)] * 2]
     sm = rb.summarize_runs(runs, ["mojo", "llama"], 32)
     assert sm["mojo"]["forward_passes_median"] == 32 and sm["llama"]["forward_passes_median"] is None
+
+
+def mojo_cmd(monkeypatch: pytest.MonkeyPatch, cfg: dict) -> list[str]:
+    seen: list[list[str]] = []
+
+    def fake_timed(cmd: list[str]) -> tuple[int, str, str, float, int]:
+        seen.append(cmd)
+        return 0, mojo_stdout(), "", 2.0, 1000
+
+    monkeypatch.setattr(rb, "timed", fake_timed)
+    assert rb.run_mojo(cfg, "p", 4, [], 5)["ok"]
+    return seen[0]
+
+
+def test_a_dream_run_does_not_pass_block_length(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert "--block-length" not in mojo_cmd(monkeypatch, {**CFG, "arch": "dream"})
+    for name in ("config-dream.json", "config-dream-gpu.json"):
+        cfg = json.loads((ROOT / "bench" / name).read_text())
+        assert cfg["arch"] == "dream"
+        assert "--block-length" not in mojo_cmd(monkeypatch, {**CFG, **{k: cfg[k] for k in ("arch",)}})
+
+
+def test_a_llada_run_still_passes_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    cmd = mojo_cmd(monkeypatch, CFG)
+    assert cmd[cmd.index("--block-length") + 1] == "32"
+    cfg = json.loads((ROOT / "bench/config.json").read_text())
+    assert "arch" not in cfg, "the LLaDA configs keep their committed shape"
