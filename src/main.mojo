@@ -46,7 +46,7 @@ from mojo_dllm.sys.mmap import Mapping
 from mojo_dllm.tokenizer.bpe import Tokenizer
 from mojo_dllm.tokenizer.gemma4 import gemma4_chat_prompt
 
-comptime VERSION = "0.1.0"
+comptime VERSION = "0.2.0"
 
 
 struct CommandSpec(Movable):

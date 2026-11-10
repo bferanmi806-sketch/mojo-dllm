@@ -112,11 +112,11 @@ GitHub Pages on pushes to `main` that touch `docs/`, `book.toml`, `theme/` or
 | M4 | LLaDA forward, logit parity with llama.cpp |
 | M5 | tokenizer, scheduler, `mojo-dllm run` |
 | M6 | threading and SIMD tuning, benchmark report vs llama.cpp and diffuse-cpp |
-| M7 | NVIDIA backend (`--device gpu`), on `main` after 0.1.0 |
+| M7 | NVIDIA backend (`--device gpu`), shipped in 0.2.0 |
 | M8 | Dream-7B, shipped in 0.1.0 |
 | later | block diffusion; inter-step caching beyond `--dual-cache` |
 
-M0 to M6 and M8 shipped in 0.1.0. M7 is on `main`.
+M0 to M6 and M8 shipped in 0.1.0. M7 shipped in 0.2.0.
 
 The repository went public after M6, with parity documented and the license of
 shipped binaries reviewed (Modular runtime libraries are not Apache; `NOTICE`
