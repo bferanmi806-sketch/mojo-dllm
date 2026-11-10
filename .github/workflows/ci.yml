@@ -38,12 +38,13 @@ jobs:
       - name: Launcher tests
         run: uv run --frozen --only-group test pytest tests/python -q
 
-      - name: parity.compare on known values (numpy, the fixtures group)
-        # A skip here means numpy was missing and nothing ran, so a skipped test fails the step.
+      - name: Tests that need the fixtures and lint groups (numpy, gguf, PyYAML)
+        # Each of these files skips itself when a package is missing, so a skip here means nothing ran: it fails.
         run: |
           rc=0
-          out="$(uv run --frozen --only-group test --only-group fixtures \
-            pytest tests/python/test_parity_compare.py -q -rs 2>&1)" || rc=$?
+          out="$(uv run --frozen --only-group test --only-group fixtures --only-group lint \
+            pytest tests/python/test_parity_compare.py tests/python/test_action_pins.py \
+            tests/python/test_dg_bound.py -q -rs 2>&1)" || rc=$?
           printf '%s\n' "$out"
           [ "$rc" -eq 0 ] && ! grep -q 'skipped' <<<"$out"
 

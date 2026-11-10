@@ -133,3 +133,71 @@ def test_the_total_pin_still_fails_on_its_own(tree: Tree) -> None:
 def test_the_pin_file_order_does_not_matter(tree: Tree) -> None:
     tree.pin(5, "test_b 2\ntest_a 3\n")
     assert tree.run().returncode == 0
+
+
+# the refusals of #251 ---------------------------------------------------------------------------------------
+
+def refused_run(tree: Tree, declaration: str, *words: str) -> None:
+    tree.test_file("test_bad", declaration)
+    p = tree.run()
+    assert p.returncode == 1, (p.stdout, p.stderr)
+    assert "OK:" not in p.stdout
+    for w in words:
+        assert w in p.stderr, (w, p.stderr)
+
+
+def test_a_file_that_runs_zero_tests_is_refused(tree: Tree) -> None:
+    refused_run(tree, "# tests: 0", "test_bad (rc=0, passed=0, failed=0)")
+
+
+def test_a_failing_test_is_refused_and_named(tree: Tree) -> None:
+    refused_run(tree, "# fails", "test_bad (rc=1, passed=2, failed=1)", "FAIL: one")
+
+
+def test_a_run_that_exits_non_zero_with_all_tests_passed_is_refused(tree: Tree) -> None:
+    refused_run(tree, "# exit-1-all-passed", "test_bad (rc=1, passed=3, failed=0)")
+
+
+def test_a_run_with_no_summary_line_is_refused(tree: Tree) -> None:
+    refused_run(tree, "# no-summary", "test_bad (rc=0, passed=?, failed=?)")
+
+
+def test_a_file_that_does_not_build_is_refused_and_its_error_is_shown(tree: Tree) -> None:
+    refused_run(tree, "# build-fails", "test_bad (build)", "error: boom")
+
+
+def test_one_bad_file_does_not_hide_the_others_and_no_pin_is_written(tree: Tree) -> None:
+    tree.test_file("test_bad", "# fails")
+    before = tree.pinned("test-count.txt")
+    p = tree.run(UPDATE_TEST_COUNT="1")
+    assert p.returncode == 1 and "  test_a" in p.stdout and tree.pinned("test-count.txt") == before
+
+
+def test_no_test_files_is_refused(tree: Tree) -> None:
+    for f in (tree.root / "tests").glob("test_*.mojo"):
+        f.unlink()
+    p = tree.run()
+    assert p.returncode == 1 and "no test files found under tests/" in p.stderr
+
+
+def test_the_test_dir_seam_selects_another_directory_with_its_own_pins(tree: Tree) -> None:
+    other = tree.root / "gpu"
+    other.mkdir()
+    (other / "test_g.mojo").write_text("# tests: 4\n")
+    (other / "test-count.txt").write_text("4\n")
+    (other / "test-counts.txt").write_text("test_g 4\n")
+    p = tree.run(TEST_DIR=str(other))
+    assert p.returncode == 0 and "OK: 4 tests passed (pinned 4)" in p.stdout
+    (other / "test-count.txt").write_text("5\n")
+    assert tree.run(TEST_DIR=str(other)).returncode == 1
+
+
+def test_a_missing_total_pin_is_a_failure(tree: Tree) -> None:
+    tree.pin(None, "test_a 3\ntest_b 2\n")
+    p = tree.run()
+    assert p.returncode == 1 and "pins missing" in p.stderr
+
+
+def test_the_pin_file_may_not_name_a_count_of_zero_for_a_file_that_ran(tree: Tree) -> None:
+    tree.pin(5, "test_a 0\ntest_b 2\n")
+    assert tree.run().returncode == 1
