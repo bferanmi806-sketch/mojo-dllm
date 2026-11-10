@@ -319,7 +319,7 @@ answer right (`bench/eval_gsm8k.py`, see [Development](development.md)):
 | dualcache | 81.5% | +1.0 pt | -4.4 to +6.4 pt | 14 / 16 | 0.86 | 236.6 | 15.8 s |
 | threshold09 | 80.0% | -0.5 pt | -2.2 to +1.2 pt | 2 / 1 | 1.00 | 73.4 | 24.1 s |
 
-Discordant counts problems only the baseline solved / only the arm solved. Time per problem is the mean over the first 50 problems of each arm, a round that ran with nothing else on the machine.
+Discordant counts problems only the baseline solved / only the arm solved. Time per problem is the mean over the first 50 problems of each arm. These rounds carry no isolation record, so nothing here shows that the machine was otherwise idle.
 
 Evidence: `bench/eval/2026-10-29-baseline-vs-dualcache.json`, `bench/eval/2026-10-29-baseline-vs-threshold09.json`, `bench/eval/2026-10-29-baseline-vs-dualcache-first50.json`, `bench/eval/2026-10-29-baseline-vs-threshold09-first50.json`.
 <!-- eval:end -->

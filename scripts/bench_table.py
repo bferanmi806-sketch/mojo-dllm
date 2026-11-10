@@ -400,10 +400,33 @@ def quality() -> str:
     return "\n".join(out)
 
 
+def count(v: object, spec: str = ".1f") -> str:
+    """A count or a mean for a table cell; `n/a` for a null (an engine that does not count forward passes)."""
+    return "n/a" if v is None else format(v, spec)
+
+
+def isolation_sentence(docs: list[dict]) -> str:
+    """What the timed rounds say about the machine they ran on, from their own `noisy_rows` and `unchecked_rows`.
+
+    A document written before isolation windows existed has neither key: nothing records that the machine
+    was otherwise idle, and the sentence says so instead of claiming it.
+    """
+    recorded = [d for d in docs if "noisy_rows" in d and "unchecked_rows" in d]
+    if len(recorded) < len(docs):
+        return ("These rounds carry no isolation record, so nothing here shows that the machine was otherwise "
+                "idle.")
+    noisy = sum(sum(d["noisy_rows"].values()) for d in docs)
+    unchecked = sum(sum(d["unchecked_rows"].values()) for d in docs)
+    if noisy == 0 and unchecked == 0:
+        return "Every timed problem ran in an isolation window that came back clean."
+    return (f"Isolation: {noisy} noisy and {unchecked} unchecked problem rows across the timed arms; "
+            "times average over the clean rows only where the table says so.")
+
+
 def eval_table() -> str:
     """GSM8K paired comparisons from bench/eval/*-vs-*.json. Accuracy comes from the
-    full comparison; time per problem from the `--limit` one, a round that had the
-    machine to itself (generate_s in the other rounds carries whatever else ran)."""
+    full comparison; time per problem from the `--limit` one, the shorter round
+    (generate_s in the other rounds carries whatever else ran)."""
     full: dict[tuple, tuple] = {}
     timed: dict[tuple, tuple] = {}
     for f in sorted((ROOT / "bench" / "eval").glob("*-vs-*.json")):
@@ -424,7 +447,10 @@ def eval_table() -> str:
     def secs(pair: tuple, arm: str) -> str:
         if pair not in timed:
             return "not measured"
-        return f"{timed[pair][1]['generate_s_mean'][arm]:.1f} s"
+        d = timed[pair][1]
+        clean = (d.get("generate_s_mean_clean") or {}).get(arm)
+        mean = d["generate_s_mean"][arm] if clean is None and "generate_s_mean_clean" not in d else clean
+        return "no clean row" if mean is None else f"{mean:.1f} s"
 
     any_pair = next(iter(full))
     out = [
@@ -434,26 +460,34 @@ def eval_table() -> str:
         "| Arm | accuracy | vs baseline | 95% CI | discordant | McNemar p | passes / problem | time / problem |",
         "|---|---:|---:|---:|---:|---:|---:|---:|",
         f"| {base} | {first['accuracy'][base]:.1%} | | | | | "
-        f"{first['forward_passes_mean'][base]:.1f} | {secs(any_pair, base)} |",
+        f"{count(first['forward_passes_mean'][base])} | {secs(any_pair, base)} |",
     ]
+    other_weights: list[str] = []
     for pair, (f, d) in full.items():
         arm = pair[1]
         lo, hi = d["ci95"]
+        if d.get("weights_differ"):
+            other_weights.append(f"{arm} ran {d['models'][arm]}, the baseline {d['models'][base]}")
+            arm_cell = f"{arm} \u2021"
+        else:
+            arm_cell = arm
         out.append(
-            f"| {arm} | {d['accuracy'][arm]:.1%} | {d['difference'] * 100:+.1f} pt | "
+            f"| {arm_cell} | {d['accuracy'][arm]:.1%} | {d['difference'] * 100:+.1f} pt | "
             f"{lo * 100:+.1f} to {hi * 100:+.1f} pt | {d['discordant']['a_only']} / {d['discordant']['b_only']} | "
-            f"{d['mcnemar_p']:.2f} | {d['forward_passes_mean'][arm]:.1f} | {secs(pair, arm)} |"
+            f"{d['mcnemar_p']:.2f} | {count(d['forward_passes_mean'][arm])} | {secs(pair, arm)} |"
         )
     limits = sorted({d["limit"] for _, d in timed.values()})
     files = [f for f, _ in full.values()] + [f for f, _ in timed.values()]
     out += [
         "",
         f"Discordant counts problems only the baseline solved / only the arm solved. Time per problem is "
-        f"the mean over the first {', '.join(map(str, limits))} problems of each arm, a round that ran with "
-        "nothing else on the machine.",
+        f"the mean over the first {', '.join(map(str, limits))} problems of each arm. "
+        + isolation_sentence([d for _, d in timed.values()]),
         "",
         "Evidence: " + ", ".join(f"`bench/eval/{f.name}`" for f in files) + ".",
     ]
+    if other_weights:
+        out[-3:-3] = ["", "\u2021 " + "; ".join(other_weights) + ": the accuracy difference includes the weights."]
     return "\n".join(out)
 
 
