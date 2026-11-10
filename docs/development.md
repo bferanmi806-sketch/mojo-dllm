@@ -315,3 +315,50 @@ The Python scripts run through uv too. `uv run --no-project python script.py`
 runs a script that uses only the standard library. The fixture generators and
 `bench/parity.py` need numpy and gguf, pinned in the `fixtures` group:
 `uv run --only-group fixtures python scripts/gen_fixtures.py`.
+
+## Releasing
+
+A release is a version bump, a dated CHANGELOG section, a tag and a GitHub
+release. Pushing the tag and creating the release need write access to the
+repository. `X.Y.Z` stands for the new version.
+
+1. Check that CI is green on the commit of `main` that you ship.
+2. In `CHANGELOG.md`, rename `## [Unreleased]` to `## [X.Y.Z] - YYYY-MM-DD`
+   and add an empty `## [Unreleased]` above it.
+3. Set the version in the three places that carry it: `version` under
+   `[project]` in `pyproject.toml`, `comptime VERSION` in `src/main.mojo`,
+   and `uv.lock`. Run `uv lock` for the third; its diff is one line, the
+   `version` of the `mojo-dllm` entry. Result files under `bench/` record the
+   version of the binary that produced them; leave them.
+4. Run `scripts/ci-local.sh`. On a machine with an NVIDIA GPU also run
+   `scripts/run-gpu-tests.sh`, because CI builds the GPU suite and does not
+   run it.
+5. Commit the files that steps 2 and 3 changed (`CHANGELOG.md`,
+   `pyproject.toml`, `src/main.mojo`, `uv.lock`) with the subject
+   `Release X.Y.Z`, together with any other file that still names the old
+   version or milestone as current (for example `docs/plan.md`). Get the
+   commit onto `main`.
+6. Tag that commit. The existing tag `v0.1.0` is annotated and not signed:
+
+   ```bash
+   git tag -a vX.Y.Z -m "mojo-dllm X.Y.Z"
+   ```
+
+   For a signed tag use `git tag -s vX.Y.Z -m "mojo-dllm X.Y.Z"` and check it
+   with `git tag -v vX.Y.Z`.
+7. Push the tag with `git push origin vX.Y.Z`. Check from the remote side that
+   it arrived: `git ls-remote origin 'refs/tags/vX.Y.Z^{}'` prints the commit
+   that `git rev-parse 'vX.Y.Z^{commit}'` prints.
+8. Create the GitHub release with the CHANGELOG section as its notes. Skip this
+   step once the release workflow exists (#131): pushing the tag in step 7
+   then creates the release.
+
+   ```bash
+   notes="$(mktemp)"
+   awk -v v="X.Y.Z" '/^## \[/ { p = (index($0, "## [" v "]") == 1); next } p' CHANGELOG.md > "$notes"
+   test -s "$notes"
+   gh release create vX.Y.Z --verify-tag --title "mojo-dllm X.Y.Z" --notes-file "$notes"
+   ```
+
+   `test -s` stops the sequence when the section is missing or empty.
+   `gh release view vX.Y.Z` shows the result.
