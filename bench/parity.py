@@ -34,6 +34,7 @@ import pathlib
 import random
 import re
 import subprocess
+import sys
 import tempfile
 from typing import TYPE_CHECKING, Callable, NamedTuple
 
@@ -41,6 +42,9 @@ if TYPE_CHECKING:
     import numpy as np
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "bench"))
+import atomic_write  # noqa: E402  (bench/atomic_write.py)
+
 SPECS = {"llada": dict(vocab=126464, mask=126336), "dream": dict(vocab=152064, mask=151666)}
 
 class LogitCase(NamedTuple):
@@ -445,6 +449,8 @@ def dgemma_main(args: argparse.Namespace) -> int:
     llama_src = pathlib.Path(args.llama_src).expanduser()
     if args.phase == "ref":
         return dg_reference(args, workdir, llama_src)
+    out = result_path(args.model, DG_ARCH, "cpu", dt.date.today())
+    atomic_write.refuse_existing(out, args.force)   # before the comparison, not after it
     bound = llada_bound(ROOT)
     entries, violations = dg_compare(workdir, bound)
     for e in entries:
@@ -464,9 +470,7 @@ def dgemma_main(args: argparse.Namespace) -> int:
         reference="llama.cpp libllama (ggml-org/llama.cpp#24423 branch) via tools/ref/dg_ref.cpp",
         model_sha256=meta["model_sha256"], bound=bound, logits=entries, generation=[],
     )
-    out = result_path(args.model, DG_ARCH, "cpu", dt.date.today())
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n")
+    atomic_write.write_new(out, json.dumps(doc, indent=2, ensure_ascii=False) + "\n", args.force)
     print(f"wrote {out.relative_to(ROOT)}")
     return 0
 
@@ -481,6 +485,7 @@ def main() -> int:
     ap.add_argument("--ref2", default=None, help="a second reference binary, logits only")
     ap.add_argument("--ref2-label", default="llama.cpp CUDA")
     ap.add_argument("--phase", choices=["ref", "compare"], default=None, help="DiffusionGemma only; see the docstring")
+    ap.add_argument("--force", action="store_true", help="replace an existing result file of the same name")
     ap.add_argument("--llama-src", default="~/src/llama.cpp-diffusion-gemma",
                     help="DiffusionGemma only: the checkout scripts/build_dg_ref.sh built")
     args = ap.parse_args()
@@ -494,6 +499,8 @@ def main() -> int:
         ap.error("--phase applies to --arch diffusion-gemma only")
     if args.ref is None:
         args.ref = str(ROOT / "build/llada_ref")
+    result_file = result_path(args.model, args.arch, args.device, dt.date.today())
+    atomic_write.refuse_existing(result_file, args.force)   # before the model runs: a refusal afterwards discards them
     import numpy as np
 
     VOCAB = SPECS[args.arch]["vocab"]
@@ -557,10 +564,8 @@ def main() -> int:
                reference="llama.cpp libllama via tools/ref/llada_ref.cpp", logits=logits, generation=gens)
     if args.ref2:
         doc["reference2"] = args.ref2_label
-    out = result_path(args.model, args.arch, args.device, dt.date.today())
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n")
-    print(f"wrote {out.relative_to(ROOT)}")
+    atomic_write.write_new(result_file, json.dumps(doc, indent=2, ensure_ascii=False) + "\n", args.force)
+    print(f"wrote {result_file.relative_to(ROOT)}")
     return 0
 
 

@@ -5,7 +5,7 @@ usage:
   python3 bench/eval_gsm8k.py run --model M.gguf --arm NAME [--device gpu] [--gen-length 256]
                                   [--block-length 32] [--steps N] [--limit K] [--timeout-s 1800]
                                   [-- extra mojo-dllm flags]
-  python3 bench/eval_gsm8k.py compare ARM_A ARM_B [--across-weights]
+  python3 bench/eval_gsm8k.py compare ARM_A ARM_B [--across-weights] [--force]
   python3 bench/eval_gsm8k.py --self-test
 
 `run` answers the 200 problems in bench/eval/gsm8k-200.jsonl with `mojo-dllm
@@ -55,6 +55,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 DATA = ROOT / "bench" / "eval" / "gsm8k-200.jsonl"
 RUNS = ROOT / "bench" / "eval" / "runs"
 sys.path.insert(0, str(ROOT / "bench"))
+import atomic_write  # noqa: E402  (bench/atomic_write.py)
 import isolation  # noqa: E402  (bench/isolation.py)
 import power  # noqa: E402  (bench/power.py)
 
@@ -305,7 +306,7 @@ def clean_summary(A: dict[int, dict], B: dict[int, dict], common: list[int],
             "noisy_rows": {na: noisy(A), nb: noisy(B)}, "unchecked_rows": {na: unchecked(A), nb: unchecked(B)}}
 
 
-def cmd_compare(a_name: str, b_name: str, limit: int = 0, across_weights: bool = False) -> int:
+def cmd_compare(a_name: str, b_name: str, limit: int = 0, across_weights: bool = False, force: bool = False) -> int:
     A, B = first_rows(load_arm(a_name), limit), first_rows(load_arm(b_name), limit)
     ca, cb = arm_config(a_name, A), arm_config(b_name, B)
     weights_differ = ca["model"] != cb["model"]
@@ -342,9 +343,7 @@ def cmd_compare(a_name: str, b_name: str, limit: int = 0, across_weights: bool =
     )
     suffix = f"-first{limit}" if limit else ""
     out = ROOT / "bench" / "eval" / f"{dt.date.today().isoformat()}-{a_name}-vs-{b_name}{suffix}.json"
-    if out.exists():
-        raise SystemExit(f"{out.relative_to(ROOT)} exists; move it aside, or it is yesterday's evidence")
-    out.write_text(json.dumps(doc, indent=2) + "\n")
+    atomic_write.write_new(out, json.dumps(doc, indent=2) + "\n", force)
     print(json.dumps({k: doc[k] for k in ("problems", "models", "weights_differ", "accuracy", "difference", "ci95", "ci95_method", "discordant",
                                            "mcnemar_p", "forward_passes_mean", "forward_passes_rows",
                                            "generate_s_mean", "generate_s_mean_clean", "clean_rows",
@@ -411,13 +410,14 @@ def main() -> int:
     c.add_argument("a")
     c.add_argument("b")
     c.add_argument("--limit", type=int, default=0, help="compare only each arm's first N problems in run order")
+    c.add_argument("--force", action="store_true", help="replace an existing output file of the same name")
     c.add_argument("--across-weights", action="store_true",
                    help="compare arms that ran different model files (a GGUF against bf16 weights); the output says "
                         "weights_differ and an accuracy difference then includes quantization")
     args = ap.parse_args(argv)
     if args.cmd == "run":
         return cmd_run(args, extra)
-    return cmd_compare(args.a, args.b, args.limit, args.across_weights)
+    return cmd_compare(args.a, args.b, args.limit, args.across_weights, args.force)
 
 
 if __name__ == "__main__":

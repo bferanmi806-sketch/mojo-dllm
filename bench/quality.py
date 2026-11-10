@@ -25,6 +25,7 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "bench"))
+import atomic_write  # noqa: E402  (bench/atomic_write.py)
 import power  # noqa: E402  (bench/power.py)
 
 PROMPTS = [
@@ -46,8 +47,12 @@ def main() -> int:
     ap.add_argument("--gen", type=int, default=128)
     ap.add_argument("--threads", default="12")
     ap.add_argument("--allow-battery", action="store_true", help="measure on battery instead of pausing")
+    ap.add_argument("--force", action="store_true", help="replace an existing result file of the same name")
     args = ap.parse_args()
     model = os.path.expanduser(args.model)
+    name = pathlib.Path(model).name.replace(".gguf", "")
+    out_path = ROOT / "bench" / "quality" / f"{dt.date.today().isoformat()}-{name}.json"
+    atomic_write.refuse_existing(out_path, args.force)   # before the runs, not after them
     rows = []
     for prompt in PROMPTS:
         for steps in [int(s) for s in args.steps.split(",")]:
@@ -68,12 +73,9 @@ def main() -> int:
             ))
             print(f"steps {steps:4d}  {j['generate_s']:7.1f} s  repeats {rows[-1]['repeated_words']}  {j['text'][:80]!r}")
     git = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--short", "HEAD"], capture_output=True, text=True)
-    name = pathlib.Path(model).name.replace(".gguf", "")
     doc = dict(date=dt.datetime.now().isoformat(timespec="seconds"), model=pathlib.Path(model).name,
                versions={"mojo-dllm": git.stdout.strip()}, gen_length=args.gen, threads=args.threads, runs=rows)
-    out_path = ROOT / "bench" / "quality" / f"{dt.date.today().isoformat()}-{name}.json"
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n")
+    atomic_write.write_atomic(out_path, json.dumps(doc, indent=2, ensure_ascii=False) + "\n")
     print(f"wrote {out_path.relative_to(ROOT)}")
     return 0
 

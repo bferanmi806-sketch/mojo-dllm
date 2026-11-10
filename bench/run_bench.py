@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """End-to-end benchmark: mojo-dllm vs llama.cpp vs diffuse-cpp on LLaDA-8B Q4_K_M.
 
-usage: python3 bench/run_bench.py --config bench/config.json [--reps 3] [--out bench/results/NAME.json]
+usage: python3 bench/run_bench.py --config bench/config.json [--reps 3] [--out bench/results/NAME.json] [--force]
 
 Every runtime does the same work per prompt: a canvas of L = P + G tokens
 (P prompt tokens, G generated), and the same number of full-canvas forward
@@ -52,6 +52,7 @@ from typing import Callable
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "bench"))
+import atomic_write  # noqa: E402  (bench/atomic_write.py)
 import isolation  # noqa: E402  (bench/isolation.py)
 import power  # noqa: E402  (bench/power.py)
 
@@ -408,6 +409,7 @@ def main() -> int:
     ap.add_argument("--reps", type=int, default=3)
     ap.add_argument("--out", default=None)
     ap.add_argument("--only", default="", help="comma list of runtimes to run")
+    ap.add_argument("--force", action="store_true", help="replace an existing result file of the same name")
     ap.add_argument("--allow-battery", action="store_true",
                     help="measure on battery instead of pausing (each run records on_battery)")
     ap.add_argument("--allow-noisy", action="store_true",
@@ -436,6 +438,7 @@ def main() -> int:
     arm = None
     results: list[dict] = []
     out_path = pathlib.Path(args.out or ROOT / f"bench/results/{dt.date.today().isoformat()}-cpu.json")
+    atomic_write.refuse_existing(out_path, args.force)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     versions = {
         "mojo-dllm": sh(f"git -C {shlex.quote(str(ROOT))} rev-parse --short HEAD")
@@ -462,7 +465,7 @@ def main() -> int:
             config=json.loads(pathlib.Path(args.config).read_text()), reps=args.reps, summary=summary,
             watchdog_kills=kills, runs=results,
         )
-        out_path.write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n")
+        atomic_write.write_atomic(out_path, json.dumps(doc, indent=2, ensure_ascii=False) + "\n")
         return summary
 
     def on_term(signum: int, frame: object) -> None:
