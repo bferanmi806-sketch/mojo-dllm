@@ -20,7 +20,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  hygiene:
+  checks:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -45,6 +45,7 @@ jobs:
         run: uv lock --script mojo-dllm --check
 
       - name: Install markdownlint at its exact version
+        if: ${{ !cancelled() }}
         run: npm install --global markdownlint-cli2@0.23.2
 
       - name: Secrets and employer name in tracked files
@@ -62,7 +63,7 @@ jobs:
 
       - name: markdownlint
         if: ${{ !cancelled() }}
-        run: markdownlint-cli2 "*.md" "docs/**/*.md" "#docs/spec.md"
+        run: markdownlint-cli2 "*.md" "docs/**/*.md" "assets/*.md" ".github/*.md" "#docs/spec.md" "#node_modules"
 
       - name: README benchmark numbers come from bench/results
         if: ${{ !cancelled() }}

@@ -458,6 +458,12 @@ semantic versioning (0.y: minor bumps may break things).
   same suffix; it compared only the first three numbers and reported a mismatch. `nvidia-smi` rows with a non-finite or
   non-positive compute capability or a negative memory figure are treated as unreadable (`inf` used to pass the Ampere
   check). `./mojo-dllm help` lists `XDG_CACHE_HOME`, which the launcher reads (#269).
+- `scripts/ci-local.sh` builds `tests/gpu/test_gpu.mojo` on a machine without a GPU, as CI does, so a compile error in
+  the GPU suite stops the pre-push hook (#265). markdownlint runs over `assets/*.md` and `.github/*.md` in both gates
+  and CI installs it even after an earlier step failed. The `hygiene` job of `ci.yml` is now `checks`, and the secret
+  scan runs on `ubuntu-24.04`. `scripts/check_hygiene.sh` also refuses private key blocks and database URLs that carry
+  a password (TruffleHog's verified-only scan cannot confirm either), and stops with an error when `grep` itself fails
+  instead of reading that as a clean file.
 
 ## [0.1.0] - 2026-10-04
 

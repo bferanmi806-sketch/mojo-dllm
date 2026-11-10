@@ -18,16 +18,19 @@
 set -euo pipefail
 
 PATTERNS=(
-    "OpenAI:sk-[A-Za-z0-9]{40,}"
-    "OpenAI project:sk-proj-[A-Za-z0-9_-]{40,}"
-    "Anthropic:sk-ant-[A-Za-z0-9_-]{40,}"
+    "OpenAI key:sk-[A-Za-z0-9]{40,}"
+    "OpenAI project key:sk-proj-[A-Za-z0-9_-]{40,}"
+    "Anthropic key:sk-ant-[A-Za-z0-9_-]{40,}"
     "GitHub PAT:ghp_[A-Za-z0-9]{36,}"
     "GitHub fine-grained PAT:github_pat_[A-Za-z0-9_]{60,}"
     "Hugging Face token:hf_[A-Za-z0-9]{34,}"
-    "Groq:gsk_[A-Za-z0-9]{40,}"
+    "Groq key:gsk_[A-Za-z0-9]{40,}"
     "AWS access key:AKIA[0-9A-Z]{16}"
     "Google API key:AIza[A-Za-z0-9_-]{35,}"
     "Slack token:xox[baprs]-[A-Za-z0-9-]{20,}"
+    # The two secrets TruffleHog's verified-only scan (secret-scan.yml) cannot confirm and lets pass.
+    "Private key block:-----BEGIN [A-Z ]*PRIVATE KEY-----"
+    "Database URL with a password:(postgres(ql)?|mysql|mariadb|mongodb(\\+srv)?|redis|amqp)://[^[:space:]:/@]+:[^[:space:]@]+@"
 )
 EMPLOYER="$(printf '%s%s' 'entr' 'opia')"
 
@@ -39,10 +42,16 @@ scan() {
     content="$(cat)"
     for entry in "${PATTERNS[@]}"; do
         local provider="${entry%%:*}" regex="${entry#*:}" hits
-        hits="$(grep -IoE "$regex" <<<"$content" || true)"
+        # grep exits 1 for "no match" and 2 for an error (a bad pattern): only the first means clean.
+        rc=0
+        hits="$(grep -IoE -e "$regex" <<<"$content")" || rc=$?
+        if [ "$rc" -gt 1 ]; then
+            echo "check_hygiene: grep failed (exit $rc) on the $provider pattern; nothing was checked" >&2
+            exit 1
+        fi
         while IFS= read -r hit; do
             [ -n "$hit" ] || continue
-            printf 'SECRET: %s key in %s, starts %s..., %d chars\n' "$provider" "$label" "${hit:0:7}" "${#hit}" >&2
+            printf 'SECRET: %s in %s, starts %s..., %d chars\n' "$provider" "$label" "${hit:0:7}" "${#hit}" >&2
             found=1
         done <<<"$hits"
     done
