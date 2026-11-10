@@ -122,3 +122,33 @@ def test_an_angle_bracket_target_is_unwrapped(tree: Path) -> None:
     (tree / "docs/a.md").write_text("x\n")
     p = run(tree)
     assert p.returncode == 1 and "docs/b.md" in p.stderr and "docs/a.md" not in p.stderr.replace("docs/b.md", "")
+
+
+def test_a_longer_fence_is_not_closed_by_a_shorter_one_inside_it(tree: Path) -> None:
+    """A four-backtick block that holds a three-backtick block ends at the four-backtick line, not the inner one."""
+    (tree / "README.md").write_text(
+        "````md\n```\n[ex](gone.md)\n```\n````\n\n[real-broken](missing1.md)\n\ntext\n\n```\ncode\n```\n[also-broken](missing2.md)\n")
+    p = run(tree)
+    assert p.returncode == 1
+    assert "missing1.md" in p.stderr and "missing2.md" in p.stderr and "gone.md" not in p.stderr
+
+
+def test_a_fence_closes_only_on_the_same_character_and_at_least_the_same_length(tree: Path) -> None:
+    (tree / "docs/a.md").write_text("x\n")
+    (tree / "README.md").write_text("~~~~\n```\n[ex](gone1.md)\n~~~\n[ex2](gone2.md)\n~~~~~\n[ok](docs/a.md)\n")
+    p = run(tree)
+    assert p.returncode == 0 and "1 relative links resolve" in p.stdout
+
+
+def test_a_closing_fence_may_be_longer_and_may_not_carry_text(tree: Path) -> None:
+    (tree / "docs/a.md").write_text("x\n")
+    (tree / "README.md").write_text("```\n[ex](gone.md)\n```info\n[still](gone2.md)\n`````\n[ok](docs/a.md)\n")
+    p = run(tree)
+    assert p.returncode == 0 and "1 relative links resolve" in p.stdout
+
+
+def test_a_tilde_line_does_not_close_a_backtick_fence(tree: Path) -> None:
+    (tree / "docs/a.md").write_text("x\n")
+    (tree / "README.md").write_text("```\n[ex](gone.md)\n~~~\n[ex2](gone2.md)\n```\n[ok](docs/a.md)\n")
+    p = run(tree)
+    assert p.returncode == 0 and "1 relative links resolve" in p.stdout

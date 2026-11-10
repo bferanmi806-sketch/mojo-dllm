@@ -20,7 +20,7 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 MD_LINK = re.compile(r"\]\(\s*<?([^)\s>]+)>?(?:\s+(?:\"[^\"]*\"|'[^']*'))?\s*\)")
 MD_DEFINITION = re.compile(r"^ {0,3}\[[^\]]+\]:\s*<?(\S+?)>?(?:\s+(?:\"[^\"]*\"|'[^']*'|\([^)]*\)))?\s*$", re.M)
-FENCE = re.compile(r"^ {0,3}(```|~~~).*?^ {0,3}\1[ \t]*$", re.M | re.S)
+OPEN_FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 HTML_LINK = re.compile(r'(?:href|src)="([^"]+)"')
 
 
@@ -29,9 +29,29 @@ def is_relative(target: str) -> bool:
     return not re.match(r"^[a-z]+:|^#|^/", target)
 
 
+def strip_fences(text: str) -> str:
+    """`text` without its fenced code blocks.
+
+    A fence opens on a line of three or more backticks or tildes and closes on a line of the same character, at
+    least as long, with nothing after it, so a shorter fence inside a longer one belongs to the block. An unclosed
+    fence runs to the end of the text.
+    """
+    kept, fence = [], None
+    for line in text.splitlines(keepends=True):
+        if fence is None:
+            m = OPEN_FENCE.match(line)
+            if m:
+                fence = m.group(1)
+            else:
+                kept.append(line)
+        elif re.match(r"^ {0,3}" + re.escape(fence[0]) + "{" + str(len(fence)) + r",}[ \t]*$", line.rstrip("\r\n")):
+            fence = None
+    return "".join(kept)
+
+
 def markdown_targets(text: str) -> list[str]:
     """Every link target of a Markdown text outside fenced code blocks."""
-    text = FENCE.sub("", text)
+    text = strip_fences(text)
     return MD_LINK.findall(text) + MD_DEFINITION.findall(text)
 
 
